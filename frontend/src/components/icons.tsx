@@ -123,3 +123,10 @@ export const ImageIcon = ({ className = "h-4 w-4" }: IconProps) => (
     <path d="m21 16-5-5-8.5 9" />
   </svg>
 );
+
+export const GlobeIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5S9.7 5.9 12 3.5Z" />
+  </svg>
+);

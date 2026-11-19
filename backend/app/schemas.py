@@ -79,6 +79,20 @@ class ReasoningStep(BaseModel):
     text: str
 
 
+class Source(BaseModel):
+    """도구가 참고한 페이지 (화면의 출처 목록에 보여준다).
+
+    Attributes:
+        title: 페이지 제목.
+        url: 페이지 주소.
+        published_date: 발행일 (``YYYY-MM-DD``). 모르면 ``None``.
+    """
+
+    title: str
+    url: str
+    published_date: str | None = None
+
+
 class ToolStep(BaseModel):
     """실행 단계: 도구 호출 하나.
 
@@ -91,6 +105,7 @@ class ToolStep(BaseModel):
         args: 모델이 채운 인자.
         output: 도구 결과 (길이 제한됨). 끝나지 않았으면 ``None``.
         status: ``running`` / ``done`` / ``error`` / ``interrupted``.
+        sources: 도구가 참고한 페이지 (웹 검색 결과 등). 없으면 빈 목록.
     """
 
     type: Literal["tool"] = "tool"
@@ -101,6 +116,7 @@ class ToolStep(BaseModel):
     args: dict[str, Any]
     output: str | None = None
     status: Literal["running", "done", "error", "interrupted"]
+    sources: list[Source] = []
 
 
 Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]

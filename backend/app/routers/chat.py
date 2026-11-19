@@ -354,7 +354,13 @@ async def stream_and_save(
                 )
             elif isinstance(event, ToolFinished):
                 yield sse(
-                    "tool_end", {"id": event.id, "output": event.output, "status": event.status}
+                    "tool_end",
+                    {
+                        "id": event.id,
+                        "output": event.output,
+                        "status": event.status,
+                        "sources": event.sources,
+                    },
                 )
             elif isinstance(event, Finished):
                 # 저장과 해제는 도중에 연결이 끊겨도 끝까지 실행되게 보호한다.

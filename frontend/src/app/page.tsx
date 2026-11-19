@@ -340,7 +340,8 @@ export default function ChatPage() {
                 { type: "tool", ...tool, output: null, status: "running" },
               ],
             })),
-          onToolEnd: ({ id, output, status }) => updateTool(id, { output, status }),
+          onToolEnd: ({ id, output, status, sources }) =>
+            updateTool(id, { output, status, sources }),
           onDone: ({ stop_reason }) => {
             outcome = "done";
             if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");

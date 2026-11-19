@@ -195,3 +195,43 @@ async def test_error_during_tool_saves_steps_with_error(monkeypatch, capture):
     # 답변 텍스트가 없어도 실행 단계가 있으면 저장한다
     assert content == chat_router.ERROR_SUFFIX.strip()
     assert steps[0]["status"] == "error"
+
+
+async def test_tool_sources_are_sent_and_saved(monkeypatch, capture):
+    sources = [{"title": "기사", "url": "https://news.example/1", "published_date": "2026-11-19"}]
+    _patch_stream(
+        monkeypatch,
+        [
+            ToolStarted("c1", "web_search", {"query": "q"}, LABEL),
+            ToolFinished("c1", "results", "done", sources),
+            TextDelta("답"),
+            Finished("답", "end_turn", "fake"),
+        ],
+    )
+    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    tool_end = next(data for name, data in events if name == "tool_end")
+    assert tool_end["sources"] == sources
+    _, steps = capture[0]
+    assert steps[0]["sources"] == sources
+    # 저장 형식은 API 스키마와 같고, 출처가 없던 예전 단계도 읽힌다
+    message = MessageOut(
+        id=uuid.uuid4(),
+        role="assistant",
+        content="",
+        created_at="2026-01-01T00:00:00Z",
+        steps=steps,
+    )
+    assert message.steps[0].sources[0].url == "https://news.example/1"
+    old = {k: v for k, v in steps[0].items() if k != "sources"}
+    assert (
+        MessageOut(
+            id=uuid.uuid4(),
+            role="assistant",
+            content="",
+            created_at="2026-01-01T00:00:00Z",
+            steps=[old],
+        )
+        .steps[0]
+        .sources
+        == []
+    )

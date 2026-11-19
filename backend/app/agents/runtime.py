@@ -29,6 +29,7 @@ from app.agents.events import (
     default_label,
     reasoning_text,
     tool_output_text,
+    tool_sources,
 )
 from app.agents.tooling import RECURSION_LIMIT
 from app.config import Settings, get_settings
@@ -276,6 +277,7 @@ def _tool_events(
                         id=message.tool_call_id,
                         output=tool_output_text(message.content),
                         status="error" if message.status == "error" else "done",
+                        sources=tool_sources(message.artifact),
                     )
                 )
     return events

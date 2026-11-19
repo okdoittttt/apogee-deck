@@ -8,6 +8,13 @@ export interface ReasoningStep {
   text: string;
 }
 
+/** 도구가 참고한 페이지 (웹 검색 결과 등). 답변 아래 출처 목록에 보여준다. */
+export interface Source {
+  title: string;
+  url: string;
+  published_date: string | null;
+}
+
 /** 실행 단계: 도구 호출 하나. */
 export interface ToolStep {
   type: "tool";
@@ -18,6 +25,7 @@ export interface ToolStep {
   args: Record<string, unknown>;
   output: string | null;
   status: "running" | "done" | "error" | "interrupted";
+  sources?: Source[];
 }
 
 export type Step = ReasoningStep | ToolStep;
@@ -118,6 +126,7 @@ export interface ToolEndEvent {
   id: string;
   output: string;
   status: "done" | "error";
+  sources?: Source[];
 }
 
 export interface StreamHandlers {

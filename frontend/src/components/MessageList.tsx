@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "@/lib/api";
 import { LogoIcon } from "./icons";
+import { Sources } from "./Sources";
 import { Steps } from "./Steps";
 
 function TypingDots() {
@@ -65,6 +66,7 @@ function AssistantMessage({ message, active }: { message: ChatMessage; active: b
           </div>
         )}
         {showDots && <TypingDots />}
+        <Sources steps={steps} />
       </div>
     </div>
   );

@@ -91,11 +91,14 @@ class ToolFinished:
         id: 도구 호출 ID.
         output: 도구 결과 (``MAX_TOOL_OUTPUT_CHARS`` 까지).
         status: ``"done"`` 또는 ``"error"``.
+        sources: 화면에 출처로 보여줄 페이지 (``title``, ``url``, ``published_date``).
+            웹 검색처럼 출처가 있는 도구만 채운다.
     """
 
     id: str
     output: str
     status: Literal["done", "error"]
+    sources: list[dict[str, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +149,36 @@ def reasoning_text(message: BaseMessage) -> str:
     if reasoning := message.additional_kwargs.get("reasoning_content"):
         parts.append(str(reasoning))
     return "".join(parts)
+
+
+def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
+    """도구 결과의 artifact 에서 화면에 보여줄 출처 목록을 꺼낸다.
+
+    출처가 있는 도구는 ``response_format="content_and_artifact"`` 로 선언하고
+    ``{"sources": [{"title": ..., "url": ..., "published_date": ...}, ...]}`` 를 artifact 로 돌려준다.
+    artifact 는 모델 입력에 들어가지 않는다.
+
+    Args:
+        artifact: ``ToolMessage.artifact``.
+
+    Returns:
+        ``http``/``https`` URL 을 가진 출처 목록. 없으면 빈 목록.
+    """
+    if not isinstance(artifact, dict):
+        return []
+    sources = []
+    for item in artifact.get("sources") or []:
+        url = str(item.get("url") or "")
+        if not url.startswith(("http://", "https://")):
+            continue
+        sources.append(
+            {
+                "title": str(item.get("title") or url),
+                "url": url,
+                "published_date": item.get("published_date"),
+            }
+        )
+    return sources
 
 
 def tool_output_text(content: Any) -> str:
@@ -215,6 +248,8 @@ class StepRecorder:
                 if step["type"] == "tool" and step["id"] == event.id:
                     step["output"] = event.output
                     step["status"] = event.status
+                    if event.sources:
+                        step["sources"] = event.sources
 
     def finalize(self, outcome: Literal["finished", "error", "interrupted"]) -> None:
         """응답이 끝났을 때 아직 실행 중으로 남은 도구의 상태를 정리한다.

@@ -10,7 +10,7 @@
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.tools import BaseTool, tool
@@ -48,14 +48,15 @@ def make_web_search(settings: Settings) -> BaseTool:
         ``web_search`` 도구.
     """
 
-    @tool(parse_docstring=True)
+    # 모델에게는 정리한 텍스트를, 화면에는 출처 목록(artifact)을 따로 준다.
+    @tool(parse_docstring=True, response_format="content_and_artifact")
     async def web_search(
         query: str,
         topic: Literal["general", "news"] = "general",
         time_range: Literal["day", "week", "month", "year"] | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         """Search the web and return relevant excerpts with their source URLs.
 
         Use this for anything that may have changed after your training or that you are
@@ -89,7 +90,7 @@ def make_web_search(settings: Settings) -> BaseTool:
         request = search.SearchRequest(query, topic, time_range, start_date, end_date)
         results = await search.search(request, settings)
         today = datetime.now(ZoneInfo(settings.app_timezone)).date()
-        return search.format_results(request, results, today)
+        return search.format_results(request, results, today), search.sources_artifact(results)
 
     return web_search
 

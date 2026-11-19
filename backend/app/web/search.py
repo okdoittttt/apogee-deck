@@ -306,10 +306,10 @@ def format_results(request: SearchRequest, results: list[SearchResult], today: d
         lines.append(_untag(r.content))
         parts.append("\n".join(lines))
     parts.append(f"</{RESULTS_TAG}>")
-    # 모델은 긴 결과를 읽고 나면 system 프롬프트의 출처 지침을 잊기 쉬워서, 결과 끝에 적는다.
+    # 출처 목록은 화면이 검색 결과로 직접 보여준다. 모델이 따로 쓰면 두 번 나오므로 쓰지 않게 한다.
     parts.append(
-        'Answer from these results only, and end your answer with a "Sources" list of '
-        "Markdown links ([title](URL)) for the results you used."
+        "Answer from these results only. Do not write a sources or references list: "
+        "the app shows these results to the user as links."
     )
     return "\n\n".join(parts)
 
@@ -330,3 +330,19 @@ def _age(published: str, today: date) -> str:
     if days == 0:
         return " (today)"
     return f" ({days} day{'s' if days > 1 else ''} ago)"
+
+
+def sources_artifact(results: list[SearchResult]) -> dict[str, Any]:
+    """화면의 출처 목록에 보여줄 검색 결과 (도구의 artifact, 모델 입력에는 들어가지 않는다).
+
+    Args:
+        results: 정리된 검색 결과. 모델에게 준 순서 그대로 쓴다.
+
+    Returns:
+        ``{"sources": [{"title", "url", "published_date"}, ...]}``.
+    """
+    return {
+        "sources": [
+            {"title": r.title, "url": r.url, "published_date": r.published_date} for r in results
+        ]
+    }
