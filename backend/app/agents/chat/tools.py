@@ -17,7 +17,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.events import ToolLabel
 from app.config import Settings
-from app.web import search
+from app.web import fetch, search
 
 
 @tool(parse_docstring=True)
@@ -66,6 +66,9 @@ def make_web_search(settings: Settings) -> BaseTool:
         framework, or API (memory of APIs is often outdated, so check the docs). Do not use
         it for greetings, opinions, or basic concepts you already know well.
 
+        Results contain only short excerpts. To read a result in full, call fetch_url
+        with its URL.
+
         Results are ranked by relevance, not by date, even when a period is set. For
         time-sensitive questions, limit the period; otherwise old pages with matching
         wording (for example yesterday's "tomorrow's weather" article) can rank first.
@@ -95,11 +98,44 @@ def make_web_search(settings: Settings) -> BaseTool:
     return web_search
 
 
+def make_fetch_url(settings: Settings) -> BaseTool:
+    """설정(길이, 타임아웃, 대체용 Tavily 키)을 담은 페이지 읽기 도구를 만든다.
+
+    Args:
+        settings: 앱 설정.
+
+    Returns:
+        ``fetch_url`` 도구.
+    """
+
+    # 모델에게는 본문을, 화면에는 출처(artifact)를 따로 준다.
+    @tool(parse_docstring=True, response_format="content_and_artifact")
+    async def fetch_url(url: str, offset: int = 0) -> tuple[str, dict[str, Any]]:
+        """Read the main text of a web page, without menus or ads, with its title and date.
+
+        Use it when the user gives you a link, when search excerpts are not enough and you
+        need the full content of a result, or when you need exact details from official
+        documentation. Long pages are returned in parts; the result tells you the offset
+        to continue from. Only public web pages can be read.
+
+        Args:
+            url: The full http(s) address of the page.
+            offset: Character position to start from, for reading the next part of a long
+                page (use the value given in the previous result). 0 for the beginning.
+        """
+        page = await fetch.read_page(url, settings)
+        today = datetime.now(ZoneInfo(settings.app_timezone)).date()
+        text = fetch.format_page(page, max(offset, 0), settings.fetch_max_chars, today)
+        return text, fetch.page_artifact(page)
+
+    return fetch_url
+
+
 def build_tools(settings: Settings) -> list[BaseTool]:
     """설정에 따라 채팅 에이전트가 쓸 도구 목록을 만든다.
 
-    키가 필요한 도구는 키가 있을 때만 넣는다. 키 없이 clone 한 경우에도 앱은 그대로 동작하고,
-    해당 도구만 모델에게 보이지 않는다.
+    키가 필요한 도구(웹 검색)는 키가 있을 때만 넣는다. 키 없이 clone 한 경우에도 앱은 그대로
+    동작하고, 해당 도구만 모델에게 보이지 않는다. 페이지 읽기는 키 없이도 동작한다.
 
     Args:
         settings: 앱 설정.
@@ -110,10 +146,13 @@ def build_tools(settings: Settings) -> list[BaseTool]:
     tools: list[BaseTool] = [get_current_time]
     if settings.tavily_api_key:
         tools.append(make_web_search(settings))
+    if settings.enable_fetch_url:
+        tools.append(make_fetch_url(settings))
     return tools
 
 
 TOOL_LABELS: dict[str, ToolLabel] = {
     "get_current_time": ToolLabel(running="시간을 확인하는 중", done="시간 확인함"),
     "web_search": ToolLabel(running="웹 검색 중", done="웹 검색함"),
+    "fetch_url": ToolLabel(running="페이지 읽는 중", done="페이지 읽음"),
 }

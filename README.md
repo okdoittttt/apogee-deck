@@ -235,6 +235,27 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 - 다른 창의 대화는 지금 폴링(`GET /api/conversations/{id}/status`)으로 확인합니다.
 - 다른 창에서 서로 **다른 대화**를 동시에 진행하는 것은 제한하지 않습니다.
 
+### 웹 페이지 읽기 (fetch_url)
+모델이 URL을 주면 페이지 본문을 읽습니다. **키 없이도 동작**합니다.
+
+- 페이지를 직접 받아서 [trafilatura](https://trafilatura.readthedocs.io)로 본문, 제목, 발행일을 뽑습니다. 메뉴, 로그인 안내, 광고가 빠집니다.
+- 직접 받기가 실패하면(봇 차단, 자바스크립트로 그리는 페이지, PDF 등) `TAVILY_API_KEY`가 있을 때 Tavily extract로 다시 시도합니다.
+- 긴 페이지는 `FETCH_MAX_CHARS`(기본 8,000자)씩 나눠 주고, 이어 읽을 `offset`을 알려 줍니다. 같은 페이지는 10분 동안 다시 받지 않습니다.
+- 결과는 `<page_content>` 태그로 감싸 지시가 아닌 참고 자료로 표시하고, 답변 아래 출처 카드로 보여 줍니다.
+
+**내부 주소 접속 방지 (SSRF, `app/web/safe_http.py`)**
+백엔드는 postgres, Langfuse와 같은 Docker 네트워크에 있으므로, 모델이 내부 서비스를 읽지 못하게 막습니다.
+- 접속하는 순간 호스트를 DNS로 풀어서 **모든 IP가 공인 주소일 때만 그 IP로 접속**합니다(루프백, 사설망, link-local과 메타데이터 주소, CGNAT, IPv4를 담은 IPv6 등 차단). 검사한 IP로 접속하므로 DNS rebinding이 통하지 않습니다.
+- 리다이렉트는 직접 따라가며 단계마다 다시 검사합니다(최대 5번). 프록시 환경 변수는 쓰지 않습니다.
+- 내부 주소로 막힌 URL은 Tavily로도 보내지 않습니다. 응답은 `FETCH_MAX_BYTES`(기본 5MB)까지만 받습니다.
+
+| 설정 | 의미 |
+|---|---|
+| `ENABLE_FETCH_URL` | 페이지 읽기 도구 사용 여부 (기본 true) |
+| `FETCH_MAX_CHARS` | 한 번에 보여줄 최대 글자 수 (기본 8000) |
+| `FETCH_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 15초) |
+| `FETCH_MAX_BYTES` | 받을 최대 크기 (기본 5MB) |
+
 ## DB 마이그레이션 (Alembic)
 
 앱 테이블(`conversations`, `messages`, `message_images`)은 Alembic으로 관리합니다.

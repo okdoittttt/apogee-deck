@@ -41,6 +41,11 @@ class Settings(BaseSettings):
             2 크레딧을 쓰고(``basic`` 은 1), 1~2초 더 걸린다.
         web_search_max_results: 웹 검색 한 번에 받을 결과 수.
         web_search_timeout_seconds: 웹 검색 요청 타임아웃(초).
+        enable_fetch_url: 웹 페이지 본문 읽기 도구 사용 여부. 키 없이도 동작한다
+            (Tavily 키가 있으면 직접 받기가 실패했을 때 Tavily 로 다시 시도한다).
+        fetch_max_chars: 페이지 본문을 한 번에 보여줄 최대 글자 수. 긴 페이지는 나눠서 읽는다.
+        fetch_timeout_seconds: 페이지 요청 타임아웃(초).
+        fetch_max_bytes: 받을 페이지의 최대 크기(바이트).
         compact_tool_results: 이전 턴의 도구 결과를 줄여서 모델에 보낼지 여부. 원본은 상태에
             그대로 남는다 (``agents.context.compact_old_tool_results`` 참고).
         context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
@@ -93,6 +98,10 @@ class Settings(BaseSettings):
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
     web_search_max_results: int = 5
     web_search_timeout_seconds: float = 20.0
+    enable_fetch_url: bool = True
+    fetch_max_chars: int = 8000
+    fetch_timeout_seconds: float = 15.0
+    fetch_max_bytes: int = 5_000_000
 
     # --- Context management ---
     compact_tool_results: bool = True
