@@ -7,6 +7,7 @@ import uuid
 
 import anyio
 import httpx
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app import prompts
@@ -17,7 +18,7 @@ from app.agents.context import (
 )
 from app.agents.runtime import Finished, TextDelta
 from app.config import Settings
-from app.llm import build_chat_model
+from app.llm import build_chat_model, describe_error
 from app.prompts import remote
 from app.routers import chat as chat_router
 
@@ -153,6 +154,39 @@ async def test_error_after_partial_text_saves_with_error_mark(monkeypatch):
     events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
     assert events[-1][0] == "error"
     assert saved == ["부분 응답" + chat_router.ERROR_SUFFIX]
+
+
+async def test_error_event_hides_exception_details(monkeypatch, caplog):
+    _patch_stream(monkeypatch, ["boom"])
+    with caplog.at_level("ERROR"):
+        events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    event, data = events[-1]
+    assert event == "error"
+    # 예외 타입과 원문은 화면에 보내지 않는다.
+    assert "RuntimeError" not in data["message"]
+    assert "model crashed" not in data["message"]
+    # 같은 오류 ID 로 로그에서 원문을 찾을 수 있다.
+    assert data["error_id"] in data["message"]
+    record = next(r for r in caplog.records if data["error_id"] in r.getMessage())
+    assert "model crashed" in str(record.exc_info[1])
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ConnectionError("Failed to connect to Ollama"), "연결할 수 없습니다"),
+        (httpx.ConnectError("connection refused"), "연결할 수 없습니다"),
+        (httpx.ReadTimeout("timed out"), "시간이 초과"),
+        (TimeoutError(), "시간이 초과"),
+        (RuntimeError("model crashed"), None),
+    ],
+)
+def test_describe_error_maps_actionable_errors(error, expected):
+    message = describe_error(error)
+    if expected is None:
+        assert message is None
+    else:
+        assert expected in message
 
 
 async def test_error_without_text_saves_nothing(monkeypatch):

@@ -24,7 +24,7 @@ from app.agents.events import (
 from app.agents.runtime import stream_reply
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
-from app.llm import model_name
+from app.llm import describe_error, model_name
 from app.models import Conversation, Message, MessageImage
 from app.runs import InMemoryRunRegistry, RunRegistry
 from app.schemas import (
@@ -308,7 +308,8 @@ async def stream_and_save(
     텍스트에 표시를 붙이고, 실행 중이던 도구는 중단/오류로 바꿔 저장해서, 새로고침해도
     화면에 보였던 내용이 남게 한다.
 
-    - 오류: ``error`` 이벤트를 보내고 ``ERROR_SUFFIX`` 를 붙인다.
+    - 오류: ``error`` 이벤트를 보내고 ``ERROR_SUFFIX`` 를 붙인다. 이벤트에는 예외 원문 대신
+      일반 문구와 오류 ID 를 넣고, 원문은 같은 오류 ID 로 로그에 남긴다.
     - 사용자가 중지했거나 연결이 끊김: 요청이 취소되므로 이벤트는 보낼 수 없고
       ``INTERRUPTED_SUFFIX`` 를 붙인다. 취소된 요청 안에서도 저장이 끝나도록 저장을 보호한다.
 
@@ -368,13 +369,16 @@ async def stream_and_save(
                     await run_registry.release(run_id)
                 yield sse("done", {"stop_reason": event.stop_reason, "model": event.model})
     except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
-        logger.exception("Agent run failed")
+        # 예외 원문은 로그에만 남기고, 화면에는 로그에서 찾을 수 있는 오류 ID 를 보낸다.
+        error_id = uuid.uuid4().hex[:8]
+        logger.exception("Agent run failed (error_id=%s)", error_id)
         with anyio.CancelScope(shield=True):
             outcome = "error"
             recorder.finalize("error")
             await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX)
             await run_registry.release(run_id)
-        yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
+        message = describe_error(e) or "응답을 만드는 중 오류가 발생했습니다."
+        yield sse("error", {"message": f"{message} (오류 ID: {error_id})", "error_id": error_id})
     finally:
         # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.
         with anyio.CancelScope(shield=True):

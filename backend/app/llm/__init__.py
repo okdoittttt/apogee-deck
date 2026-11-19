@@ -72,3 +72,39 @@ def model_name(settings: Settings) -> str:
         "anthropic": settings.claude_model,
         "ollama": settings.ollama_model,
     }.get(settings.llm_provider, settings.llm_provider)
+
+
+def describe_error(error: BaseException) -> str | None:
+    """사용자가 직접 조치할 수 있는 LLM 오류를 화면용 문구로 바꾼다.
+
+    예외 원문에는 내부 주소, 모델 이름, provider 응답이 들어 있을 수 있으므로 화면에 그대로
+    보내지 않는다. 여기서 알아보지 못한 오류는 ``None`` 을 돌려주고, 호출하는 쪽이 일반 문구를 쓴다.
+
+    Args:
+        error: LLM 호출 중 발생한 예외.
+
+    Returns:
+        화면에 보여줄 문구. 알아볼 수 없는 오류면 ``None``.
+    """
+    import httpx
+
+    timeouts: tuple[type[BaseException], ...] = (TimeoutError, httpx.TimeoutException)
+    connections: tuple[type[BaseException], ...] = (ConnectionError, httpx.ConnectError)
+    auth: tuple[type[BaseException], ...] = ()
+    try:
+        import anthropic
+
+        # APITimeoutError 는 APIConnectionError 의 하위 클래스라 타임아웃을 먼저 확인한다.
+        timeouts += (anthropic.APITimeoutError,)
+        connections += (anthropic.APIConnectionError,)
+        auth += (anthropic.AuthenticationError,)
+    except ImportError:
+        pass
+
+    if isinstance(error, timeouts):
+        return "LLM 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
+    if isinstance(error, connections):
+        return "LLM 서버에 연결할 수 없습니다. 모델 서버가 실행 중인지 확인해 주세요."
+    if isinstance(error, auth):
+        return "LLM API 키가 올바르지 않습니다. 설정을 확인해 주세요."
+    return None
