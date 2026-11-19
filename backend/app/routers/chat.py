@@ -18,10 +18,21 @@ from app.config import get_settings
 from app.db import SessionDep, SessionLocal
 from app.llm import model_name
 from app.models import Conversation, Message, MessageImage
-from app.schemas import ChatRequest, ConversationDetail, ConversationOut, MessageOut
+from app.runs import InMemoryRunRegistry, RunRegistry
+from app.schemas import (
+    ChatRequest,
+    ConversationDetail,
+    ConversationOut,
+    ConversationStatus,
+    MessageOut,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
+
+# 대화당 응답 생성을 하나로 제한한다 (다른 창에서 같은 대화에 보낸 요청은 거절).
+run_registry: RunRegistry = InMemoryRunRegistry(get_settings().run_stale_seconds)
+BUSY_DETAIL = "이전 응답이 아직 생성 중입니다. 완료된 후 다시 시도해 주세요."
 
 
 def sse(event: str, data: dict[str, Any]) -> str:
@@ -79,7 +90,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
         session: DB 세션.
 
     Returns:
-        대화와 메시지 목록.
+        대화와 메시지 목록, 그리고 응답 생성 중인지 여부.
 
     Raises:
         HTTPException: 대화가 없으면 404.
@@ -109,7 +120,32 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
             )
             for m in conv.messages
         ],
+        running=await run_registry.is_running(str(conv.id)),
     )
+
+
+@router.get("/conversations/{conversation_id}/status", response_model=ConversationStatus)
+async def get_conversation_status(
+    conversation_id: uuid.UUID, session: SessionDep
+) -> ConversationStatus:
+    """대화의 응답 생성 여부를 돌려준다.
+
+    다른 창에서 생성 중인 응답이 끝났는지 화면이 주기적으로 확인할 때 쓴다.
+    메시지를 불러오지 않아서 가볍다.
+
+    Args:
+        conversation_id: 대화 ID.
+        session: DB 세션.
+
+    Returns:
+        실행 상태.
+
+    Raises:
+        HTTPException: 대화가 없으면 404.
+    """
+    if await session.get(Conversation, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationStatus(running=await run_registry.is_running(str(conversation_id)))
 
 
 @router.get("/images/{image_id}")
@@ -149,11 +185,13 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -
         session: DB 세션.
 
     Raises:
-        HTTPException: 대화가 없으면 404.
+        HTTPException: 대화가 없으면 404, 응답 생성 중이면 409.
     """
     conv = await session.get(Conversation, conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    if await run_registry.is_running(str(conversation_id)):
+        raise HTTPException(status_code=409, detail="응답 생성 중인 대화는 삭제할 수 없습니다.")
     await session.delete(conv)
     await session.commit()
     try:
@@ -171,6 +209,9 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     assistant 메시지로 저장한다 (``stream_and_save`` 참고). LLM 에 들어가는 대화 이력은
     checkpointer 가 관리하고, ``messages`` 테이블은 화면 표시용이다.
 
+    같은 대화의 응답이 이미 생성 중이면(다른 창에서 보낸 경우) 메시지를 저장하지 않고
+    409 로 거절한다. 같은 창 안의 추가 질문은 프론트엔드가 대기열로 처리한다.
+
     Args:
         req: 채팅 요청.
         session: DB 세션.
@@ -179,12 +220,13 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
         ``text/event-stream`` 스트리밍 응답.
 
     Raises:
-        HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 대화가 없으면 404.
+        HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 대화가 없으면 404,
+            같은 대화의 응답이 생성 중이면 409.
     """
     if req.images and not get_settings().enable_vision:
         raise HTTPException(status_code=400, detail="현재 모델은 이미지 입력을 지원하지 않습니다.")
 
-    # 1) 대화 조회/생성 + 사용자 메시지(+이미지) 저장
+    # 1) 대화 조회/생성 → 생성 중 표시 (이미 생성 중이면 저장 전에 거절)
     if req.conversation_id:
         conv = await session.get(Conversation, req.conversation_id)
         if conv is None:
@@ -193,22 +235,29 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
         conv = Conversation(title=req.message.strip()[:50] or "이미지")
         session.add(conv)
         await session.flush()
+    if not await run_registry.try_acquire(str(conv.id)):
+        raise HTTPException(status_code=409, detail=BUSY_DETAIL)
 
-    session.add(
-        Message(
-            conversation_id=conv.id,
-            role="user",
-            content=req.message,
-            images=[
-                MessageImage(position=i, mime_type=img.mime_type, data=img.to_bytes())
-                for i, img in enumerate(req.images)
-            ],
+    # 2) 사용자 메시지(+이미지) 저장. 실패하면 생성 중 표시를 되돌린다.
+    try:
+        session.add(
+            Message(
+                conversation_id=conv.id,
+                role="user",
+                content=req.message,
+                images=[
+                    MessageImage(position=i, mime_type=img.mime_type, data=img.to_bytes())
+                    for i, img in enumerate(req.images)
+                ],
+            )
         )
-    )
-    await session.commit()
+        await session.commit()
+    except BaseException:
+        await run_registry.release(str(conv.id))
+        raise
     images = [(img.mime_type, img.data) for img in req.images]
 
-    # 2) 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장
+    # 3) 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장, 생성 중 표시 해제
     return StreamingResponse(
         stream_and_save(conv.id, req.message, images),
         media_type="text/event-stream",
@@ -247,37 +296,53 @@ async def stream_and_save(
     - 사용자가 중지했거나 연결이 끊김: 요청이 취소되므로 이벤트는 보낼 수 없고
       ``INTERRUPTED_SUFFIX`` 를 붙인다. 취소된 요청 안에서도 저장이 끝나도록 저장을 보호한다.
 
+    응답이 진행되는 동안 생성 중 표시를 갱신하고, ``done`` / ``error`` 이벤트를 보내기
+    **직전에** 해제한다. 이벤트를 받은 화면이 대기 메시지를 바로 보내도 거절되지 않게 하기 위해서다.
+    중단된 경우에는 정리 단계에서 해제한다.
+
     Args:
-        conversation_id: 대화 ID.
+        conversation_id: 대화 ID. 호출 전에 ``run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
         text: 사용자 메시지 텍스트.
         images: ``(mime_type, base64)`` 목록.
 
     Yields:
         SSE 이벤트 문자열 (``meta`` → ``delta``... → ``done`` 또는 ``error``).
     """
+    run_id = str(conversation_id)
     shown: list[str] = []
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
-    yield sse("meta", {"conversation_id": str(conversation_id)})
     try:
-        async for chunk in stream_reply(str(conversation_id), text, images):
+        yield sse("meta", {"conversation_id": run_id})
+        async for chunk in stream_reply(run_id, text, images):
             if isinstance(chunk, TextDelta):
                 shown.append(chunk.text)
+                await run_registry.touch(run_id)
                 yield sse("delta", {"text": chunk.text})
             elif isinstance(chunk, Finished):
                 outcome = "finished"
                 if chunk.text:
                     await save_assistant_message(conversation_id, chunk.text)
+                await run_registry.release(run_id)
                 yield sse("done", {"stop_reason": chunk.stop_reason, "model": chunk.model})
     except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
         outcome = "error"
         logger.exception("Agent run failed")
+        await _save_partial(conversation_id, shown, ERROR_SUFFIX)
+        await run_registry.release(run_id)
         yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
     finally:
-        if outcome != "finished" and shown:
-            suffix = ERROR_SUFFIX if outcome == "error" else INTERRUPTED_SUFFIX
-            # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 저장 중 await 도 취소된다.
+        if outcome == "interrupted":
+            # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.
             with anyio.CancelScope(shield=True):
-                try:
-                    await save_assistant_message(conversation_id, "".join(shown) + suffix)
-                except Exception:
-                    logger.exception("failed to save partial reply for %s", conversation_id)
+                await _save_partial(conversation_id, shown, INTERRUPTED_SUFFIX)
+                await run_registry.release(run_id)
+
+
+async def _save_partial(conversation_id: uuid.UUID, shown: list[str], suffix: str) -> None:
+    """끝까지 오지 못한 응답을 표시와 함께 저장한다. 보여준 텍스트가 없으면 저장하지 않는다."""
+    if not shown:
+        return
+    try:
+        await save_assistant_message(conversation_id, "".join(shown) + suffix)
+    except Exception:
+        logger.exception("failed to save partial reply for %s", conversation_id)

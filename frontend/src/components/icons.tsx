@@ -62,6 +62,27 @@ export const CloseIcon = ({ className = "h-3 w-3" }: IconProps) => (
   </svg>
 );
 
+export const InfoIcon = ({ className = "h-4 w-4" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 11v5M12 8h.01" />
+  </svg>
+);
+
+export const WarningIcon = ({ className = "h-4 w-4" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden>
+    <path d="M10.3 4.1a2 2 0 0 1 3.4 0l7.6 13.2A2 2 0 0 1 19.6 20H4.4a2 2 0 0 1-1.7-2.7Z" fill="currentColor" />
+    <path d="M12 9.5v4M12 16.5h.01" stroke="#1c1b19" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
+export const ClockIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5V12l3 2" />
+  </svg>
+);
+
 export const ImageIcon =({ className = "h-4 w-4" }: IconProps) => (
   <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
     <rect x="3" y="4" width="18" height="16" rx="3" />

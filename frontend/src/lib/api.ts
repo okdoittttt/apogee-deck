@@ -30,12 +30,15 @@ export async function listConversations(): Promise<Conversation[]> {
   return res.json();
 }
 
-export async function getConversation(
-  id: string,
-): Promise<Conversation & { messages: ChatMessage[] }> {
+export interface ConversationDetail extends Conversation {
+  messages: ChatMessage[];
+  running: boolean; // 이 대화의 응답을 생성 중인지 (다른 창일 수 있음)
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
   const res = await fetch(`${API_URL}/api/conversations/${id}`);
   if (!res.ok) throw new Error(`Failed to load conversation (${res.status})`);
-  const data: Conversation & { messages: MessageOut[] } = await res.json();
+  const data: Conversation & { messages: MessageOut[]; running: boolean } = await res.json();
   return {
     ...data,
     messages: data.messages.map((m) => ({
@@ -52,8 +55,26 @@ export interface ImageInput {
   data: string; // base64
 }
 
+/** 대화의 응답 생성 여부. 다른 창의 응답이 끝났는지 주기적으로 확인할 때 쓴다. */
+export async function getConversationStatus(id: string): Promise<{ running: boolean }> {
+  const res = await fetch(`${API_URL}/api/conversations/${id}/status`);
+  if (!res.ok) throw new Error(`Failed to load status (${res.status})`);
+  return res.json();
+}
+
+async function errorDetail(res: Response): Promise<string> {
+  try {
+    const err = await res.json();
+    return typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
+  } catch {
+    return "";
+  }
+}
+
+/** 대화를 삭제한다. 응답 생성 중이면 서버가 409 로 거절하며, 그 이유를 담아 예외를 던진다. */
 export async function deleteConversation(id: string): Promise<void> {
-  await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE" });
+  const res = await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
 }
 
 // 응답이 끝까지 오지 못했을 때 붙이는 표시. 백엔드(routers/chat.py)가 저장하는 문구와 같다.
@@ -66,6 +87,8 @@ export interface StreamHandlers {
   onDelta?: (text: string) => void;
   onDone?: (data: { stop_reason: string | null; model: string }) => void;
   onError?: (message: string) => void;
+  /** 같은 대화의 응답이 다른 창에서 생성 중이라 거절됨 (409). 메시지는 저장되지 않았다. */
+  onBusy?: (detail: string) => void;
 }
 
 /** POST /api/chat 의 SSE 응답을 읽어 이벤트별 핸들러를 호출한다. */
@@ -81,11 +104,11 @@ export async function streamChat(
     signal,
   });
   if (!res.ok || !res.body) {
-    let detail = "";
-    try {
-      const err = await res.json();
-      detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
-    } catch {}
+    const detail = await errorDetail(res);
+    if (res.status === 409) {
+      handlers.onBusy?.(detail);
+      return;
+    }
     handlers.onError?.(`요청 실패 (${res.status})${detail ? `: ${detail}` : ""}`);
     return;
   }

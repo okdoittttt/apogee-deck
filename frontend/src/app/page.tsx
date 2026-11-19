@@ -6,6 +6,12 @@ import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
 import { Sidebar } from "@/components/Sidebar";
 import {
+  type QueuedMessage,
+  QueuedMessageBubble,
+  RemoteRunningNotice,
+} from "@/components/StatusNotices";
+import { Toast } from "@/components/Toast";
+import {
   type AppInfo,
   type ChatMessage,
   type Conversation,
@@ -14,6 +20,7 @@ import {
   NO_REPLY_TEXT,
   deleteConversation,
   getConversation,
+  getConversationStatus,
   getInfo,
   listConversations,
   streamChat,
@@ -21,6 +28,16 @@ import {
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
 
 const SIDEBAR_KEY = "sidebar-open";
+const STATUS_POLL_MS = 2000;
+// 중지 직후 서버가 정리(부분 응답 저장, 생성 중 표시 해제)를 끝낼 때까지 기다리는 간격과 한도
+const IDLE_POLL_MS = 150;
+const IDLE_WAIT_MAX_MS = 10000;
+const QUEUE_FULL_TEXT = "응답 생성 중에는 메시지를 1개까지만 대기열에 넣을 수 있습니다.";
+const QUEUE_PENDING_TEXT = "대기 메시지를 먼저 보내거나 삭제해 주세요.";
+const NAV_BLOCKED_TEXT = "응답과 대기 메시지가 모두 끝난 뒤에 이동할 수 있습니다.";
+const REMOTE_BUSY_TEXT = "이전 응답이 아직 생성 중입니다. 완료된 후 다시 시도해 주세요.";
+
+type Outcome = "done" | "error" | "aborted" | "ended" | "busy";
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -43,10 +60,33 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
   const [hello, setHello] = useState("무엇을 도와드릴까요?");
+  // 같은 창: 응답 생성 중 입력한 메시지 (최대 1개). 오류가 나면 자동 전송을 멈춘다.
+  const [queued, setQueuedState] = useState<QueuedMessage | null>(null);
+  const [queuePaused, setQueuePaused] = useState(false);
+  // 다른 창에서 이 대화의 응답을 생성 중인지
+  const [remoteRunning, setRemoteRunning] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const closeToast = useCallback(() => setToast(null), []);
+
+  // 응답이 끝난 뒤 대기 메시지를 자동 전송할 때 최신 값을 읽기 위한 ref.
+  // (state 를 그대로 읽으면 이전 렌더의 값이라, 새 대화의 ID 가 없는 것으로 보여 대화가 하나 더 생긴다)
+  const conversationIdRef = useRef<string | null>(null);
+  const queuedRef = useRef<QueuedMessage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  function setActiveConversation(id: string | null) {
+    conversationIdRef.current = id;
+    setConversationId(id);
+  }
+
+  function setQueued(message: QueuedMessage | null) {
+    queuedRef.current = message;
+    setQueuedState(message);
+    if (!message) setQueuePaused(false);
+  }
 
   const refreshConversations = useCallback(() => {
     listConversations()
@@ -99,7 +139,27 @@ export default function ChatPage() {
     const behavior = jumpToBottomRef.current ? "auto" : "smooth";
     jumpToBottomRef.current = false;
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
-  }, [messages]);
+  }, [messages, queued, remoteRunning]);
+
+  // 다른 창의 응답이 끝날 때까지 주기적으로 확인하고, 끝나면 대화를 다시 불러온다.
+  useEffect(() => {
+    if (!remoteRunning || !conversationId) return;
+    const id = conversationId;
+    const timer = setInterval(async () => {
+      try {
+        const { running } = await getConversationStatus(id);
+        if (running || conversationIdRef.current !== id) return;
+        const conv = await getConversation(id);
+        if (conversationIdRef.current !== id) return;
+        jumpToBottomRef.current = true;
+        setMessages(conv.messages);
+        setRemoteRunning(conv.running);
+      } catch {
+        setRemoteRunning(false); // 대화가 삭제됨 등
+      }
+    }, STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [remoteRunning, conversationId]);
 
   function toggleSidebar(open: boolean) {
     setSidebarOpen(open);
@@ -124,14 +184,24 @@ export default function ChatPage() {
     }
   }
 
+  /** 응답 생성 중이거나 대기 메시지가 있으면 다른 대화로 이동하지 않는다. */
+  function navigationBlocked(): boolean {
+    if (streaming || queuedRef.current) {
+      setToast(NAV_BLOCKED_TEXT);
+      return true;
+    }
+    return false;
+  }
+
   async function openConversation(id: string) {
-    if (streaming) return;
+    if (navigationBlocked()) return;
     setError(null);
     try {
       const conv = await getConversation(id);
       jumpToBottomRef.current = true;
-      setConversationId(conv.id);
+      setActiveConversation(conv.id);
       setMessages(conv.messages);
+      setRemoteRunning(conv.running);
       setAttachments([]);
       if (isMobile) setSidebarOpen(false);
     } catch (e) {
@@ -140,8 +210,9 @@ export default function ChatPage() {
   }
 
   function newConversation() {
-    if (streaming) return;
-    setConversationId(null);
+    if (navigationBlocked()) return;
+    setActiveConversation(null);
+    setRemoteRunning(false);
     setMessages([]);
     setAttachments([]);
     setInput("");
@@ -151,30 +222,65 @@ export default function ChatPage() {
   }
 
   async function removeConversation(id: string) {
-    await deleteConversation(id);
-    if (id === conversationId) newConversation();
+    if (id === conversationIdRef.current && (streaming || queuedRef.current)) {
+      setToast(NAV_BLOCKED_TEXT);
+      return;
+    }
+    try {
+      await deleteConversation(id);
+    } catch (e) {
+      setToast((e as Error).message); // 다른 창에서 응답 생성 중이면 서버가 거절
+      return;
+    }
+    if (id === conversationIdRef.current) newConversation();
     refreshConversations();
   }
 
-  async function send() {
+  /**
+   * 입력창의 메시지를 처리한다.
+   * - 다른 창에서 응답 생성 중: 보내지 않고 안내
+   * - 이 창에서 응답 생성 중: 대기열에 넣음 (1개까지, 그 이상은 거절)
+   * - 그 외: 바로 전송
+   */
+  function submit() {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || streaming) return;
-
-    const sending = attachments;
+    if (!text && attachments.length === 0) return;
+    if (remoteRunning) {
+      setToast(REMOTE_BUSY_TEXT);
+      return;
+    }
+    if (queuedRef.current) {
+      setToast(streaming ? QUEUE_FULL_TEXT : QUEUE_PENDING_TEXT);
+      return;
+    }
+    const message: QueuedMessage = { id: crypto.randomUUID(), text, attachments };
     setInput("");
     setAttachments([]);
+    if (streaming) {
+      setQueued(message);
+    } else {
+      void runSend(message);
+    }
+  }
+
+  /** 대기 메시지를 지금 보낸다 (오류로 자동 전송이 멈췄을 때). */
+  function sendQueuedNow() {
+    const next = queuedRef.current;
+    if (!next || streaming) return;
+    setQueued(null);
+    void runSend(next);
+  }
+
+  async function runSend(message: QueuedMessage) {
+    const { text, attachments: sending } = message;
     setError(null);
     setStreaming(true);
 
+    const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
     setMessages((prev) => [
       ...prev,
-      {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: text,
-        images: sending.map((a) => a.previewUrl),
-      },
+      { id: userId, role: "user", content: text, images: sending.map((a) => a.previewUrl) },
       { id: assistantId, role: "assistant", content: "" },
     ]);
 
@@ -185,28 +291,38 @@ export default function ChatPage() {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const isNew = conversationId === null;
+    const isNew = conversationIdRef.current === null;
     // 응답이 어떻게 끝났는지. done 이벤트 없이 스트림이 닫히면(연결 끊김) "ended".
-    let outcome: "done" | "error" | "aborted" | "ended" = "ended";
+    // 콜백 안에서 바뀌므로 TS 가 "ended" 로만 좁히지 않게 타입을 명시한다.
+    let outcome = "ended" as Outcome;
 
     try {
       await streamChat(
         {
-          conversation_id: conversationId,
+          conversation_id: conversationIdRef.current,
           message: text,
           images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
         },
         {
-          onMeta: ({ conversation_id }) => setConversationId(conversation_id),
+          onMeta: ({ conversation_id }) => setActiveConversation(conversation_id),
           onDelta: appendToAssistant,
           onDone: ({ stop_reason }) => {
             outcome = "done";
             if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
             if (stop_reason === "max_tokens") appendToAssistant("\n\n_(응답이 길어 잘렸습니다.)_");
           },
-          onError: (message) => {
+          onError: (msg) => {
             outcome = "error";
-            setError(message);
+            setError(msg);
+          },
+          onBusy: (detail) => {
+            // 다른 창에서 생성 중이라 거절됨: 메시지는 저장되지 않았으니 화면에서 되돌린다.
+            outcome = "busy";
+            setMessages((prev) => prev.filter((m) => m.id !== userId && m.id !== assistantId));
+            setInput((prev) => prev || text);
+            setAttachments((prev) => (prev.length ? prev : sending));
+            setRemoteRunning(true);
+            setToast(detail || REMOTE_BUSY_TEXT);
           },
         },
         controller.signal,
@@ -219,15 +335,51 @@ export default function ChatPage() {
         setError(String(e));
       }
     } finally {
-      finishAssistantMessage(assistantId, outcome);
+      if (outcome !== "busy") finishAssistantMessage(assistantId, outcome);
       setStreaming(false);
       abortRef.current = null;
       if (isNew) refreshConversations();
     }
+
+    // 대기 메시지 처리: 정상 종료·중지면 바로 이어서 보내고, 오류면 멈추고 버튼을 보여준다.
+    if (!queuedRef.current) return;
+    if (outcome === "error" || outcome === "busy") {
+      setQueuePaused(true);
+      return;
+    }
+    if (outcome !== "done" && !(await waitUntilIdle(conversationIdRef.current))) {
+      setQueuePaused(true);
+      setToast("이전 응답의 정리가 늦어지고 있습니다. 잠시 후 대기 메시지를 보내 주세요.");
+      return;
+    }
+    const next = queuedRef.current; // 기다리는 동안 사용자가 지웠을 수 있다
+    if (!next) return;
+    setQueued(null);
+    void runSend(next);
+  }
+
+  /**
+   * 중지하거나 연결이 끊긴 직후, 서버가 이전 응답을 정리할 때까지 기다린다.
+   * 서버는 연결이 끊긴 것을 알아챈 뒤 부분 응답을 저장하고 생성 중 표시를 해제하는데,
+   * 그 전에 다음 메시지를 보내면 "다른 창의 요청"으로 거절되고 저장 순서도 뒤바뀐다.
+   * (정상 종료는 서버가 done 을 보내기 전에 해제하므로 기다릴 필요가 없다.)
+   */
+  async function waitUntilIdle(id: string | null): Promise<boolean> {
+    if (!id) return true; // 대화가 만들어지기 전에 중지됨
+    const deadline = Date.now() + IDLE_WAIT_MAX_MS;
+    while (Date.now() < deadline) {
+      try {
+        if (!(await getConversationStatus(id)).running) return true;
+      } catch {
+        return true; // 대화가 없으면 기다릴 것도 없다
+      }
+      await new Promise((r) => setTimeout(r, IDLE_POLL_MS));
+    }
+    return false;
   }
 
   /** 응답 자리를 결과에 맞게 정리한다. 비어 있는 채로 "생각 중" 표시가 남지 않게 한다. */
-  function finishAssistantMessage(id: string, outcome: "done" | "error" | "aborted" | "ended") {
+  function finishAssistantMessage(id: string, outcome: Exclude<Outcome, "busy">) {
     setMessages((prev) =>
       prev.flatMap((m) => {
         if (m.id !== id) return [m];
@@ -257,13 +409,20 @@ export default function ChatPage() {
       attachments={attachments}
       onAddFiles={addFiles}
       onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
-      onSend={send}
+      onSend={submit}
       onStop={() => abortRef.current?.abort()}
       streaming={streaming}
+      queueFull={queued !== null}
       modelLabel={info?.model}
       visionEnabled={info?.vision ?? true}
       autoFocus={isEmpty}
-      placeholder={isEmpty ? "무엇이든 물어보세요" : "답글 보내기"}
+      placeholder={
+        isEmpty
+          ? "무엇이든 물어보세요"
+          : streaming && !queued
+            ? "응답이 끝나면 보낼 메시지를 입력하세요 (1개까지)"
+            : "답글 보내기"
+      }
     />
   );
 
@@ -372,6 +531,15 @@ export default function ChatPage() {
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
                 <MessageList messages={messages} />
+                {queued && (
+                  <QueuedMessageBubble
+                    message={queued}
+                    paused={queuePaused}
+                    onSendNow={sendQueuedNow}
+                    onRemove={() => setQueued(null)}
+                  />
+                )}
+                {remoteRunning && <RemoteRunningNotice />}
                 <div ref={bottomRef} />
               </div>
             </div>
@@ -385,6 +553,7 @@ export default function ChatPage() {
           </>
         )}
       </main>
+      <Toast message={toast} onClose={closeToast} />
     </div>
   );
 }

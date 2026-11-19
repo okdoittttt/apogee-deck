@@ -13,6 +13,8 @@ interface ComposerProps {
   onSend: () => void;
   onStop: () => void;
   streaming: boolean;
+  /** 대기열이 찼는지 (응답 생성 중에는 메시지 1개까지만 대기열에 넣을 수 있다) */
+  queueFull: boolean;
   modelLabel?: string;
   visionEnabled: boolean;
   autoFocus?: boolean;
@@ -30,6 +32,7 @@ export function Composer({
   onSend,
   onStop,
   streaming,
+  queueFull,
   modelLabel,
   visionEnabled,
   autoFocus,
@@ -37,7 +40,9 @@ export function Composer({
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const canSend = !streaming && (value.trim().length > 0 || attachments.length > 0);
+  const hasContent = value.trim().length > 0 || attachments.length > 0;
+  // 응답 생성 중에도 대기열이 비어 있으면 보낼 수 있다 (응답이 끝나면 전송됨).
+  const canSend = hasContent && !(streaming && queueFull);
 
   // 입력 내용에 맞춰 높이 자동 조절
   useEffect(() => {
@@ -90,7 +95,8 @@ export function Composer({
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
-            if (canSend) onSend();
+            // 대기열이 찼을 때도 부모에게 넘겨서 안내를 띄우게 한다.
+            if (hasContent) onSend();
           }
         }}
         rows={1}
@@ -114,7 +120,9 @@ export function Composer({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={!visionEnabled || streaming || attachments.length >= MAX_IMAGES}
+            disabled={
+              !visionEnabled || attachments.length >= MAX_IMAGES || (streaming && queueFull)
+            }
             className="flex h-8 w-8 items-center justify-center rounded-lg border border-line text-muted hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
             aria-label="이미지 첨부"
             title={
@@ -139,24 +147,25 @@ export function Composer({
               {modelLabel}
             </span>
           )}
-          {streaming ? (
+          {streaming && (
             <button
               type="button"
               onClick={onStop}
-              className="flex h-8 w-8 items-center justify-center rounded-lg bg-fg text-app hover:opacity-85"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-line text-fg hover:bg-hover"
               aria-label="응답 중지"
-              title="중지"
+              title="중지 (대기 메시지가 있으면 바로 보냄)"
             >
               <StopIcon />
             </button>
-          ) : (
+          )}
+          {(!streaming || hasContent) && (
             <button
               type="button"
               onClick={onSend}
               disabled={!canSend}
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-fg text-app hover:opacity-85 disabled:opacity-25"
-              aria-label="전송"
-              title="전송 (Enter)"
+              aria-label={streaming ? "대기열에 추가" : "전송"}
+              title={streaming ? "응답이 끝나면 보내기 (1개까지)" : "전송 (Enter)"}
             >
               <ArrowUpIcon />
             </button>

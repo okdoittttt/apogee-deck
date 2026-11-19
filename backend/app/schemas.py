@@ -106,6 +106,18 @@ class ConversationDetail(ConversationOut):
 
     Attributes:
         messages: 대화의 메시지 (생성 순).
+        running: 이 대화의 응답을 생성 중인지 (다른 창에서 진행 중일 수 있다).
     """
 
     messages: list[MessageOut]
+    running: bool = False
+
+
+class ConversationStatus(BaseModel):
+    """대화의 실행 상태 (다른 창에서 생성 중인 응답이 끝났는지 확인하는 용도).
+
+    Attributes:
+        running: 응답을 생성 중인지.
+    """
+
+    running: bool

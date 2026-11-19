@@ -1,5 +1,6 @@
 """LLM 없이 파이프라인(SSE → LangGraph → checkpointer → Langfuse)을 검증하기 위한 echo 모델."""
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
@@ -15,7 +16,16 @@ class EchoChatModel(BaseChatModel):
     응답에 "모델이 본 사용자 턴 수" 와 "마지막 메시지의 이미지 수" 를 넣어서,
     checkpointer 의 대화 기억, 대화 잘라내기, 이미지 전달을 LLM 없이 확인할 수 있다.
     예: ``[echo · turn 2] 안녕 (+1 image)``.
+
+    마지막 사용자 메시지에 ``FAIL_MARKER`` 가 있으면 응답 도중 오류를 낸다 (오류 처리 테스트용).
+
+    Attributes:
+        stream_delay_seconds: 스트리밍 시 단어 하나마다 기다리는 시간. "응답 생성 중" 상황을
+            재현할 때 쓴다.
     """
+
+    FAIL_MARKER: str = "[[fail]]"
+    stream_delay_seconds: float = 0.0
 
     @property
     def _llm_type(self) -> str:
@@ -64,7 +74,10 @@ class EchoChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        for word in self._reply(messages).split(" "):
+        reply = self._reply(messages)
+        for i, word in enumerate(reply.split(" ")):
+            if i == 2 and self.FAIL_MARKER in reply:
+                raise RuntimeError("fake model failure (FAIL_MARKER)")
             yield ChatGenerationChunk(message=AIMessageChunk(word + " "))
         yield ChatGenerationChunk(
             message=AIMessageChunk("", response_metadata={"stop_reason": "end_turn"})
@@ -78,6 +91,8 @@ class EchoChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         for chunk in self._stream(messages, stop, **kwargs):
+            if self.stream_delay_seconds:
+                await asyncio.sleep(self.stream_delay_seconds)
             if run_manager:
                 await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
             yield chunk

@@ -52,7 +52,7 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
     if settings.llm_provider == "fake":
         from app.llm.fake import EchoChatModel
 
-        return EchoChatModel()
+        return EchoChatModel(stream_delay_seconds=settings.fake_stream_delay_seconds)
 
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider}")
 

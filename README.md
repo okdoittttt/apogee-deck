@@ -174,6 +174,25 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
   이후 sync를 실행해도 최신 버전과 내용이 같으면 아무것도 바꾸지 않으므로 롤백 상태가 유지됩니다.
 - Langfuse 화면에서 프롬프트를 직접 고치는 것은 실험용으로만 쓰세요. 변수 구성이 코드와 다르면 그 버전은 쓰지 않고 로컬 파일을 사용합니다.
 
+## 동시 요청 처리
+
+한 대화에서는 응답을 하나씩만 생성합니다. 같은 대화의 응답이 두 개 동시에 생성되면 대화 상태가
+갈라져 한쪽 대화가 모델의 기억에서 사라지기 때문입니다.
+
+| 상황 | 동작 |
+|---|---|
+| 같은 창에서 응답 생성 중 입력 | **대기열**에 넣음 (1개까지, 그 이상은 거절). 응답이 끝나면 자동 전송 |
+| 응답 중 "중지" | 서버 정리가 끝나면 대기 메시지를 바로 전송 |
+| 응답 중 오류 | 자동 전송을 멈추고 "대기 메시지 보내기" 버튼 표시 |
+| 다른 창에서 같은 대화에 입력 | 서버가 **409로 거절**. 입력 내용은 입력창에 남고, 안내 상자 표시 후 끝나면 자동 갱신 |
+| 생성 중인 대화 삭제 | 409로 거절 |
+| 응답 중 / 대기 메시지가 있을 때 다른 대화로 이동 | 막음 |
+
+- 서버는 대화별 "생성 중" 상태를 `app/runs.py`에서 관리합니다. 지금은 메모리에 두고(백엔드 1개 기준),
+  여러 프로세스로 늘리면 같은 인터페이스로 Redis 구현을 만들어 바꿉니다.
+- 다른 창의 대화는 지금 폴링(`GET /api/conversations/{id}/status`)으로 확인합니다.
+- 다른 창에서 서로 **다른 대화**를 동시에 진행하는 것은 제한하지 않습니다.
+
 ## DB 마이그레이션 (Alembic)
 
 앱 테이블(`conversations`, `messages`, `message_images`)은 Alembic으로 관리합니다.
@@ -224,10 +243,11 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 
 | Method | Path | 설명 |
 |---|---|---|
-| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}]}` → SSE 이벤트 `meta` / `delta` / `done` / `error` |
+| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}]}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
 | GET | `/api/conversations` | 대화 목록 |
-| GET | `/api/conversations/{id}` | 대화 + 메시지 |
-| DELETE | `/api/conversations/{id}` | 대화 삭제 |
+| GET | `/api/conversations/{id}` | 대화 + 메시지 + 생성 중 여부 |
+| GET | `/api/conversations/{id}/status` | 생성 중 여부 (다른 창 확인용) |
+| DELETE | `/api/conversations/{id}` | 대화 삭제 (생성 중이면 409) |
 | GET | `/api/images/{id}` | 첨부 이미지 원본 |
 | GET | `/health` | 헬스 체크 |
 
