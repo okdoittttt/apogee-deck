@@ -27,7 +27,7 @@ def test_unexpected_tool_error_is_hidden_and_logged(caplog):
 
 
 def _use_tools(monkeypatch, tools):
-    monkeypatch.setattr(chat_graph, "TOOLS", tools)
+    monkeypatch.setattr(chat_graph, "build_tools", lambda settings: tools)
     graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
     monkeypatch.setitem(runtime._graphs, "chat", graph)
     return graph

@@ -25,7 +25,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from app import prompts
 from app.agents import summary
-from app.agents.chat.tools import TOOLS
+from app.agents.chat.tools import build_tools
 from app.agents.context import make_context_selector, make_token_counter, today
 from app.agents.tooling import handle_tool_error
 from app.config import Settings
@@ -65,7 +65,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
     Returns:
         컴파일된 그래프. ``enable_tools`` 가 꺼져 있으면 ``agent → END`` 만 있다.
     """
-    tools = TOOLS if settings.enable_tools else []
+    tools = build_tools(settings) if settings.enable_tools else []
     model = build_chat_model(settings)
     if tools:
         model = model.bind_tools(tools)

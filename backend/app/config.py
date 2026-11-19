@@ -36,6 +36,11 @@ class Settings(BaseSettings):
             각각 적용된다. 메모리 부족 등으로 Ollama 가 멈췄을 때 요청이 무한히 기다리지 않게 한다.
         fake_stream_delay_seconds: fake 모델이 단어 하나를 내보낼 때마다 기다리는 시간.
             "응답 생성 중" 상황(대기열, 다른 창 거절)을 테스트할 때만 쓴다.
+        tavily_api_key: Tavily API 키. 비어 있으면 웹 검색 도구를 등록하지 않는다.
+        tavily_search_depth: Tavily 검색 깊이. ``advanced`` 는 관련 본문을 더 잘 뽑지만
+            2 크레딧을 쓰고(``basic`` 은 1), 1~2초 더 걸린다.
+        web_search_max_results: 웹 검색 한 번에 받을 결과 수.
+        web_search_timeout_seconds: 웹 검색 요청 타임아웃(초).
         context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
             (``history_token_budget`` 참고).
         run_stale_seconds: 응답 생성 중 표시가 이 시간 동안 갱신되지 않으면 끝난 것으로 본다.
@@ -80,6 +85,12 @@ class Settings(BaseSettings):
 
     # Fake (테스트용)
     fake_stream_delay_seconds: float = 0.0
+
+    # --- Web search ---
+    tavily_api_key: str = ""
+    tavily_search_depth: Literal["basic", "advanced"] = "advanced"
+    web_search_max_results: int = 5
+    web_search_timeout_seconds: float = 20.0
 
     # --- Context management ---
     context_max_tokens: int | None = None
