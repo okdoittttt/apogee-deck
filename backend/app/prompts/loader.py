@@ -80,6 +80,20 @@ class Prompt:
     version: int | None = None
     langfuse_prompt: Any = field(default=None, compare=False, repr=False)
 
+    def trace_metadata(self) -> dict[str, Any]:
+        """이 프롬프트로 모델을 부를 때 실행 config 에 넣을 metadata.
+
+        Langfuse 콜백은 ``langfuse_prompt`` 를 보고 그 아래 LLM 호출(generation)을
+        해당 프롬프트 버전에 연결한다.
+
+        Returns:
+            프롬프트 이름과 출처. Langfuse 에서 가져온 프롬프트면 버전 정보도 포함한다.
+        """
+        metadata: dict[str, Any] = {"prompt_name": self.name, "prompt_source": self.source}
+        if self.langfuse_prompt is not None:
+            metadata |= {"langfuse_prompt": self.langfuse_prompt, "prompt_version": self.version}
+        return metadata
+
 
 def _split_frontmatter(source: str) -> tuple[dict[str, Any], str]:
     """파일 내용을 frontmatter 딕셔너리와 본문으로 나눈다."""

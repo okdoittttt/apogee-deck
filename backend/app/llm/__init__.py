@@ -59,6 +59,32 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider}")
 
 
+SUMMARY_MAX_TOKENS = 1024
+"""대화 요약의 최대 출력 토큰. 요약 프롬프트는 약 250 단어로 요청한다 (한국어는 단어당 토큰이 많다)."""
+
+
+def build_summary_model(settings: Settings) -> BaseChatModel:
+    """대화 요약에 쓸 chat model 을 만든다.
+
+    같은 provider 와 모델을 쓰되, Ollama 는 추론(thinking)을 끄고 출력 길이를 ``SUMMARY_MAX_TOKENS`` 로 정한다.
+    추론 토큰이 시간과 출력 예산을 쓰지 않게 하기 위해서다.
+
+    Args:
+        settings: 앱 설정.
+
+    Returns:
+        도구를 바인딩하지 않은 chat model.
+    """
+    if settings.llm_provider == "ollama":
+        settings = settings.model_copy(
+            update={
+                "ollama_reasoning": False,
+                "ollama_num_predict": SUMMARY_MAX_TOKENS,
+            }
+        )
+    return build_chat_model(settings)
+
+
 def model_name(settings: Settings) -> str:
     """화면과 응답 메타데이터에 표시할 모델 이름.
 

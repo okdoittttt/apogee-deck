@@ -84,23 +84,29 @@ def test_compile_for_langfuse_merges_includes_and_keeps_placeholders():
     assert "{%" not in text
 
 
+def _system(results):
+    """동기화 결과에서 ``chat/system`` 의 결과를 꺼낸다."""
+    return next(r for r in results if r.name == "chat/system")
+
+
 def test_sync_creates_once_then_unchanged(fake_langfuse):
     first = remote.sync_all()
-    assert [(r.name, r.status, r.version) for r in first] == [("chat/system", "created", 1)]
+    assert {r.name for r in first} == set(prompts.list_prompts())
+    assert all((r.status, r.version) == ("created", 1) for r in first)
     created = fake_langfuse.versions["chat/system"][0]
     assert created.labels == ["production"]
     assert created.config["source_hash"] == remote.content_hash(created.prompt)
     assert created.config["git_commit"] == "abc1234"
 
     second = remote.sync_all()
-    assert second[0].status == "unchanged"
+    assert all(r.status == "unchanged" for r in second)
     assert len(fake_langfuse.versions["chat/system"]) == 1
 
 
 def test_sync_creates_new_version_when_content_changes(fake_langfuse, monkeypatch):
     remote.sync_all()
     monkeypatch.setattr(remote, "compile_for_langfuse", lambda name: "Changed. {{today}}")
-    result = remote.sync_all()[0]
+    result = _system(remote.sync_all())
     assert (result.status, result.version) == ("created", 2)
     v1, v2 = fake_langfuse.versions["chat/system"]
     assert v1.labels == [] and v2.labels == ["production"]
@@ -112,7 +118,7 @@ def test_sync_does_not_undo_a_rollback(fake_langfuse, monkeypatch):
     remote.sync_all()
     fake_langfuse.move_label("chat/system", 1, "production")  # Langfuse 화면에서 v1 로 롤백
 
-    result = remote.sync_all()[0]  # 최신(v2)과 내용이 같으므로 아무것도 하지 않는다
+    result = _system(remote.sync_all())  # 최신(v2)과 내용이 같으므로 아무것도 하지 않는다
     assert result.status == "unchanged"
     assert fake_langfuse.versions["chat/system"][0].labels == ["production"]
 
