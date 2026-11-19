@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "qwen3.5:9b"
     ollama_reasoning: bool | None = None
-    ollama_num_ctx: int = 8192
+    ollama_num_ctx: int = 32768
     ollama_num_predict: int = 4096
     ollama_temperature: float | None = None
     ollama_keep_alive: str = "10m"
