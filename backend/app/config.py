@@ -32,6 +32,8 @@ class Settings(BaseSettings):
         ollama_num_predict: 출력(thinking 포함) 최대 토큰.
         ollama_temperature: 샘플링 온도. ``None`` 이면 모델 권장값(Modelfile)을 쓴다.
         ollama_keep_alive: 마지막 요청 후 모델을 메모리에 유지하는 시간 (예: ``"10m"``).
+        ollama_timeout_seconds: Ollama 요청 타임아웃(초). 연결, 응답 대기, 토큰 사이 간격에
+            각각 적용된다. 메모리 부족 등으로 Ollama 가 멈췄을 때 요청이 무한히 기다리지 않게 한다.
         context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
             (``history_token_budget`` 참고).
         database_url: 앱 DB URL (SQLAlchemy asyncpg 형식).
@@ -69,6 +71,7 @@ class Settings(BaseSettings):
     ollama_num_predict: int = 4096
     ollama_temperature: float | None = None
     ollama_keep_alive: str = "10m"
+    ollama_timeout_seconds: float = 300.0
 
     # --- Context management ---
     context_max_tokens: int | None = None

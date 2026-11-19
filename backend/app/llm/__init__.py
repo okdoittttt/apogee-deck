@@ -45,6 +45,8 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
             num_predict=settings.ollama_num_predict,
             temperature=settings.ollama_temperature,
             keep_alive=settings.ollama_keep_alive,
+            # 내부 httpx 클라이언트에 그대로 전달된다 (기본값은 타임아웃 없음).
+            client_kwargs={"timeout": settings.ollama_timeout_seconds},
         )
 
     if settings.llm_provider == "fake":

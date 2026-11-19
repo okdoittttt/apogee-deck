@@ -4,6 +4,7 @@
 가져올 수 없으면 로컬 파일(git 원본)로 렌더링한다. ``PROMPT_SOURCE=file`` 이면 항상 로컬 파일을 쓴다.
 """
 
+import asyncio
 from typing import Any
 
 from app.config import get_settings
@@ -20,6 +21,7 @@ from app.prompts.loader import render as render_file
 __all__ = [
     "Prompt",
     "PromptError",
+    "arender",
     "compile_for_langfuse",
     "list_prompts",
     "render",
@@ -66,3 +68,23 @@ def render(name: str, /, **variables: Any) -> Prompt:
         version=remote_prompt.version,
         langfuse_prompt=remote_prompt,
     )
+
+
+async def arender(name: str, /, **variables: Any) -> Prompt:
+    """``render`` 의 비동기 버전. 그래프 노드 등 비동기 코드에서는 이것을 쓴다.
+
+    Langfuse SDK 의 프롬프트 조회는 동기 HTTP 호출이라, 캐시가 비어 있을 때(기동 직후,
+    Langfuse 장애 후 재시도) 이벤트 루프에서 그대로 부르면 다른 요청과 스트리밍까지 함께
+    멈춘다. 그래서 별도 스레드에서 실행한다.
+
+    Args:
+        name: 프롬프트 이름 (예: ``"chat/system"``).
+        **variables: 템플릿 변수. frontmatter 의 ``variables`` 와 정확히 일치해야 한다.
+
+    Returns:
+        렌더링된 프롬프트 (``render`` 와 같음).
+
+    Raises:
+        PromptError: 이름이 잘못됐거나 변수가 빠지거나 남을 때.
+    """
+    return await asyncio.to_thread(render, name, **variables)

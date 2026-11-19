@@ -62,7 +62,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
         Returns:
             상태에 추가할 모델 응답 메시지.
         """
-        prompt = prompts.render("chat/system", today=today(settings))
+        prompt = await prompts.arender("chat/system", today=today(settings))
         system = SystemMessage(prompt.text)
         metadata: dict[str, Any] = {"prompt_name": prompt.name, "prompt_source": prompt.source}
         if prompt.langfuse_prompt is not None:

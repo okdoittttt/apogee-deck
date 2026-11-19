@@ -9,6 +9,9 @@ import {
   type AppInfo,
   type ChatMessage,
   type Conversation,
+  ERROR_SUFFIX,
+  INTERRUPTED_SUFFIX,
+  NO_REPLY_TEXT,
   deleteConversation,
   getConversation,
   getInfo,
@@ -183,6 +186,8 @@ export default function ChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     const isNew = conversationId === null;
+    // 응답이 어떻게 끝났는지. done 이벤트 없이 스트림이 닫히면(연결 끊김) "ended".
+    let outcome: "done" | "error" | "aborted" | "ended" = "ended";
 
     try {
       await streamChat(
@@ -195,20 +200,51 @@ export default function ChatPage() {
           onMeta: ({ conversation_id }) => setConversationId(conversation_id),
           onDelta: appendToAssistant,
           onDone: ({ stop_reason }) => {
+            outcome = "done";
             if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
             if (stop_reason === "max_tokens") appendToAssistant("\n\n_(응답이 길어 잘렸습니다.)_");
           },
-          onError: setError,
+          onError: (message) => {
+            outcome = "error";
+            setError(message);
+          },
         },
         controller.signal,
       );
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setError(String(e));
+      if ((e as Error).name === "AbortError") {
+        outcome = "aborted";
+      } else {
+        outcome = "error";
+        setError(String(e));
+      }
     } finally {
+      finishAssistantMessage(assistantId, outcome);
       setStreaming(false);
       abortRef.current = null;
       if (isNew) refreshConversations();
     }
+  }
+
+  /** 응답 자리를 결과에 맞게 정리한다. 비어 있는 채로 "생각 중" 표시가 남지 않게 한다. */
+  function finishAssistantMessage(id: string, outcome: "done" | "error" | "aborted" | "ended") {
+    setMessages((prev) =>
+      prev.flatMap((m) => {
+        if (m.id !== id) return [m];
+        const empty = m.content === "";
+        switch (outcome) {
+          case "done":
+            return [empty ? { ...m, content: NO_REPLY_TEXT } : m];
+          case "error":
+            // 받은 텍스트가 없으면 자리를 지운다 (오류 내용은 오류 상자에 표시됨).
+            return empty ? [] : [{ ...m, content: m.content + ERROR_SUFFIX }];
+          default: // 사용자가 중지했거나 연결이 끊김
+            return [
+              { ...m, content: empty ? INTERRUPTED_SUFFIX.trim() : m.content + INTERRUPTED_SUFFIX },
+            ];
+        }
+      }),
+    );
   }
 
   const isEmpty = messages.length === 0;

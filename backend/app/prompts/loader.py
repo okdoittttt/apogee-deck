@@ -55,13 +55,11 @@ class PromptTemplate:
         name: 프롬프트 이름 (예: ``"chat/system"``).
         description: 프롬프트 설명.
         variables: 렌더링에 필요한 변수 이름.
-        metadata: 그 밖의 frontmatter 항목.
     """
 
     name: str
     description: str
     variables: frozenset[str]
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -177,7 +175,6 @@ def load_template(name: str) -> PromptTemplate:
         name=name,
         description=str(header.get("description", "")),
         variables=frozenset(declared),
-        metadata={k: v for k, v in header.items() if k not in ("description", "variables")},
     )
 
 

@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
@@ -166,9 +167,9 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     """사용자 메시지를 저장하고 에이전트 응답을 SSE 로 스트리밍한다.
 
     SSE 이벤트는 ``meta`` (대화 ID) → ``delta`` (텍스트 조각, 여러 번) → ``done``
-    (종료 사유, 모델) 순서이고, 실패하면 ``error`` 를 보낸다. 응답이 끝나면 화면에 보여준
-    텍스트를 assistant 메시지로 저장한다. LLM 에 들어가는 대화 이력은 checkpointer 가
-    관리하고, ``messages`` 테이블은 화면 표시용이다.
+    (종료 사유, 모델) 순서이고, 실패하면 ``error`` 를 보낸다. 화면에 보여준 텍스트는
+    assistant 메시지로 저장한다 (``stream_and_save`` 참고). LLM 에 들어가는 대화 이력은
+    checkpointer 가 관리하고, ``messages`` 테이블은 화면 표시용이다.
 
     Args:
         req: 채팅 요청.
@@ -206,34 +207,77 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     )
     await session.commit()
     images = [(img.mime_type, img.data) for img in req.images]
-    conversation_id = conv.id
 
-    # 2) 에이전트 응답 스트리밍 → 끝나면 assistant 메시지 저장
-    async def event_stream() -> AsyncIterator[str]:
-        yield sse("meta", {"conversation_id": str(conversation_id)})
-        try:
-            async for chunk in stream_reply(str(conversation_id), req.message, images):
-                if isinstance(chunk, TextDelta):
-                    yield sse("delta", {"text": chunk.text})
-                elif isinstance(chunk, Finished):
-                    if chunk.text:
-                        # 응답 스트리밍이 끝난 뒤라 요청 스코프와 별개의 세션을 쓴다.
-                        async with SessionLocal() as s:
-                            s.add(
-                                Message(
-                                    conversation_id=conversation_id,
-                                    role="assistant",
-                                    content=chunk.text,
-                                )
-                            )
-                            await s.commit()
-                    yield sse("done", {"stop_reason": chunk.stop_reason, "model": chunk.model})
-        except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
-            logger.exception("Agent run failed")
-            yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
-
+    # 2) 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장
     return StreamingResponse(
-        event_stream(),
+        stream_and_save(conv.id, req.message, images),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# 응답이 끝까지 오지 못했을 때 저장하는 텍스트 뒤에 붙이는 표시 (프론트엔드와 같은 문구).
+INTERRUPTED_SUFFIX = "\n\n_(응답이 중단되었습니다.)_"
+ERROR_SUFFIX = "\n\n_(오류로 응답이 중단되었습니다.)_"
+
+
+async def save_assistant_message(conversation_id: uuid.UUID, content: str) -> None:
+    """Assistant 메시지를 저장한다.
+
+    응답 스트리밍 도중이나 끝난 뒤에 호출되므로 요청 스코프와 별개의 세션을 쓴다.
+
+    Args:
+        conversation_id: 대화 ID.
+        content: 저장할 텍스트.
+    """
+    async with SessionLocal() as s:
+        s.add(Message(conversation_id=conversation_id, role="assistant", content=content))
+        await s.commit()
+
+
+async def stream_and_save(
+    conversation_id: uuid.UUID, text: str, images: list[tuple[str, str]]
+) -> AsyncIterator[str]:
+    """에이전트 응답을 SSE 이벤트로 스트리밍하고, 화면에 보여준 텍스트를 저장한다.
+
+    끝까지 응답하면 전체 텍스트를 저장한다. 중간에 끝나면 그때까지 보여준 텍스트에
+    표시를 붙여 저장해서, 새로고침해도 화면에 보였던 내용이 남게 한다.
+
+    - 오류: ``error`` 이벤트를 보내고 ``ERROR_SUFFIX`` 를 붙인다.
+    - 사용자가 중지했거나 연결이 끊김: 요청이 취소되므로 이벤트는 보낼 수 없고
+      ``INTERRUPTED_SUFFIX`` 를 붙인다. 취소된 요청 안에서도 저장이 끝나도록 저장을 보호한다.
+
+    Args:
+        conversation_id: 대화 ID.
+        text: 사용자 메시지 텍스트.
+        images: ``(mime_type, base64)`` 목록.
+
+    Yields:
+        SSE 이벤트 문자열 (``meta`` → ``delta``... → ``done`` 또는 ``error``).
+    """
+    shown: list[str] = []
+    outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
+    yield sse("meta", {"conversation_id": str(conversation_id)})
+    try:
+        async for chunk in stream_reply(str(conversation_id), text, images):
+            if isinstance(chunk, TextDelta):
+                shown.append(chunk.text)
+                yield sse("delta", {"text": chunk.text})
+            elif isinstance(chunk, Finished):
+                outcome = "finished"
+                if chunk.text:
+                    await save_assistant_message(conversation_id, chunk.text)
+                yield sse("done", {"stop_reason": chunk.stop_reason, "model": chunk.model})
+    except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
+        outcome = "error"
+        logger.exception("Agent run failed")
+        yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
+    finally:
+        if outcome != "finished" and shown:
+            suffix = ERROR_SUFFIX if outcome == "error" else INTERRUPTED_SUFFIX
+            # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 저장 중 await 도 취소된다.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await save_assistant_message(conversation_id, "".join(shown) + suffix)
+                except Exception:
+                    logger.exception("failed to save partial reply for %s", conversation_id)

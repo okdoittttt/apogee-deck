@@ -38,12 +38,6 @@ export const SearchIcon = ({ className = "h-5 w-5" }: IconProps) => (
   </svg>
 );
 
-export const ChatIcon = ({ className = "h-4 w-4" }: IconProps) => (
-  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
-    <path d="M5 18.5V6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v7a2.5 2.5 0 0 1-2.5 2.5H9l-4 2.5Z" />
-  </svg>
-);
-
 export const TrashIcon = ({ className = "h-4 w-4" }: IconProps) => (
   <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
     <path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l.8 11.2A2 2 0 0 0 9.3 20h5.4a2 2 0 0 0 2-1.8L17.5 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" />
@@ -68,7 +62,7 @@ export const CloseIcon = ({ className = "h-3 w-3" }: IconProps) => (
   </svg>
 );
 
-export const ImageIcon = ({ className = "h-4 w-4" }: IconProps) => (
+export const ImageIcon =({ className = "h-4 w-4" }: IconProps) => (
   <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
     <rect x="3" y="4" width="18" height="16" rx="3" />
     <circle cx="9" cy="10" r="1.6" />

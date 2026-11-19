@@ -73,6 +73,7 @@ tool calling을 지원하지 않는 모델이면 `ENABLE_TOOLS=false`로 설정�
 |---|---|
 | `OLLAMA_NUM_CTX` | 모델이 한 번에 보는 토큰 수(입력+출력). 클수록 KV 캐시 메모리 증가 |
 | `OLLAMA_NUM_PREDICT` | 출력 최대 토큰 (thinking 포함) |
+| `OLLAMA_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 300초). Ollama 가 멈췄을 때 무한히 기다리지 않게 함 |
 | `CONTEXT_MAX_TOKENS` | 모델에 보낼 대화 이력 예산. 기본값 `NUM_CTX - NUM_PREDICT - 256` |
 | `IMAGE_TOKEN_ESTIMATE` | 예산 계산 시 이미지 1장의 토큰 수 (기본 1500) |
 
