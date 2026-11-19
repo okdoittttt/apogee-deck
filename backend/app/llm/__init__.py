@@ -101,13 +101,13 @@ def model_name(settings: Settings) -> str:
 
 
 def describe_error(error: BaseException) -> str | None:
-    """사용자가 직접 조치할 수 있는 LLM 오류를 화면용 문구로 바꾼다.
+    """사용자가 직접 조치할 수 있는 LLM/에이전트 오류를 화면용 문구로 바꾼다.
 
     예외 원문에는 내부 주소, 모델 이름, provider 응답이 들어 있을 수 있으므로 화면에 그대로
     보내지 않는다. 여기서 알아보지 못한 오류는 ``None`` 을 돌려주고, 호출하는 쪽이 일반 문구를 쓴다.
 
     Args:
-        error: LLM 호출 중 발생한 예외.
+        error: LLM 호출이나 에이전트 실행 중 발생한 예외.
 
     Returns:
         화면에 보여줄 문구. 알아볼 수 없는 오류면 ``None``.
@@ -127,6 +127,10 @@ def describe_error(error: BaseException) -> str | None:
     except ImportError:
         pass
 
+    from langgraph.errors import GraphRecursionError
+
+    if isinstance(error, GraphRecursionError):
+        return "도구를 너무 여러 번 호출해서 응답을 중단했습니다. 질문을 나눠서 다시 시도해 주세요."
     if isinstance(error, timeouts):
         return "LLM 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
     if isinstance(error, connections):

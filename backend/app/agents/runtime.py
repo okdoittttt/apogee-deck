@@ -30,6 +30,7 @@ from app.agents.events import (
     reasoning_text,
     tool_output_text,
 )
+from app.agents.tooling import RECURSION_LIMIT
 from app.config import Settings, get_settings
 from app.llm import model_name
 
@@ -214,6 +215,8 @@ async def stream_reply(
         "callbacks": tracing.get_callbacks(),
         "metadata": {"langfuse_session_id": conversation_id, "agent": agent},
         "run_name": agent,
+        # 모델이 도구를 끝없이 부르지 않게 한 턴의 단계 수를 제한한다 (넘으면 GraphRecursionError).
+        "recursion_limit": RECURSION_LIMIT,
     }
 
     shown: list[str] = []  # 화면에 보여준 답변 텍스트 → UI 용 messages 테이블에 그대로 저장

@@ -27,6 +27,7 @@ from app import prompts
 from app.agents import summary
 from app.agents.chat.tools import TOOLS
 from app.agents.context import make_context_selector, make_token_counter, today
+from app.agents.tooling import handle_tool_error
 from app.config import Settings
 from app.llm import build_chat_model, build_summary_model
 
@@ -158,7 +159,8 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
         builder.add_edge(START, AGENT_NODE)
 
     if tools:
-        builder.add_node("tools", ToolNode(tools))
+        # 도구가 실패해도 응답 전체가 실패하지 않게, 예외를 모델이 읽을 오류 결과로 바꾼다.
+        builder.add_node("tools", ToolNode(tools, handle_tool_errors=handle_tool_error))
         builder.add_conditional_edges(AGENT_NODE, tools_condition)
         builder.add_edge("tools", AGENT_NODE)
     else:
