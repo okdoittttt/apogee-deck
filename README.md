@@ -40,6 +40,8 @@ make up                     # 전체 실행 (변경된 이미지는 다시 빌�
 | Langfuse | http://localhost:3100 (`.env`의 `LANGFUSE_INIT_USER_EMAIL` / `PASSWORD`로 로그인) |
 
 포트가 이미 사용 중이면 `.env`의 `*_PORT` 값을 바꾸세요.
+모든 포트는 기본적으로 `127.0.0.1`에만 열려서 이 컴퓨터에서만 접속할 수 있습니다.
+이 앱에는 인증이 없으므로, 다른 기기에서 접속하도록 `BIND_HOST=0.0.0.0`으로 바꿀 때는 `.env.example`의 설명을 먼저 읽으세요.
 Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처리하고 `LANGFUSE_*_KEY`를 비우세요.
 
 ## LLM provider 전환

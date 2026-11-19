@@ -6,7 +6,7 @@ services:
         # 브라우저가 직접 호출하는 백엔드 주소 (빌드 시점에 고정됨)
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:${BACKEND_PORT:-8000}}
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${BIND_HOST:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"  # 기본은 이 Mac 에서만 접속 (BIND_HOST 참고)
     depends_on:
       backend:
         condition: service_healthy
@@ -27,7 +27,7 @@ services:
       # 호스트에서 실행 중인 Ollama / mlx-lm 에 접근 (Linux 에서도 동일 주소 사용)
       - "host.docker.internal:host-gateway"
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BIND_HOST:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"  # 기본은 이 Mac 에서만 접속 (BIND_HOST 참고)
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,7 +62,7 @@ services:
     image: redis:7-alpine
     profiles: ["cache"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"  # 이 Mac 에서만 접속
     volumes:
       - redis_data:/data
     restart: unless-stopped
