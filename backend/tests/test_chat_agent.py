@@ -68,3 +68,23 @@ async def test_trimming_keeps_recent_turns(monkeypatch):
     # checkpointer 에는 6턴이 모두 남아 있다
     state = await graph.aget_state({"configurable": {"thread_id": "t4"}})
     assert len(state.values["messages"]) == 12
+
+
+async def test_delete_thread_removes_agent_state(monkeypatch):
+    saver = InMemorySaver()
+    graph = chat.build_graph(Settings(llm_provider="fake"), saver)
+    monkeypatch.setitem(runtime._graphs, "chat", graph)
+    monkeypatch.setattr(runtime, "_checkpointer", saver)
+    config = {"configurable": {"thread_id": "t5"}}
+
+    await _run("t5", "hi")
+    await _run("keep", "hi")
+    assert (await graph.aget_state(config)).values["messages"]
+
+    await runtime.delete_thread("t5")
+    assert not (await graph.aget_state(config)).values  # 상태가 비었다
+    keep = await graph.aget_state({"configurable": {"thread_id": "keep"}})
+    assert keep.values["messages"]  # 다른 대화는 그대로
+
+    streamed, _ = await _run("t5", "again")  # 같은 id 로 새로 시작하면 1턴부터
+    assert "turn 1" in streamed

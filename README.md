@@ -173,6 +173,28 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
   이후 sync를 실행해도 최신 버전과 내용이 같으면 아무것도 바꾸지 않으므로 롤백 상태가 유지됩니다.
 - Langfuse 화면에서 프롬프트를 직접 고치는 것은 실험용으로만 쓰세요. 변수 구성이 코드와 다르면 그 버전은 쓰지 않고 로컬 파일을 사용합니다.
 
+## DB 마이그레이션 (Alembic)
+
+앱 테이블(`conversations`, `messages`, `message_images`)은 Alembic으로 관리합니다.
+**백엔드가 시작할 때 최신 마이그레이션을 자동으로 적용**하므로, 평소에는 신경 쓸 일이 없습니다.
+
+모델(`backend/app/models.py`)을 바꿨을 때:
+```bash
+make db-revision m="add tags to conversations"   # 변경 내용을 비교해 마이그레이션 파일 생성
+# backend/migrations/versions/ 에 생긴 파일을 확인·수정한 뒤
+make backend                                      # 재시작하면 자동 적용 (또는 make db-upgrade)
+```
+
+| 명령 | 설명 |
+|---|---|
+| `make db-status` | 현재 리비전과 이력 |
+| `make db-check` | 모델과 마이그레이션이 어긋났는지 검사 |
+| `make db-downgrade` | 한 단계 되돌리기 |
+
+- LangGraph checkpointer 테이블(`checkpoints` 등)은 LangGraph가 자체적으로 관리하므로 Alembic 관리 대상에서 제외됩니다.
+- Alembic 도입 전에 만든 DB는 첫 기동 시 기준 리비전(`0001`)으로 표시만 하고 테이블은 건드리지 않습니다.
+- **대화를 삭제하면 그 대화의 checkpointer 데이터도 함께 삭제됩니다.** 삭제 중 실패해서 남은 데이터는 다음 기동 때 정리됩니다.
+
 ## 에이전트 / 도구 추가하기
 
 **도구:** `app/agents/chat/tools.py`에 함수를 추가하고 `TOOLS`에 넣으면 그래프에 자동으로 연결됩니다.
@@ -210,11 +232,9 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 
 ## 다음 단계
 
-- Alembic 마이그레이션 (현재는 시작 시 `create_all`로 테이블 생성)
 - 장기 기억 메모리 (LangGraph Store 등)
 - Langfuse 데이터셋 + 평가(LLM-as-judge)로 프롬프트 버전 간 품질 비교
 - CI에서 main 머지 시 프롬프트 자동 동기화
-- 대화 삭제 시 checkpointer 데이터도 함께 정리
 - 이미지를 object storage(MinIO 등)에 두고 상태에는 참조만 저장 (지금은 checkpoint 에 base64 가 반복 저장됨)
 - 인증, rate limiting
 - Langfuse 활용: 프롬프트 관리, 평가(datasets / LLM-as-judge), 비용 대시보드

@@ -7,6 +7,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.agents import runtime
 from app.agents.runtime import Finished, TextDelta, stream_reply
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
@@ -92,6 +93,11 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep):
         raise HTTPException(status_code=404, detail="Conversation not found")
     await session.delete(conv)
     await session.commit()
+    # 에이전트 상태(checkpoint)도 함께 지운다. 실패해도 다음 기동 시 prune 으로 정리된다.
+    try:
+        await runtime.delete_thread(str(conversation_id))
+    except Exception:
+        logger.exception("failed to delete checkpoint thread %s", conversation_id)
 
 
 @router.post("/chat")

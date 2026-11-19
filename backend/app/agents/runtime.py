@@ -35,11 +35,12 @@ AGENTS: dict[str, AgentSpec] = {
 DEFAULT_AGENT = "chat"
 
 _pool: AsyncConnectionPool | None = None
+_checkpointer: BaseCheckpointSaver | None = None
 _graphs: dict[str, CompiledStateGraph] = {}
 
 
 async def startup() -> None:
-    global _pool
+    global _pool, _checkpointer
     settings = get_settings()
     # 잘못된 프롬프트(빠진 include, 변수 불일치)는 첫 요청이 아니라 기동 시점에 실패시킨다.
     logger.info("prompts ok: %s", prompts.validate_all())
@@ -53,12 +54,34 @@ async def startup() -> None:
         max_size=10,
         open=False,
         kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        # 빌려줄 때 연결을 확인해서, Postgres 재시작 후 끊긴 연결을 자동으로 교체한다.
+        check=AsyncConnectionPool.check_connection,
     )
     await _pool.open()
-    checkpointer = AsyncPostgresSaver(_pool)
-    await checkpointer.setup()  # checkpoint 테이블 생성 (idempotent)
+    _checkpointer = AsyncPostgresSaver(_pool)
+    # checkpoint 테이블은 LangGraph 가 자체 마이그레이션으로 관리한다 (Alembic 관리 대상 아님).
+    await _checkpointer.setup()
     for name, spec in AGENTS.items():
-        _graphs[name] = spec.build_graph(settings, checkpointer)
+        _graphs[name] = spec.build_graph(settings, _checkpointer)
+
+
+async def delete_thread(conversation_id: str) -> None:
+    """대화의 에이전트 상태(checkpoint)를 모두 지운다."""
+    if _checkpointer is None:
+        raise RuntimeError("agent runtime not started")
+    await _checkpointer.adelete_thread(conversation_id)
+
+
+async def prune_orphan_threads(keep: set[str]) -> int:
+    """UI 대화가 없는 checkpoint thread 를 지운다 (삭제 중 실패 등으로 남은 데이터 정리)."""
+    if _pool is None:
+        raise RuntimeError("agent runtime not started")
+    async with _pool.connection() as conn:
+        rows = await (await conn.execute("SELECT DISTINCT thread_id FROM checkpoints")).fetchall()
+    orphans = [r["thread_id"] for r in rows if r["thread_id"] not in keep]
+    for thread_id in orphans:
+        await delete_thread(thread_id)
+    return len(orphans)
 
 
 async def shutdown() -> None:
