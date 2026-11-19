@@ -6,6 +6,10 @@ LangGraph 기반 LLM 에이전트 웹앱 (개인 학습 프로젝트). 구조와
 
 - **push 하지 않는다.** push 는 항상 사용자가 직접 한다. 요청받아도 push 명령을 실행하지 말고 명령어만 안내한다.
 - **commit 은 사용자가 명시적으로 요청할 때만** 한다. 작업이 끝나도 먼저 변경 내역을 보여주고 요청을 기다린다.
+- **commit 메시지는 Conventional Commits 형식, 한국어**로 쓴다: `<type>: <요약>` 한 줄 + 빈 줄 + 본문(무엇을, 왜).
+  type 접두어만 영어로 쓰고 요약과 본문은 한국어로 쓴다.
+  - type: `feat`(기능), `fix`(버그·안정성), `docs`(문서), `refactor`(동작 변화 없는 구조 변경), `test`, `chore`(빌드·설정·의존성), `style`(포맷), `perf`.
+  - 성격이 다른 변경은 커밋을 나눈다. 한 파일에 섞여 있으면 중간 상태를 스테이징해서 나누고, 각 커밋 시점에서 테스트가 통과하는지 확인한다.
 - **commit 메시지에 Claude 트레일러를 넣지 않는다.** `Co-Authored-By: Claude …`, `🤖 Generated with Claude Code` 등 Claude/AI 관련 문구를 메시지 어디에도 넣지 않는다.
 - 이 저장소는 **개인 GitHub 계정 전용**이다. 회사 계정과 섞이면 안 된다.
   - remote 는 SSH 별칭 `git@github.com-okdoittttt:okdoittttt/okdoitttt.git` 만 사용한다 (HTTPS 주소, 다른 별칭 금지).
