@@ -21,7 +21,7 @@ services:
       # Langfuse 가 같은 compose 프로젝트에 있으면 내부 주소로 전송
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       # 프롬프트 동기화 시 Langfuse 버전에 기록할 커밋 (컨테이너엔 .git 이 없음)
-      #   GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d
+      # `make up` / `make backend` 가 자동으로 채운다.
       GIT_COMMIT: ${GIT_COMMIT:-}
     extra_hosts:
       # 호스트에서 실행 중인 Ollama / mlx-lm 에 접근 (Linux 에서도 동일 주소 사용)

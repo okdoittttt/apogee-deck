@@ -17,8 +17,21 @@ LangGraph 기반 LLM 에이전트 웹앱. Docker Compose로 실행합니다.
 
 ```bash
 cp .env.example .env        # LLM_PROVIDER, ANTHROPIC_API_KEY 등 설정
-docker compose up -d --build
+make up                     # 전체 실행 (변경된 이미지는 다시 빌드)
 ```
+
+자주 쓰는 명령은 `Makefile`에 모아 두었습니다. `make`만 입력하면 목록이 나옵니다.
+
+| 명령 | 설명 |
+|---|---|
+| `make up` / `make down` | 전체 실행 / 중지 (데이터 유지) |
+| `make backend` / `make frontend` | 해당 서비스만 다시 빌드·재시작 (코드·프롬프트 수정 후) |
+| `make ps` / `make logs` | 컨테이너 상태 / 백엔드 로그 |
+| `make prompt-sync` / `make prompt-check` | 프롬프트 Langfuse 동기화 / 변경 사항만 확인 |
+| `make test` / `make lint` | 백엔드 테스트 / 린트·빌드 검사 |
+
+`make`는 현재 커밋 해시를 `GIT_COMMIT`으로 자동 전달합니다(커밋 안 된 변경이 있으면 `-dirty`).
+그래서 Langfuse 프롬프트 버전에 어떤 코드에서 나온 버전인지 기록됩니다. `docker compose`를 직접 쓰면 이 값이 비게 되므로 `make`를 쓰세요.
 
 | 서비스 | 주소 |
 |---|---|
@@ -31,7 +44,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 
 ## LLM provider 전환
 
-`.env`의 `LLM_PROVIDER`만 바꾸고 `docker compose up -d backend`를 실행하면 됩니다.
+`.env`의 `LLM_PROVIDER`만 바꾸고 `make backend`를 실행하면 됩니다.
 
 | 값 | 설명 |
 |---|---|
@@ -90,7 +103,7 @@ backend/
 │           ├── graph.py     # LangGraph: agent ⇄ tools
 │           ├── tools.py
 │           └── prompts/system.md
-└── tests/                   # uv run pytest
+└── tests/                   # make test
 ```
 
 **대화 이력 저장 방식 (A안)**
@@ -150,8 +163,8 @@ system.md 수정 ─▶ sync ─▶ Langfuse: chat/system v1 · v2 · v3 (produc
 | `PROMPT_SYNC_ON_STARTUP` | 백엔드 시작 시 자동 동기화 (개발 환경용) |
 
 ```bash
-docker compose exec backend python -m app.prompts.sync            # 동기화
-docker compose exec backend python -m app.prompts.sync --dry-run  # 변경 사항만 확인
+make prompt-sync     # 동기화 (= docker compose exec backend python -m app.prompts.sync)
+make prompt-check    # 변경 사항만 확인 (--dry-run)
 ```
 
 - **include는 합쳐서, 변수는 `{{var}}` 형식으로** 올라갑니다. 그래서 Jinja 문법은 변수 치환과 정적 include만 허용합니다(검증에서 확인).
@@ -181,7 +194,7 @@ TOOLS = [get_current_time, search_docs]
 ## 테스트
 
 ```bash
-cd backend && uv run pytest     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 잘라내기 검증
+make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 잘라내기 검증
 ```
 
 ## API
