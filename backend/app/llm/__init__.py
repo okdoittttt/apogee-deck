@@ -1,4 +1,8 @@
-"""LLM provider 선택. 모든 에이전트가 공용으로 쓴다 (에이전트는 provider 를 모른다)."""
+"""LLM provider 선택.
+
+모든 에이전트가 공용으로 쓴다. 에이전트는 provider 를 모르고 ``build_chat_model`` 이 돌려준
+LangChain chat model 만 사용한다.
+"""
 
 from langchain_core.language_models import BaseChatModel
 
@@ -6,6 +10,17 @@ from app.config import Settings
 
 
 def build_chat_model(settings: Settings) -> BaseChatModel:
+    """설정의 ``llm_provider`` 에 맞는 LangChain chat model 을 만든다.
+
+    Args:
+        settings: 앱 설정.
+
+    Returns:
+        ``ChatAnthropic`` / ``ChatOllama`` / 테스트용 ``EchoChatModel`` 중 하나.
+
+    Raises:
+        ValueError: 알 수 없는 provider 일 때.
+    """
     if settings.llm_provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -41,6 +56,14 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
 
 
 def model_name(settings: Settings) -> str:
+    """화면과 응답 메타데이터에 표시할 모델 이름.
+
+    Args:
+        settings: 앱 설정.
+
+    Returns:
+        Claude/Ollama 는 모델 이름, 그 외(fake)는 provider 이름.
+    """
     return {
         "anthropic": settings.claude_model,
         "ollama": settings.ollama_model,

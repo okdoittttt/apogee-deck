@@ -1,3 +1,5 @@
+"""환경 변수 기반 앱 설정."""
+
 from functools import lru_cache
 from typing import Literal
 
@@ -5,15 +7,52 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """앱 설정. 각 필드는 같은 이름의 대문자 환경 변수(또는 ``.env``)에서 읽는다.
+
+    system 프롬프트는 설정이 아니라 ``app/agents/<에이전트>/prompts/*.md`` 에서 관리한다.
+
+    Attributes:
+        llm_provider: 사용할 LLM. ``anthropic`` | ``ollama`` | ``fake`` (테스트용 echo 모델).
+        app_timezone: 프롬프트에 넣는 "오늘 날짜" 의 기준 시간대.
+        enable_tools: 에이전트 도구 사용 여부. tool calling 을 지원하지 않는 모델이면 끈다.
+        enable_vision: 이미지 입력 허용 여부. 모델이 vision 을 지원해야 한다.
+        image_token_estimate: 컨텍스트 예산 계산 시 이미지 1장을 몇 토큰으로 볼지.
+            프론트엔드가 긴 변 1024px 로 줄여 보내며, 이 크기면 Claude/Qwen 모두 1~1.5K 수준이다.
+        anthropic_api_key: Anthropic API 키.
+        claude_model: Claude 모델 ID.
+        claude_effort: Claude 응답 품질과 비용/지연의 트레이드오프 단계.
+        claude_max_tokens: Claude 출력 최대 토큰.
+        ollama_base_url: Ollama 서버 주소. macOS 에서는 호스트에서 ``ollama serve`` 를 실행하고
+            컨테이너는 ``host.docker.internal`` 로 접근한다.
+        ollama_model: Ollama 모델 이름.
+        ollama_reasoning: thinking 모델이면 ``True`` 로 두어 출력에서 ``<think>`` 를 분리한다.
+            ``None`` 이면 모델 기본 동작.
+        ollama_num_ctx: 모델이 한 번에 보는 토큰 수(입력+출력). 클수록 KV 캐시 메모리가 늘어난다.
+            넘치면 Ollama 가 앞부분을 조용히 잘라내므로 앱에서 먼저 trim 한다.
+        ollama_num_predict: 출력(thinking 포함) 최대 토큰.
+        ollama_temperature: 샘플링 온도. ``None`` 이면 모델 권장값(Modelfile)을 쓴다.
+        ollama_keep_alive: 마지막 요청 후 모델을 메모리에 유지하는 시간 (예: ``"10m"``).
+        context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
+            (``history_token_budget`` 참고).
+        database_url: 앱 DB URL (SQLAlchemy asyncpg 형식).
+        langfuse_public_key: Langfuse public key. 비어 있으면 트레이싱이 꺼진다.
+        langfuse_secret_key: Langfuse secret key.
+        prompt_source: ``file`` 이면 항상 로컬 파일(git 원본), ``langfuse`` 이면 라벨이 붙은
+            Langfuse 버전을 쓰고 실패 시 로컬 파일을 쓴다.
+        prompt_label: 실행 시 가져올 Langfuse 라벨이자, 동기화 시 새 버전에 붙일 라벨.
+        prompt_cache_ttl_seconds: Langfuse 프롬프트 캐시 시간. 만료 후에는 이전 값을 쓰면서
+            백그라운드로 갱신한다.
+        prompt_sync_on_startup: 백엔드 시작 시 git → Langfuse 프롬프트 자동 동기화 (개발 환경용).
+        cors_origins: 허용할 CORS origin (쉼표로 구분).
+    """
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # --- LLM provider ---
+    # --- LLM ---
     llm_provider: Literal["anthropic", "ollama", "fake"] = "anthropic"
-    # system 프롬프트는 app/agents/<에이전트>/prompts/*.md 에서 관리한다.
-    app_timezone: str = "Asia/Seoul"  # 프롬프트의 오늘 날짜 기준
+    app_timezone: str = "Asia/Seoul"
     enable_tools: bool = True
-    enable_vision: bool = True  # 이미지 입력 허용 (모델이 vision 을 지원해야 함)
-    # 컨텍스트 예산 계산 시 이미지 1장을 몇 토큰으로 볼지 (1024px 기준 Claude/Qwen 모두 1~1.5K 수준)
+    enable_vision: bool = True
     image_token_estimate: int = 1500
 
     # Anthropic
@@ -22,64 +61,69 @@ class Settings(BaseSettings):
     claude_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     claude_max_tokens: int = 64000
 
-    # Ollama (macOS: 호스트에서 `ollama serve` 실행 → 컨테이너는 host.docker.internal 로 접근)
+    # Ollama
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "qwen3.5:9b"
-    ollama_reasoning: bool | None = None  # thinking 모델이면 true (출력에서 <think> 분리)
-    # 모델이 한 번에 보는 토큰 수(입력+출력). 클수록 KV 캐시 메모리가 늘어난다.
-    # 넘치면 Ollama 가 앞부분을 조용히 잘라내므로, 앱에서 먼저 trim 한다(context_max_tokens).
+    ollama_reasoning: bool | None = None
     ollama_num_ctx: int = 8192
-    ollama_num_predict: int = 4096  # 출력(thinking 포함) 최대 토큰
-    ollama_temperature: float | None = None  # None 이면 모델 권장값(Modelfile) 사용
-    ollama_keep_alive: str = "10m"  # 마지막 요청 후 모델을 메모리에 유지하는 시간
+    ollama_num_predict: int = 4096
+    ollama_temperature: float | None = None
+    ollama_keep_alive: str = "10m"
 
     # --- Context management ---
-    # 모델에 보낼 대화 이력의 토큰 예산. 비우면 provider 별 기본값:
-    #   ollama    → num_ctx - num_predict - 여유분
-    #   anthropic → trim 안 함 (1M 컨텍스트. 이력을 자르면 캐시/thinking 연속성이 깨짐)
     context_max_tokens: int | None = None
+
+    # --- Database ---
+    database_url: str = "postgresql+asyncpg://agent:agent@postgres:5432/agent"
+
+    # --- Tracing (Langfuse) ---
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+
+    # --- Prompt management ---
+    prompt_source: Literal["file", "langfuse"] = "file"
+    prompt_label: str = "production"
+    prompt_cache_ttl_seconds: int = 60
+    prompt_sync_on_startup: bool = False
+
+    # --- CORS ---
+    cors_origins: str = "http://localhost:3000"
 
     @property
     def history_token_budget(self) -> int | None:
+        """모델에 보낼 대화 이력의 토큰 예산.
+
+        ``context_max_tokens`` 가 있으면 그 값을 쓴다. 없으면 Ollama 는
+        ``num_ctx - num_predict - 256`` 이고, Anthropic 은 trim 하지 않는다(``None``).
+        Claude 는 컨텍스트가 크고, 이력을 자르면 프롬프트 캐시와 thinking 연속성이 깨진다.
+        """
         if self.context_max_tokens is not None:
             return self.context_max_tokens
         if self.llm_provider == "ollama":
             return self.ollama_num_ctx - self.ollama_num_predict - 256
         return None
 
-    # --- Database ---
-    database_url: str = "postgresql+asyncpg://agent:agent@postgres:5432/agent"
-
     @property
     def checkpointer_db_url(self) -> str:
-        # LangGraph Postgres checkpointer 는 psycopg(3) 형식 URL 을 사용
+        """LangGraph Postgres checkpointer 용 DB URL (psycopg 형식)."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
-
-    # --- Tracing (Langfuse). 키가 비어 있으면 트레이싱 비활성화 ---
-    langfuse_public_key: str = ""
-    langfuse_secret_key: str = ""
 
     @property
     def tracing_enabled(self) -> bool:
+        """Langfuse 키가 모두 설정되어 트레이싱을 쓸 수 있는지 여부."""
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
-
-    # --- Prompt management ---
-    # file: 항상 로컬 파일(git 원본) / langfuse: Langfuse 에서 라벨이 붙은 버전 사용, 실패 시 로컬 파일
-    prompt_source: Literal["file", "langfuse"] = "file"
-    prompt_label: str = "production"  # 실행 시 가져올 라벨 = sync 시 새 버전에 붙일 라벨
-    prompt_cache_ttl_seconds: int = (
-        60  # Langfuse 프롬프트 캐시 (만료 후엔 이전 값 쓰며 백그라운드 갱신)
-    )
-    prompt_sync_on_startup: bool = False  # 개발 환경: 백엔드 시작 시 git → Langfuse 자동 동기화
-
-    # --- CORS (comma-separated origins) ---
-    cors_origins: str = "http://localhost:3000"
 
     @property
     def cors_origin_list(self) -> list[str]:
+        """``cors_origins`` 를 리스트로 나눈 값."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache
 def get_settings() -> Settings:
+    """설정 객체를 반환한다. 프로세스당 한 번만 읽고 캐시한다.
+
+    Returns:
+        환경 변수와 ``.env`` 를 읽어 만든 ``Settings``.
+    """
     return Settings()

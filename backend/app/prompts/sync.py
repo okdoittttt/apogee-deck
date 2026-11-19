@@ -1,10 +1,10 @@
-"""git(로컬 파일)의 프롬프트를 Langfuse 로 동기화한다.
+"""git(로컬 파일)의 프롬프트를 Langfuse 로 동기화하는 CLI.
 
-    uv run python -m app.prompts.sync              # .env 의 PROMPT_LABEL(기본 production)로 동기화
-    uv run python -m app.prompts.sync --dry-run    # 무엇이 바뀌는지만 확인
-    uv run python -m app.prompts.sync --label staging
+사용법::
 
-Docker 안에서:  docker compose exec backend python -m app.prompts.sync
+    make prompt-sync     # = python -m app.prompts.sync (.env 의 PROMPT_LABEL, 기본 production)
+    make prompt-check    # = python -m app.prompts.sync --dry-run (무엇이 바뀌는지만 확인)
+    python -m app.prompts.sync --label staging
 """
 
 import argparse
@@ -15,6 +15,14 @@ from app.prompts.remote import sync_all
 
 
 def main() -> int:
+    """프롬프트를 검증한 뒤 Langfuse 로 동기화하고 결과를 출력한다.
+
+    Returns:
+        종료 코드. 하나라도 실패하면 1, 아니면 0.
+
+    Raises:
+        PromptError: 프롬프트 검증에 실패했을 때 (잘못된 프롬프트는 올리지 않는다).
+    """
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
@@ -22,7 +30,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Langfuse 에 쓰지 않고 결과만 출력")
     args = parser.parse_args()
 
-    validate_all()  # 잘못된 프롬프트는 올리지 않는다
+    validate_all()
     results = sync_all(label=args.label, dry_run=args.dry_run)
 
     marks = {"created": "+", "unchanged": "=", "error": "!"}

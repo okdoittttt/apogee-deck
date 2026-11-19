@@ -1,9 +1,12 @@
 """Langfuse 프롬프트 관리 연동.
 
-- fetch(): 실행 중 라벨(production 등)이 붙은 버전을 가져온다. 실패하면 None → 호출부가 로컬 파일 사용.
-- sync_all(): git(로컬 파일)의 프롬프트를 Langfuse 에 버전으로 올린다. 내용이 바뀐 경우에만 새 버전 생성.
+- ``fetch``: 실행 중 라벨(``production`` 등)이 붙은 버전을 가져온다. 실패하면 ``None`` 을
+  돌려주고, 호출하는 쪽이 로컬 파일을 쓴다.
+- ``sync_all``: git(로컬 파일)의 프롬프트를 Langfuse 에 버전으로 올린다. 내용이 바뀐 경우에만
+  새 버전을 만든다.
 
-원본은 git 이다. Langfuse 화면에서의 수정은 실험용으로만 쓰고, 정식 변경은 파일 수정 → sync 순서로 한다.
+원본은 git 이다. Langfuse 화면에서의 수정은 실험용으로만 쓰고, 정식 변경은 파일 수정 → sync
+순서로 한다.
 """
 
 import hashlib
@@ -27,31 +30,43 @@ _last_failure_at = 0.0
 _lock = threading.Lock()
 
 
-def _client():
+def _client() -> Any:
+    """Langfuse 클라이언트 (환경 변수로 설정된 싱글턴)."""
     from langfuse import get_client
 
     return get_client()
 
 
 def _in_cooldown() -> bool:
+    """최근 실패 후 재시도를 멈추는 시간인지 여부."""
     return time.monotonic() - _last_failure_at < _FAILURE_COOLDOWN_SECONDS
 
 
 def _mark_failure() -> None:
+    """가져오기 실패 시각을 기록한다."""
     global _last_failure_at
     with _lock:
         _last_failure_at = time.monotonic()
 
 
 def reset_failure_state() -> None:
+    """실패 기록을 지워 바로 다시 Langfuse 를 쓰게 한다 (동기화 성공 후, 테스트에서 사용)."""
     global _last_failure_at
     _last_failure_at = 0.0
 
 
 def fetch(name: str) -> Any | None:
-    """라벨이 붙은 Langfuse 프롬프트를 가져온다. 사용할 수 없으면 None.
+    """라벨이 붙은 Langfuse 프롬프트를 가져온다.
 
-    SDK 가 cache_ttl 동안 캐시하고, 만료되면 이전 값을 돌려주면서 백그라운드로 갱신한다.
+    SDK 가 ``prompt_cache_ttl_seconds`` 동안 캐시하고, 만료되면 이전 값을 돌려주면서
+    백그라운드로 갱신한다. 실패하면 잠시(``_FAILURE_COOLDOWN_SECONDS``) Langfuse 를 부르지 않는다.
+
+    Args:
+        name: 프롬프트 이름.
+
+    Returns:
+        Langfuse ``TextPromptClient``. 트레이싱이 꺼져 있거나, 가져오지 못했거나,
+        Langfuse 버전의 변수 구성이 로컬 템플릿과 다르면 ``None``.
     """
     settings = get_settings()
     if not settings.tracing_enabled or _in_cooldown():
@@ -88,10 +103,19 @@ def fetch(name: str) -> Any | None:
 
 
 def content_hash(text: str) -> str:
+    """프롬프트 내용의 짧은 해시. 최신 버전과 내용이 같은지 비교하는 데 쓴다.
+
+    Args:
+        text: Langfuse 에 올릴 프롬프트 텍스트.
+
+    Returns:
+        SHA-256 앞 16자리.
+    """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _git_commit() -> str | None:
+    """현재 커밋 해시. ``GIT_COMMIT`` 환경 변수가 우선이고, 없으면 git 에서 읽는다."""
     if commit := os.environ.get("GIT_COMMIT"):
         return commit
     try:
@@ -109,6 +133,15 @@ def _git_commit() -> str | None:
 
 @dataclass
 class SyncResult:
+    """프롬프트 하나의 동기화 결과.
+
+    Attributes:
+        name: 프롬프트 이름.
+        status: ``created`` (새 버전 생성) / ``unchanged`` (최신과 같음) / ``error``.
+        version: 생성되었거나 최신인 Langfuse 버전.
+        detail: 오류 메시지 등 추가 정보.
+    """
+
     name: str
     status: Literal["created", "unchanged", "error"]
     version: int | None = None
@@ -116,7 +149,7 @@ class SyncResult:
 
 
 def _latest(name: str) -> Any | None:
-    """Langfuse 의 최신 버전(자동 'latest' 라벨). 아직 없으면 None."""
+    """Langfuse 의 최신 버전(자동으로 붙는 ``latest`` 라벨). 아직 없으면 ``None``."""
     try:
         return _client().get_prompt(
             name, label="latest", type="text", cache_ttl_seconds=0, max_retries=0
@@ -128,12 +161,23 @@ def _latest(name: str) -> Any | None:
 
 
 def sync_one(name: str, label: str, dry_run: bool = False) -> SyncResult:
+    """프롬프트 하나를 Langfuse 에 동기화한다.
+
+    최신 버전과 내용(해시)이 같으면 새 버전을 만들지 않고 라벨도 건드리지 않는다.
+    그래서 ``production`` 라벨을 이전 버전으로 옮겨 롤백한 상태가 sync 로 덮어써지지 않는다.
+
+    Args:
+        name: 프롬프트 이름.
+        label: 새 버전에 붙일 라벨.
+        dry_run: ``True`` 면 Langfuse 에 쓰지 않고 결과만 돌려준다.
+
+    Returns:
+        동기화 결과.
+    """
     text = compile_for_langfuse(name)
     digest = content_hash(text)
     latest = _latest(name)
 
-    # 최신 버전과 내용이 같으면 새 버전을 만들지 않고 라벨도 건드리지 않는다.
-    # (production 라벨을 이전 버전으로 옮겨 롤백한 상태가 sync 로 덮어써지지 않도록)
     if latest is not None and (latest.config or {}).get("source_hash") == digest:
         return SyncResult(name, "unchanged", latest.version)
     if dry_run:
@@ -155,6 +199,21 @@ def sync_one(name: str, label: str, dry_run: bool = False) -> SyncResult:
 
 
 def sync_all(label: str | None = None, dry_run: bool = False) -> list[SyncResult]:
+    """모든 프롬프트를 Langfuse 에 동기화한다.
+
+    한 프롬프트가 실패해도 나머지는 계속 진행한다. 새 버전이 생기면 SDK 캐시를 비워
+    실행 중인 프로세스가 바로 새 버전을 쓰게 한다.
+
+    Args:
+        label: 새 버전에 붙일 라벨. 없으면 ``PROMPT_LABEL``.
+        dry_run: ``True`` 면 Langfuse 에 쓰지 않고 결과만 돌려준다.
+
+    Returns:
+        프롬프트별 동기화 결과.
+
+    Raises:
+        RuntimeError: Langfuse 키가 설정되지 않았을 때.
+    """
     settings = get_settings()
     if not settings.tracing_enabled:
         raise RuntimeError("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 가 설정되지 않았습니다.")
@@ -166,12 +225,19 @@ def sync_all(label: str | None = None, dry_run: bool = False) -> list[SyncResult
         except Exception as e:  # noqa: BLE001 — 한 프롬프트 실패가 나머지 동기화를 막지 않게
             results.append(SyncResult(name, "error", detail=str(e)[:300]))
     if not dry_run and any(r.status == "created" for r in results):
-        _client().clear_prompt_cache()  # 실행 중인 프로세스가 새 버전을 바로 쓰도록
+        _client().clear_prompt_cache()
     return results
 
 
 def sync_in_background(attempts: int = 10, interval_seconds: float = 6.0) -> None:
-    """앱 시작 시 자동 동기화. Langfuse 가 아직 기동 중일 수 있어 재시도하며, 앱 기동을 막지 않는다."""
+    """앱 시작 시 백그라운드 스레드에서 동기화한다.
+
+    Langfuse 가 아직 기동 중일 수 있어 재시도하며, 앱 기동을 막지 않는다.
+
+    Args:
+        attempts: 최대 시도 횟수.
+        interval_seconds: 재시도 간격 (초).
+    """
 
     def run() -> None:
         for i in range(1, attempts + 1):

@@ -36,6 +36,19 @@ package = false
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint]
+# D: docstring 검사 (Google Style, CLAUDE.md 참고)
+extend-select = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트 함수는 이름이 곧 설명이라 docstring 을 강제하지 않는다 (쓰면 Google Style 로).
+"tests/**" = ["D1"]
+# Alembic 이 자동 생성하는 마이그레이션 파일
+"migrations/versions/**" = ["D"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

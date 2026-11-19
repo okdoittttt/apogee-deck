@@ -1,7 +1,7 @@
-"""프롬프트 진입점. 에이전트 코드는 render(이름, **변수) 만 사용한다.
+"""프롬프트 진입점. 에이전트 코드는 ``render(이름, **변수)`` 만 사용한다.
 
-PROMPT_SOURCE=langfuse 이면 Langfuse 에서 라벨(PROMPT_LABEL)이 붙은 버전을 쓰고,
-가져올 수 없으면 로컬 파일(git 원본)로 렌더링한다. PROMPT_SOURCE=file 이면 항상 로컬 파일.
+``PROMPT_SOURCE=langfuse`` 이면 Langfuse 에서 라벨(``PROMPT_LABEL``)이 붙은 버전을 쓰고,
+가져올 수 없으면 로컬 파일(git 원본)로 렌더링한다. ``PROMPT_SOURCE=file`` 이면 항상 로컬 파일을 쓴다.
 """
 
 from typing import Any
@@ -29,7 +29,23 @@ __all__ = [
 
 
 def render(name: str, /, **variables: Any) -> Prompt:
-    # 변수 검증은 항상 로컬 템플릿 기준 (Langfuse 를 쓰더라도 호출 계약은 동일)
+    """이름으로 프롬프트를 렌더링한다.
+
+    변수 검증은 Langfuse 를 쓰더라도 항상 로컬 템플릿 기준으로 한다. 그래서 프롬프트
+    출처와 상관없이 호출하는 쪽의 계약은 같다.
+
+    Args:
+        name: 프롬프트 이름 (예: ``"chat/system"``). positional-only 라서 프롬프트 변수
+            이름으로 ``name`` 을 써도 충돌하지 않는다.
+        **variables: 템플릿 변수. frontmatter 의 ``variables`` 와 정확히 일치해야 한다.
+
+    Returns:
+        렌더링된 프롬프트. Langfuse 버전을 썼으면 ``source="langfuse"`` 와 버전,
+        트레이스 연결용 ``langfuse_prompt`` 가 들어 있다.
+
+    Raises:
+        PromptError: 이름이 잘못됐거나 변수가 빠지거나 남을 때.
+    """
     local = render_file(name, **variables)
 
     if get_settings().prompt_source != "langfuse":

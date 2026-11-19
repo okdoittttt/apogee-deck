@@ -1,3 +1,5 @@
+"""API 요청/응답 스키마."""
+
 import base64
 import binascii
 import uuid
@@ -13,12 +15,20 @@ ImageMimeType = Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
 
 
 class ImageIn(BaseModel):
+    """요청에 첨부된 이미지 하나.
+
+    Attributes:
+        mime_type: 이미지 MIME 타입.
+        data: base64 로 인코딩한 이미지 (data URL 접두어 없이).
+    """
+
     mime_type: ImageMimeType
     data: str = Field(description="base64 (data URL prefix 없이)")
 
     @field_validator("data")
     @classmethod
     def _check_base64(cls, v: str) -> str:
+        """base64 형식과 디코딩 후 크기를 검사한다."""
         try:
             raw = base64.b64decode(v, validate=True)
         except (binascii.Error, ValueError) as e:
@@ -28,22 +38,46 @@ class ImageIn(BaseModel):
         return v
 
     def to_bytes(self) -> bytes:
+        """base64 를 디코딩한 이미지 바이너리를 반환한다.
+
+        Returns:
+            이미지 원본 바이트.
+        """
         return base64.b64decode(self.data)
 
 
 class ChatRequest(BaseModel):
+    """``POST /api/chat`` 요청. 텍스트와 이미지 중 하나는 있어야 한다.
+
+    Attributes:
+        conversation_id: 이어갈 대화 ID. 없으면 새 대화를 만든다.
+        message: 사용자 메시지 텍스트.
+        images: 첨부 이미지 (최대 ``MAX_IMAGES_PER_MESSAGE`` 장).
+    """
+
     conversation_id: uuid.UUID | None = None
     message: str = Field(default="", max_length=100_000)
     images: list[ImageIn] = Field(default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE)
 
     @model_validator(mode="after")
     def _require_content(self) -> "ChatRequest":
+        """텍스트와 이미지가 모두 비어 있으면 거부한다."""
         if not self.message.strip() and not self.images:
             raise ValueError("message or images is required")
         return self
 
 
 class MessageOut(BaseModel):
+    """화면에 보여줄 메시지.
+
+    Attributes:
+        id: 메시지 ID.
+        role: ``"user"`` 또는 ``"assistant"``.
+        content: 메시지 텍스트.
+        created_at: 생성 시각.
+        image_ids: 첨부 이미지 ID. 이미지는 ``GET /api/images/{id}`` 로 따로 받는다.
+    """
+
     id: uuid.UUID
     role: str
     content: str
@@ -52,6 +86,14 @@ class MessageOut(BaseModel):
 
 
 class ConversationOut(BaseModel):
+    """대화 목록의 항목.
+
+    Attributes:
+        id: 대화 ID.
+        title: 대화 제목.
+        created_at: 생성 시각.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -60,4 +102,10 @@ class ConversationOut(BaseModel):
 
 
 class ConversationDetail(ConversationOut):
+    """메시지를 포함한 대화.
+
+    Attributes:
+        messages: 대화의 메시지 (생성 순).
+    """
+
     messages: list[MessageOut]

@@ -1,12 +1,13 @@
-"""에이전트 레지스트리, 체크포인터 생명주기, 스트리밍 실행.
+"""에이전트 레지스트리, checkpointer 생명주기, 스트리밍 실행.
 
-라우터는 이 모듈의 stream_reply 만 사용한다. 새 에이전트는 app/agents/<이름>/ 에
-build_graph / STREAM_NODES 를 만들고 아래 AGENTS 에 등록하면 된다.
+라우터는 이 모듈의 ``stream_reply`` 만 사용한다. 새 에이전트는 ``app/agents/<이름>/`` 에
+``build_graph`` / ``STREAM_NODES`` 를 만들고 아래 ``AGENTS`` 에 등록하면 된다.
 """
 
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -25,8 +26,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AgentSpec:
+    """레지스트리에 등록하는 에이전트 정의.
+
+    Attributes:
+        build_graph: ``(settings, checkpointer)`` 를 받아 컴파일된 그래프를 만드는 함수.
+        stream_nodes: 이 노드들이 생성한 토큰만 사용자에게 스트리밍한다.
+    """
+
     build_graph: Callable[[Settings, BaseCheckpointSaver], CompiledStateGraph]
-    stream_nodes: frozenset[str]  # 이 노드들이 생성한 토큰만 사용자에게 스트리밍
+    stream_nodes: frozenset[str]
 
 
 AGENTS: dict[str, AgentSpec] = {
@@ -40,14 +48,21 @@ _graphs: dict[str, CompiledStateGraph] = {}
 
 
 async def startup() -> None:
+    """프롬프트를 검증하고, checkpointer 를 연결하고, 등록된 에이전트 그래프를 만든다.
+
+    잘못된 프롬프트(빠진 include, 변수 불일치)는 첫 요청이 아니라 이 시점에 실패시킨다.
+    ``prompt_sync_on_startup`` 이 켜져 있으면 git → Langfuse 프롬프트 동기화를 백그라운드로 시작한다.
+
+    Raises:
+        PromptError: 프롬프트 검증에 실패했을 때.
+    """
     global _pool, _checkpointer
     settings = get_settings()
-    # 잘못된 프롬프트(빠진 include, 변수 불일치)는 첫 요청이 아니라 기동 시점에 실패시킨다.
     logger.info("prompts ok: %s", prompts.validate_all())
     if settings.prompt_sync_on_startup and settings.tracing_enabled:
         from app.prompts import remote
 
-        remote.sync_in_background()  # git → Langfuse (Langfuse 기동을 기다리며 재시도)
+        remote.sync_in_background()
 
     _pool = AsyncConnectionPool(
         settings.checkpointer_db_url,
@@ -65,15 +80,41 @@ async def startup() -> None:
         _graphs[name] = spec.build_graph(settings, _checkpointer)
 
 
+async def shutdown() -> None:
+    """Checkpointer 연결 풀을 닫고 남은 트레이스를 전송한다."""
+    if _pool is not None:
+        await _pool.close()
+    tracing.shutdown()
+
+
 async def delete_thread(conversation_id: str) -> None:
-    """대화의 에이전트 상태(checkpoint)를 모두 지운다."""
+    """대화의 에이전트 상태(checkpoint)를 모두 지운다.
+
+    Args:
+        conversation_id: 대화 ID (= checkpointer ``thread_id``).
+
+    Raises:
+        RuntimeError: 런타임이 시작되지 않았을 때.
+    """
     if _checkpointer is None:
         raise RuntimeError("agent runtime not started")
     await _checkpointer.adelete_thread(conversation_id)
 
 
 async def prune_orphan_threads(keep: set[str]) -> int:
-    """UI 대화가 없는 checkpoint thread 를 지운다 (삭제 중 실패 등으로 남은 데이터 정리)."""
+    """UI 대화가 없는 checkpoint thread 를 지운다.
+
+    대화 삭제 도중 checkpoint 삭제가 실패해서 남은 데이터를 정리하는 용도다.
+
+    Args:
+        keep: 남겨둘 thread ID (현재 존재하는 대화 ID).
+
+    Returns:
+        삭제한 thread 수.
+
+    Raises:
+        RuntimeError: 런타임이 시작되지 않았을 때.
+    """
     if _pool is None:
         raise RuntimeError("agent runtime not started")
     async with _pool.connection() as conn:
@@ -84,19 +125,27 @@ async def prune_orphan_threads(keep: set[str]) -> int:
     return len(orphans)
 
 
-async def shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
-    tracing.shutdown()
-
-
 @dataclass
 class TextDelta:
+    """스트리밍 중인 응답 텍스트 조각.
+
+    Attributes:
+        text: 화면에 이어 붙일 텍스트.
+    """
+
     text: str
 
 
 @dataclass
 class Finished:
+    """응답 스트리밍 종료.
+
+    Attributes:
+        text: 화면에 보여준 전체 텍스트 (UI 용 ``messages`` 테이블에 저장).
+        stop_reason: 공통 이름으로 맞춘 종료 사유 (``end_turn`` / ``max_tokens`` / ``refusal`` 등).
+        model: 응답한 모델 이름.
+    """
+
     text: str
     stop_reason: str | None
     model: str
@@ -107,19 +156,28 @@ _STOP_REASON_MAP = {"stop": "end_turn", "length": "max_tokens"}
 
 
 def _stop_reason(msg: AIMessage) -> str | None:
+    """응답 메타데이터에서 종료 사유를 꺼내 공통 이름으로 바꾼다."""
     meta = msg.response_metadata or {}
     raw = meta.get("stop_reason") or meta.get("done_reason")
     return _STOP_REASON_MAP.get(raw, raw)
 
 
 def build_user_message(text: str, images: list[tuple[str, str]]) -> HumanMessage:
-    """텍스트 + 이미지(mime_type, base64)를 LangChain 표준 content block 으로 만든다.
+    """텍스트와 이미지를 LangChain 표준 content block 으로 된 사용자 메시지로 만든다.
 
-    표준 블록은 provider 별 형식(Anthropic source/base64, Ollama images 필드)으로 자동 변환된다.
+    표준 블록은 provider 별 형식(Anthropic ``source``/base64, Ollama ``images`` 필드)으로
+    자동 변환된다. 이미지를 텍스트보다 앞에 둔다.
+
+    Args:
+        text: 사용자 메시지 텍스트.
+        images: ``(mime_type, base64)`` 목록.
+
+    Returns:
+        이미지가 없으면 텍스트만, 있으면 이미지 + 텍스트 블록을 가진 ``HumanMessage``.
     """
     if not images:
         return HumanMessage(text)
-    blocks: list[dict] = [
+    blocks: list[dict[str, Any]] = [
         {"type": "image", "base64": data, "mime_type": mime} for mime, data in images
     ]
     if text.strip():
@@ -133,6 +191,23 @@ async def stream_reply(
     images: list[tuple[str, str]] | None = None,
     agent: str = DEFAULT_AGENT,
 ) -> AsyncIterator[TextDelta | Finished]:
+    """에이전트를 실행하고 응답을 스트리밍한다.
+
+    이전 대화는 checkpointer 가 들고 있으므로 새 사용자 메시지만 그래프에 넣는다.
+    tool 호출이 끼면 agent 노드가 여러 번 실행되므로, 응답 메시지가 바뀔 때 줄바꿈을 넣는다.
+
+    Args:
+        conversation_id: 대화 ID (= checkpointer ``thread_id``, Langfuse session ID).
+        user_text: 사용자 메시지 텍스트.
+        images: ``(mime_type, base64)`` 목록.
+        agent: 실행할 에이전트 이름 (``AGENTS`` 의 키).
+
+    Yields:
+        텍스트 조각마다 ``TextDelta``, 마지막에 ``Finished`` 하나.
+
+    Raises:
+        RuntimeError: 런타임이 시작되지 않았거나 알 수 없는 에이전트일 때.
+    """
     graph = _graphs.get(agent)
     if graph is None:
         raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
@@ -144,12 +219,9 @@ async def stream_reply(
         "run_name": agent,
     }
 
-    # 화면에 보여준 텍스트를 그대로 모아 UI용 messages 테이블에 저장한다.
-    # (tool 호출이 끼면 agent 노드가 여러 번 실행되므로 턴 사이에 줄바꿈을 넣는다)
-    shown: list[str] = []
+    shown: list[str] = []  # 화면에 보여준 텍스트 → UI 용 messages 테이블에 그대로 저장
     current_msg_id: str | None = None
 
-    # 이전 대화는 checkpointer 가 들고 있으므로 새 사용자 메시지만 넣는다.
     async for chunk, meta in graph.astream(
         {"messages": [build_user_message(user_text, images or [])]}, config, stream_mode="messages"
     ):

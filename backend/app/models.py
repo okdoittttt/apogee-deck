@@ -1,3 +1,10 @@
+"""UI 표시용 ORM 모델.
+
+LLM 에 들어가는 대화 이력은 LangGraph checkpointer 가 관리한다. 이 테이블들은
+화면에 대화 목록과 메시지를 보여주는 용도다. 스키마를 바꾸면 ``make db-revision`` 으로
+마이그레이션을 만든다.
+"""
+
 import uuid
 from datetime import datetime
 
@@ -8,6 +15,15 @@ from app.db import Base
 
 
 class Conversation(Base):
+    """대화 하나. ``id`` 가 LangGraph checkpointer 의 ``thread_id`` 로도 쓰인다.
+
+    Attributes:
+        id: 대화 ID.
+        title: 사이드바에 보이는 제목 (첫 메시지 앞부분).
+        created_at: 생성 시각.
+        messages: 대화의 메시지 (생성 순).
+    """
+
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -22,13 +38,25 @@ class Conversation(Base):
 
 
 class Message(Base):
+    """화면에 보여줄 메시지 하나.
+
+    Attributes:
+        id: 메시지 ID.
+        conversation_id: 속한 대화 ID.
+        role: ``"user"`` 또는 ``"assistant"``.
+        content: 메시지 텍스트. assistant 는 화면에 스트리밍된 텍스트 그대로 저장한다.
+        created_at: 생성 시각.
+        conversation: 속한 대화.
+        images: 사용자가 첨부한 이미지 (첨부 순).
+    """
+
     __tablename__ = "messages"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
-    role: Mapped[str] = mapped_column(String(20))  # "user" | "assistant"
+    role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -41,7 +69,16 @@ class Message(Base):
 
 
 class MessageImage(Base):
-    """사용자가 첨부한 이미지 (UI 표시용 원본). 새 테이블이라 create_all 로 자동 생성된다."""
+    """사용자가 첨부한 이미지 원본 (UI 표시용).
+
+    Attributes:
+        id: 이미지 ID. ``GET /api/images/{id}`` 로 내려준다.
+        message_id: 속한 메시지 ID.
+        position: 메시지 안에서의 순서.
+        mime_type: 이미지 MIME 타입.
+        data: 이미지 바이너리.
+        message: 속한 메시지.
+    """
 
     __tablename__ = "message_images"
 
