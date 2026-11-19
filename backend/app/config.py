@@ -41,6 +41,8 @@ class Settings(BaseSettings):
             2 크레딧을 쓰고(``basic`` 은 1), 1~2초 더 걸린다.
         web_search_max_results: 웹 검색 한 번에 받을 결과 수.
         web_search_timeout_seconds: 웹 검색 요청 타임아웃(초).
+        compact_tool_results: 이전 턴의 도구 결과를 줄여서 모델에 보낼지 여부. 원본은 상태에
+            그대로 남는다 (``agents.context.compact_old_tool_results`` 참고).
         context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
             (``history_token_budget`` 참고).
         run_stale_seconds: 응답 생성 중 표시가 이 시간 동안 갱신되지 않으면 끝난 것으로 본다.
@@ -93,6 +95,7 @@ class Settings(BaseSettings):
     web_search_timeout_seconds: float = 20.0
 
     # --- Context management ---
+    compact_tool_results: bool = True
     context_max_tokens: int | None = None
 
     # --- Concurrency ---

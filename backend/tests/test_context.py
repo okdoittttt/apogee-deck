@@ -10,7 +10,7 @@ from pydantic import Field
 
 from app.agents import chat, runtime, summary
 from app.agents.chat import graph as chat_graph
-from app.agents.context import make_token_counter
+from app.agents.context import compact_old_tool_results, make_token_counter
 from app.agents.runtime import TextDelta
 from app.config import Settings
 
@@ -197,3 +197,133 @@ def test_no_summary_node_without_budget():
         Settings(llm_provider="fake", context_max_tokens=1500), InMemorySaver()
     )
     assert chat_graph.SUMMARIZE_NODE in graph.nodes
+
+
+# --- 지난 도구 결과 줄이기 ------------------------------------------------------------------------
+
+SOURCES = {
+    "sources": [
+        {"title": "통화정책방향", "url": "https://bok.example/1", "published_date": "2026-10-22"},
+        {"title": "기준금리 - 위키", "url": "https://wiki.example/2", "published_date": None},
+    ]
+}
+
+
+def _search_turn(question: str, call_id: str, result: str) -> list:
+    args = {"query": question, "topic": "news"}
+    return [
+        HumanMessage(question),
+        AIMessage("", tool_calls=[{"id": call_id, "name": "web_search", "args": args}]),
+        ToolMessage(result, tool_call_id=call_id, name="web_search", artifact=SOURCES),
+        AIMessage(f"{question} 답변"),
+    ]
+
+
+def test_old_search_results_become_source_lists_and_current_turn_stays():
+    long_result = "검색 결과 본문 " * 300
+    history = _ids(
+        _search_turn("기준금리", "t1", long_result)
+        + [
+            HumanMessage("다음 금통위는?"),
+            AIMessage(
+                "", tool_calls=[{"id": "t2", "name": "web_search", "args": {"query": "금통위"}}]
+            ),
+            ToolMessage(long_result, tool_call_id="t2", name="web_search", artifact=SOURCES),
+        ]
+    )
+    compacted = compact_old_tool_results(history)
+
+    old, current = compacted[2], compacted[6]
+    assert old.text.startswith("[Earlier web_search result, shortened.")
+    assert 'Called with: {"query": "기준금리", "topic": "news"}' in old.text
+    assert "[1] 통화정책방향 - https://bok.example/1 (2026-10-22)" in old.text
+    assert "[2] 기준금리 - 위키 - https://wiki.example/2" in old.text
+    assert "검색 결과 본문" not in old.text
+    assert current.text == long_result  # 이번 턴의 결과는 그대로
+    assert old.id == history[2].id and old.artifact == SOURCES  # 같은 ID 의 복사본
+    assert history[2].text == long_result  # 원본은 바뀌지 않는다
+
+
+def test_other_old_tool_results_keep_only_the_beginning():
+    history = _ids(
+        [
+            HumanMessage("q1"),
+            AIMessage("", tool_calls=[{"id": "a", "name": "read_page", "args": {"url": "u"}}]),
+            ToolMessage("가" * 2000, tool_call_id="a", name="read_page"),
+            AIMessage("", tool_calls=[{"id": "b", "name": "get_current_time", "args": {}}]),
+            ToolMessage("10:00", tool_call_id="b", name="get_current_time"),
+            AIMessage("", tool_calls=[{"id": "c", "name": "read_page", "args": {}}]),
+            ToolMessage("x" * 2000, tool_call_id="c", name="read_page", status="error"),
+            HumanMessage("q2"),
+        ]
+    )
+    long, short, error = (compact_old_tool_results(history)[i] for i in (2, 4, 6))
+    assert long.text.startswith(
+        "[Earlier read_page result, shortened to the first 300 characters.]"
+    )
+    assert len(long.text) < 400
+    assert short.text == "10:00" and error.text == "x" * 2000
+
+
+def test_tool_specific_compactor_is_used():
+    history = _ids(_search_turn("q", "t1", "본문") + [HumanMessage("다음")])
+    compacted = compact_old_tool_results(history, {"web_search": lambda m, args: "SHORT"})
+    assert compacted[2].text == "SHORT"
+
+
+def test_summary_planning_counts_compacted_size():
+    count = make_token_counter(Settings())
+    history = _ids(
+        _search_turn("q1", "t1", "검색 결과 " * 800)
+        + _search_turn("q2", "t2", "검색 결과 " * 800)
+        + [HumanMessage("다음 질문")]
+    )
+    # 원본 크기로 세면 요약하지만, 모델이 실제로 보는 크기로는 요약할 필요가 없다
+    assert summary.plan_summary(history, None, budget=3000, count_tokens=count) is not None
+    compacted = compact_old_tool_results(history)
+    assert summary.plan_summary(compacted, None, budget=3000, count_tokens=count) is None
+
+
+def _graph_searching_every_turn(monkeypatch, **settings):
+    """사용자 메시지마다 web_search 를 한 번 부르는 fake 그래프와, 모델이 받은 입력 기록."""
+    from app.llm.fake import EchoChatModel, _Plan
+    from app.web import search as web_search
+
+    seen: list = []
+
+    def plan(self, messages):
+        seen.append(messages)
+        if messages[-1].type == "tool":
+            return _Plan("", "답변", None)
+        call = {"id": f"call_{len(seen)}", "name": "web_search", "args": {"query": "q"}}
+        return _Plan("", "", call)
+
+    async def fake_search(request, settings, **kwargs):
+        return [web_search.SearchResult("제목", "https://a.example", "본문 " * 200, None, 0.9)]
+
+    monkeypatch.setattr(EchoChatModel, "_plan", plan)
+    monkeypatch.setattr(web_search, "search", fake_search)
+    graph = chat.build_graph(
+        Settings(llm_provider="fake", tavily_api_key="k", **settings), InMemorySaver()
+    )
+    monkeypatch.setitem(runtime._graphs, "chat", graph)
+    return seen
+
+
+async def test_graph_sends_shortened_old_results(monkeypatch):
+    seen = _graph_searching_every_turn(monkeypatch)
+    for question in ("첫 질문", "두 번째 질문"):
+        [e async for e in runtime.stream_reply("compact", question)]
+
+    tools = [m for m in seen[-1] if isinstance(m, ToolMessage)]
+    assert len(tools) == 2
+    assert tools[0].text.startswith("[Earlier web_search result")  # 지난 턴
+    assert "본문 본문" in tools[1].text  # 이번 턴
+
+
+async def test_compaction_can_be_turned_off(monkeypatch):
+    seen = _graph_searching_every_turn(monkeypatch, compact_tool_results=False)
+    for question in ("첫 질문", "두 번째 질문"):
+        [e async for e in runtime.stream_reply("no-compact", question)]
+    tools = [m for m in seen[-1] if isinstance(m, ToolMessage)]
+    assert all("본문 본문" in m.text for m in tools)

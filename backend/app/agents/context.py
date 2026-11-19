@@ -1,13 +1,15 @@
 """여러 에이전트가 공용으로 쓰는 컨텍스트 도구: 대화 이력 정리·trim, 프롬프트 동적 변수."""
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
     trim_messages,
@@ -119,6 +121,85 @@ def make_token_counter(settings: Settings) -> TokenCounter:
         return base + round(non_ascii * extra_per_char)
 
     return count
+
+
+ToolResultCompactor = Callable[[ToolMessage, dict[str, Any]], str | None]
+"""(지난 도구 결과, 그 도구를 부른 인자) → 줄인 결과. ``None`` 이면 기본 규칙을 쓴다."""
+
+COMPACT_THRESHOLD_CHARS = 500
+"""기본 규칙: 이보다 긴 지난 도구 결과만 줄인다 (시간 조회처럼 짧은 결과는 그대로)."""
+
+COMPACT_KEEP_CHARS = 300
+"""기본 규칙: 줄일 때 앞부분을 이만큼 남긴다."""
+
+
+def compact_old_tool_results(
+    messages: list[BaseMessage],
+    compactors: Mapping[str, ToolResultCompactor] | None = None,
+) -> list[BaseMessage]:
+    """이전 턴의 도구 결과를 짧게 줄인 이력을 돌려준다 (모델에 보낼 입력용).
+
+    도구 결과(웹 검색 한 번에 수천 토큰)는 상태에 남아 이후 모든 턴에 다시 입력된다.
+    필요한 내용은 그 턴의 답변에 이미 정리돼 있으므로, 마지막 사용자 메시지보다 앞에 있는
+    도구 결과는 줄여서 보낸다. 이번 턴의 결과는 도구를 반복하는 중이라도 그대로 둔다.
+
+    줄이는 규칙 (모델이 읽는 내용이라 표시 문구는 영어로 쓴다):
+
+    - ``compactors`` 에 그 도구의 함수가 있으면 그 결과를 쓴다.
+    - artifact 에 출처(``sources``)가 있으면(웹 검색 등) 호출 인자와 출처 목록만 남긴다.
+    - 그 밖에 ``COMPACT_THRESHOLD_CHARS`` 보다 길면 앞부분 ``COMPACT_KEEP_CHARS`` 자만 남긴다.
+    - 오류 결과와 짧은 결과는 그대로 둔다.
+
+    원본은 바꾸지 않고, 줄인 메시지는 같은 ID 의 복사본이다 (요약 경계를 ID 로 찾기 때문).
+    도구 결과는 다음 사용자 턴이 시작될 때 한 번만 바뀌고 그 뒤로는 그대로라, Anthropic
+    프롬프트 캐시도 그 지점에서 한 번만 다시 만들어진다.
+
+    Args:
+        messages: 대화 이력.
+        compactors: 도구 이름 → 줄이는 함수. 도구마다 다른 방식이 필요할 때 넘긴다.
+
+    Returns:
+        지난 도구 결과를 줄인 이력. 줄일 것이 없으면 같은 내용 그대로.
+    """
+    last_human = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    calls = {
+        call["id"]: call["args"]
+        for m in messages[: last_human + 1]
+        if isinstance(m, AIMessage)
+        for call in m.tool_calls
+    }
+    result: list[BaseMessage] = []
+    for i, message in enumerate(messages):
+        if i < last_human and isinstance(message, ToolMessage) and message.status != "error":
+            args = calls.get(message.tool_call_id, {})
+            compactor = (compactors or {}).get(message.name or "")
+            short = (compactor(message, args) if compactor else None) or _default_compact(
+                message, args
+            )
+            if short is not None:
+                message = message.model_copy(update={"content": short})
+        result.append(message)
+    return result
+
+
+def _default_compact(message: ToolMessage, args: dict[str, Any]) -> str | None:
+    """기본 규칙으로 지난 도구 결과를 줄인다. 줄일 필요가 없으면 ``None``."""
+    name = message.name or "tool"
+    called = f"Called with: {json.dumps(args, ensure_ascii=False)}" if args else ""
+    sources = message.artifact.get("sources") if isinstance(message.artifact, dict) else None
+    if sources:
+        lines = [f"[Earlier {name} result, shortened. Call it again if you need the details.]"]
+        if called:
+            lines.append(called)
+        for n, source in enumerate(sources, 1):
+            date = f" ({source['published_date']})" if source.get("published_date") else ""
+            lines.append(f"[{n}] {source.get('title', '')} - {source.get('url', '')}{date}")
+        return "\n".join(lines)
+    text = message.text
+    if len(text) <= COMPACT_THRESHOLD_CHARS:
+        return None
+    header = f"[Earlier {name} result, shortened to the first {COMPACT_KEEP_CHARS} characters.]"
+    return "\n".join(part for part in (header, called, text[:COMPACT_KEEP_CHARS] + " …") if part)
 
 
 def make_context_selector(settings: Settings) -> ContextSelector:

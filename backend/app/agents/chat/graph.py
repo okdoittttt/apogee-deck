@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import Any, Literal
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -26,7 +26,12 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from app import prompts
 from app.agents import summary
 from app.agents.chat.tools import build_tools
-from app.agents.context import make_context_selector, make_token_counter, today
+from app.agents.context import (
+    compact_old_tool_results,
+    make_context_selector,
+    make_token_counter,
+    today,
+)
 from app.agents.tooling import handle_tool_error
 from app.config import Settings
 from app.llm import build_chat_model, build_summary_model
@@ -75,6 +80,14 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
     budget = settings.history_token_budget
     summary_model = build_summary_model(settings) if budget is not None else None
 
+    def model_view(messages: list[BaseMessage]) -> list[BaseMessage]:
+        """모델이 보는 이력: 지난 턴의 도구 결과를 줄인다 (설정으로 끌 수 있음).
+
+        모델 입력과 요약 판단에 같이 쓴다. 요약 판단이 원본 크기로 세면, 지난 검색 결과 때문에
+        요약이 필요 이상으로 일찍 일어나기 때문이다.
+        """
+        return compact_old_tool_results(messages) if settings.compact_tool_results else messages
+
     # 모델 호출을 한 단계(chain)로 감싼다. Langfuse 콜백은 이 단계의 metadata 에 있는
     # langfuse_prompt 를 보고, 그 아래 LLM 호출(generation)을 해당 프롬프트 버전에 연결한다.
     call_model = RunnableLambda(model.ainvoke, name="call_model")
@@ -94,7 +107,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
         """
         prompt = await prompts.arender("chat/system", today=today(settings))
         text = prompt.text
-        history = state["messages"]
+        history = model_view(state["messages"])
         if budget is not None and state.get("summary"):
             summary_prompt = await prompts.arender(
                 "chat/conversation_summary", summary=state["summary"]
@@ -112,7 +125,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
         """요약이 필요하면 요약 노드로, 아니면 바로 agent 노드로 보낸다."""
         assert budget is not None
         plan = summary.plan_summary(
-            state["messages"], state.get("summarized_until"), budget, count_tokens
+            model_view(state["messages"]), state.get("summarized_until"), budget, count_tokens
         )
         return SUMMARIZE_NODE if plan else AGENT_NODE
 
@@ -130,7 +143,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
         """
         assert budget is not None and summary_model is not None
         plan = summary.plan_summary(
-            state["messages"], state.get("summarized_until"), budget, count_tokens
+            model_view(state["messages"]), state.get("summarized_until"), budget, count_tokens
         )
         if plan is None:
             return {}
