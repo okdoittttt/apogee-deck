@@ -80,7 +80,8 @@ tool calling을 지원하지 않는 모델이면 `ENABLE_TOOLS=false`로 설정�
 | `IMAGE_TOKEN_ESTIMATE` | 예산 계산 시 이미지 1장의 토큰 수 (기본 1500) |
 
 Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라냅니다**. 그래서 `agent` 노드가 호출 전에
-`trim_messages`로 최근 대화만 예산 안에 맞춥니다. checkpointer에 저장된 원본 이력은 그대로 남고,
+`trim_messages`로 최근 대화만 예산 안에 맞춥니다. 토큰 수는 글자 수로 추정하는데, 한국어는 영어보다 글자당 토큰이 2배 이상 많아서
+한글 등 ASCII가 아닌 글자는 1.5자당 1토큰으로 따로 셉니다(`agents/context.py`의 `make_token_counter`). checkpointer에 저장된 원본 이력은 그대로 남고,
 모델에 실제로 들어간 입력은 Langfuse에서 확인할 수 있습니다. (Anthropic은 컨텍스트가 크고 이력을
 자르면 캐시가 깨지므로 기본적으로 자르지 않습니다.)
 

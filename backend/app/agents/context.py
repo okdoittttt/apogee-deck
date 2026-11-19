@@ -1,8 +1,8 @@
 """여러 에이전트가 공용으로 쓰는 컨텍스트 도구: 대화 이력 정리·trim, 프롬프트 동적 변수."""
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterable
 from datetime import datetime
-from functools import partial
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
@@ -15,6 +15,9 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import count_tokens_approximately
 
 from app.config import Settings
+
+TokenCounter = Callable[[Iterable[BaseMessage]], int]
+"""메시지 목록 → 추정 토큰 수."""
 
 ContextSelector = Callable[[SystemMessage, list[BaseMessage]], list[BaseMessage]]
 """(system 프롬프트, 전체 대화 이력) → 모델에 보낼 대화 이력."""
@@ -60,13 +63,71 @@ def close_dangling_tool_calls(messages: list[BaseMessage]) -> list[BaseMessage]:
     return result
 
 
+# ASCII 가 아닌 글자(한글 등)는 ASCII 보다 토큰을 훨씬 많이 쓴다. qwen3.5 로 실측하면
+# 한국어 문장은 글자당 약 0.61 토큰이었다(ASCII 는 글자당 약 0.25). 넘치지 않도록 조금 크게 잡는다.
+NON_ASCII_CHARS_PER_TOKEN = 1.5
+ASCII_CHARS_PER_TOKEN = 4.0
+
+
+def _text_of(message: BaseMessage) -> str:
+    """토큰 수를 셀 때 쓰는 메시지의 텍스트 (본문 텍스트 블록과 도구 호출 인자)."""
+    if isinstance(message.content, str):
+        parts = [message.content]
+    else:
+        parts = [
+            block if isinstance(block, str) else str(block.get("text", ""))
+            for block in message.content
+            if isinstance(block, str) or block.get("type") == "text"
+        ]
+    if isinstance(message, AIMessage):
+        parts.extend(json.dumps(call["args"], ensure_ascii=False) for call in message.tool_calls)
+    return "".join(parts)
+
+
+def make_token_counter(settings: Settings) -> TokenCounter:
+    """한국어도 과소 추정하지 않는 토큰 추정 함수를 만든다.
+
+    ``count_tokens_approximately`` 는 모든 글자를 4자당 1토큰으로 세서, 한국어는 실제의
+    절반 정도로 센다. 그러면 예산 안에 들어간 줄 알았던 입력이 ``num_ctx`` 를 넘고, Ollama 는
+    오류 없이 입력 앞부분을 잘라낸다. 그래서 기본 추정값에 ASCII 가 아닌 글자 몫을 더한다.
+    이미지는 base64 길이가 아니라 장당 ``image_token_estimate`` 토큰으로 센다.
+
+    Args:
+        settings: 앱 설정.
+
+    Returns:
+        메시지 목록을 받아 추정 토큰 수를 돌려주는 함수.
+    """
+    extra_per_char = 1 / NON_ASCII_CHARS_PER_TOKEN - 1 / ASCII_CHARS_PER_TOKEN
+
+    def count(messages: Iterable[BaseMessage]) -> int:
+        """메시지 목록의 토큰 수를 추정한다.
+
+        Args:
+            messages: 셀 메시지.
+
+        Returns:
+            추정 토큰 수.
+        """
+        messages = list(messages)
+        base = count_tokens_approximately(
+            messages,
+            chars_per_token=ASCII_CHARS_PER_TOKEN,
+            tokens_per_image=settings.image_token_estimate,
+        )
+        non_ascii = sum(1 for m in messages for ch in _text_of(m) if ord(ch) > 127)
+        return base + round(non_ascii * extra_per_char)
+
+    return count
+
+
 def make_context_selector(settings: Settings) -> ContextSelector:
     """모델에 보낼 대화 이력을 고르는 함수를 만든다.
 
     결과 없이 끊긴 도구 호출을 먼저 메운 뒤(``close_dangling_tool_calls``), 토큰 예산 안에서
     최근 대화만 남긴다. 바꾸는 것은 모델에 보낼 입력뿐이고, checkpointer 에 저장된 원본
     이력은 그대로 둔다.
-    이미지는 base64 길이가 아니라 장당 ``image_token_estimate`` 토큰으로 계산한다.
+    토큰 수는 ``make_token_counter`` 로 센다.
 
     Args:
         settings: 앱 설정. ``history_token_budget`` 이 ``None`` 이면 자르지 않는다.
@@ -74,9 +135,7 @@ def make_context_selector(settings: Settings) -> ContextSelector:
     Returns:
         ``(system, messages)`` 를 받아 예산 안의 최근 메시지를 돌려주는 함수.
     """
-    count_tokens = partial(
-        count_tokens_approximately, tokens_per_image=settings.image_token_estimate
-    )
+    count_tokens = make_token_counter(settings)
     budget = settings.history_token_budget
 
     def select(system: SystemMessage, messages: list[BaseMessage]) -> list[BaseMessage]:
