@@ -122,7 +122,7 @@ def _patch_stream(monkeypatch, steps):
             else:
                 yield step
 
-    async def fake_save(conversation_id, content):
+    async def fake_save(conversation_id, content, steps=None):
         await asyncio.sleep(0)
 
     monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
@@ -164,4 +164,36 @@ async def test_released_when_client_disconnects(monkeypatch, registry):
         assert await registry.is_running(str(cid))
         tg.cancel_scope.cancel()
 
+    assert not await registry.is_running(str(cid))
+
+
+async def test_disconnect_during_final_save_still_releases(monkeypatch, registry):
+    """정상 종료 후 저장 중에 연결이 끊겨도 저장과 해제가 끝까지 실행된다 (E2E 에서 발견한 버그)."""
+    saving = anyio.Event()
+    saved: list[str] = []
+
+    async def fake_stream_reply(conversation_id, text, images):
+        yield TextDelta("a")
+        yield Finished("a", "end_turn", "fake")
+
+    async def slow_save(conversation_id, content, steps=None):
+        saving.set()
+        await anyio.sleep(0.1)  # 저장 중에 취소가 들어온다
+        saved.append(content)
+
+    monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
+    monkeypatch.setattr(chat_router, "save_assistant_message", slow_save)
+    cid = uuid.uuid4()
+    await registry.try_acquire(str(cid))
+
+    async def consume():
+        async for _ in chat_router.stream_and_save(cid, "hi", []):
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(consume)
+        await saving.wait()
+        tg.cancel_scope.cancel()  # 저장 도중 새로고침/중지
+
+    assert saved == ["a"]
     assert not await registry.is_running(str(cid))

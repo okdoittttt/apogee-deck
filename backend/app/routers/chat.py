@@ -298,7 +298,7 @@ async def stream_and_save(
 
     응답이 진행되는 동안 생성 중 표시를 갱신하고, ``done`` / ``error`` 이벤트를 보내기
     **직전에** 해제한다. 이벤트를 받은 화면이 대기 메시지를 바로 보내도 거절되지 않게 하기 위해서다.
-    중단된 경우에는 정리 단계에서 해제한다.
+    저장과 해제는 연결이 끊겨도 끝까지 실행되도록 보호하고, 정리 단계에서 한 번 더 해제한다.
 
     Args:
         conversation_id: 대화 ID. 호출 전에 ``run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
@@ -319,23 +319,28 @@ async def stream_and_save(
                 await run_registry.touch(run_id)
                 yield sse("delta", {"text": chunk.text})
             elif isinstance(chunk, Finished):
-                outcome = "finished"
-                if chunk.text:
-                    await save_assistant_message(conversation_id, chunk.text)
-                await run_registry.release(run_id)
+                # 저장과 해제는 도중에 연결이 끊겨도 끝까지 실행되게 보호한다.
+                # (보호하지 않으면 저장 직후 취소되어 해제가 빠지고, 대화가 "생성 중" 으로 남는다)
+                with anyio.CancelScope(shield=True):
+                    outcome = "finished"
+                    if chunk.text:
+                        await save_assistant_message(conversation_id, chunk.text)
+                    await run_registry.release(run_id)
                 yield sse("done", {"stop_reason": chunk.stop_reason, "model": chunk.model})
     except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
-        outcome = "error"
         logger.exception("Agent run failed")
-        await _save_partial(conversation_id, shown, ERROR_SUFFIX)
-        await run_registry.release(run_id)
+        with anyio.CancelScope(shield=True):
+            outcome = "error"
+            await _save_partial(conversation_id, shown, ERROR_SUFFIX)
+            await run_registry.release(run_id)
         yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
     finally:
-        if outcome == "interrupted":
-            # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.
-            with anyio.CancelScope(shield=True):
+        # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.
+        with anyio.CancelScope(shield=True):
+            if outcome == "interrupted":
                 await _save_partial(conversation_id, shown, INTERRUPTED_SUFFIX)
-                await run_registry.release(run_id)
+            # 어떤 경로로 끝나든 생성 중 표시는 반드시 해제한다 (이미 해제됐으면 아무 일 없음).
+            await run_registry.release(run_id)
 
 
 async def _save_partial(conversation_id: uuid.UUID, shown: list[str], suffix: str) -> None:
