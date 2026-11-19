@@ -29,6 +29,8 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
             api_key=settings.anthropic_api_key or None,
             max_tokens=settings.claude_max_tokens,
             effort=settings.claude_effort,
+            # 추론 요약을 받아 화면의 "생각 과정" 에 보여준다 (원문은 제공되지 않음).
+            thinking={"type": "adaptive", "display": "summarized"},
             # 대화가 길어질수록 이전 턴을 캐시에서 읽어 비용/지연을 줄인다.
             model_kwargs={"cache_control": {"type": "ephemeral"}},
             streaming=True,

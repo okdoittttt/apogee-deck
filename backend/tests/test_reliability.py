@@ -129,7 +129,7 @@ def _patch_stream(monkeypatch, steps):
             else:
                 yield step
 
-    async def fake_save(conversation_id, content):
+    async def fake_save(conversation_id, content, steps=None):
         await asyncio.sleep(0)  # 실제 DB 저장처럼 await 가 있다
         saved.append(content)
 

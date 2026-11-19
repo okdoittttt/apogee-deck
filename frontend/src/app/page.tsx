@@ -15,6 +15,8 @@ import {
   type AppInfo,
   type ChatMessage,
   type Conversation,
+  type Step,
+  type ToolStep,
   ERROR_SUFFIX,
   INTERRUPTED_SUFFIX,
   NO_REPLY_TEXT,
@@ -66,6 +68,8 @@ export default function ChatPage() {
   // 다른 창에서 이 대화의 응답을 생성 중인지
   const [remoteRunning, setRemoteRunning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // 지금 응답을 받고 있는 assistant 메시지 (진행 표시를 이 메시지에만 보인다)
+  const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
   const closeToast = useCallback(() => setToast(null), []);
 
   // 응답이 끝난 뒤 대기 메시지를 자동 전송할 때 최신 값을 읽기 위한 ref.
@@ -284,10 +288,30 @@ export default function ChatPage() {
       { id: assistantId, role: "assistant", content: "" },
     ]);
 
+    setActiveAssistantId(assistantId);
+
+    const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) =>
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
     const appendToAssistant = (chunk: string) =>
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + chunk } : m)),
-      );
+      updateAssistant((m) => ({ ...m, content: m.content + chunk, thinking: false }));
+    // 연속된 추론 조각은 마지막 추론 단계에 이어 붙인다.
+    const appendReasoning = (chunk: string) =>
+      updateAssistant((m) => {
+        const steps = m.steps ?? [];
+        const last = steps.at(-1);
+        const merged: Step[] =
+          last?.type === "reasoning"
+            ? [...steps.slice(0, -1), { ...last, text: last.text + chunk }]
+            : [...steps, { type: "reasoning", text: chunk }];
+        return { ...m, steps: merged, thinking: true };
+      });
+    const updateTool = (id: string, patch: Partial<ToolStep>) =>
+      updateAssistant((m) => ({
+        ...m,
+        steps: (m.steps ?? []).map((st) =>
+          st.type === "tool" && st.id === id ? { ...st, ...patch } : st,
+        ),
+      }));
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -306,6 +330,17 @@ export default function ChatPage() {
         {
           onMeta: ({ conversation_id }) => setActiveConversation(conversation_id),
           onDelta: appendToAssistant,
+          onReasoning: appendReasoning,
+          onToolStart: (tool) =>
+            updateAssistant((m) => ({
+              ...m,
+              thinking: false,
+              steps: [
+                ...(m.steps ?? []),
+                { type: "tool", ...tool, output: null, status: "running" },
+              ],
+            })),
+          onToolEnd: ({ id, output, status }) => updateTool(id, { output, status }),
           onDone: ({ stop_reason }) => {
             outcome = "done";
             if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
@@ -336,6 +371,7 @@ export default function ChatPage() {
       }
     } finally {
       if (outcome !== "busy") finishAssistantMessage(assistantId, outcome);
+      setActiveAssistantId(null);
       setStreaming(false);
       abortRef.current = null;
       if (isNew) refreshConversations();
@@ -378,21 +414,33 @@ export default function ChatPage() {
     return false;
   }
 
-  /** 응답 자리를 결과에 맞게 정리한다. 비어 있는 채로 "생각 중" 표시가 남지 않게 한다. */
+  /**
+   * 응답 자리를 결과에 맞게 정리한다. 비어 있는 채로 "생각 중" 표시가 남지 않게 하고,
+   * 실행 중으로 남은 도구는 중단/오류로 바꾼다 (서버가 저장하는 내용과 같게).
+   */
   function finishAssistantMessage(id: string, outcome: Exclude<Outcome, "busy">) {
     setMessages((prev) =>
       prev.flatMap((m) => {
         if (m.id !== id) return [m];
+        const toolStatus: ToolStep["status"] = outcome === "error" ? "error" : "interrupted";
+        const steps = (m.steps ?? []).map((st) =>
+          st.type === "tool" && st.status === "running" ? { ...st, status: toolStatus } : st,
+        );
+        const base = { ...m, steps, thinking: false };
         const empty = m.content === "";
         switch (outcome) {
           case "done":
-            return [empty ? { ...m, content: NO_REPLY_TEXT } : m];
+            return [empty && steps.length === 0 ? { ...base, content: NO_REPLY_TEXT } : base];
           case "error":
-            // 받은 텍스트가 없으면 자리를 지운다 (오류 내용은 오류 상자에 표시됨).
-            return empty ? [] : [{ ...m, content: m.content + ERROR_SUFFIX }];
+            // 보여준 것이 없으면 자리를 지운다 (오류 내용은 오류 상자에 표시됨).
+            if (empty && steps.length === 0) return [];
+            return [{ ...base, content: empty ? ERROR_SUFFIX.trim() : m.content + ERROR_SUFFIX }];
           default: // 사용자가 중지했거나 연결이 끊김
             return [
-              { ...m, content: empty ? INTERRUPTED_SUFFIX.trim() : m.content + INTERRUPTED_SUFFIX },
+              {
+                ...base,
+                content: empty ? INTERRUPTED_SUFFIX.trim() : m.content + INTERRUPTED_SUFFIX,
+              },
             ];
         }
       }),
@@ -530,7 +578,7 @@ export default function ChatPage() {
           <>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
-                <MessageList messages={messages} />
+                <MessageList messages={messages} activeId={activeAssistantId} />
                 {queued && (
                   <QueuedMessageBubble
                     message={queued}

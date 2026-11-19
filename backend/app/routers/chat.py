@@ -13,7 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.agents import runtime
-from app.agents.runtime import Finished, TextDelta, stream_reply
+from app.agents.events import (
+    Finished,
+    ReasoningDelta,
+    StepRecorder,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+)
+from app.agents.runtime import stream_reply
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
 from app.llm import model_name
@@ -117,6 +125,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
                 content=m.content,
                 created_at=m.created_at,
                 image_ids=[img.id for img in m.images],
+                steps=m.steps or [],
             )
             for m in conv.messages
         ],
@@ -204,9 +213,10 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -
 async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     """사용자 메시지를 저장하고 에이전트 응답을 SSE 로 스트리밍한다.
 
-    SSE 이벤트는 ``meta`` (대화 ID) → ``delta`` (텍스트 조각, 여러 번) → ``done``
-    (종료 사유, 모델) 순서이고, 실패하면 ``error`` 를 보낸다. 화면에 보여준 텍스트는
-    assistant 메시지로 저장한다 (``stream_and_save`` 참고). LLM 에 들어가는 대화 이력은
+    SSE 이벤트는 ``meta`` (대화 ID) → 응답 진행 이벤트 (여러 번) → ``done`` (종료 사유, 모델)
+    순서이고, 실패하면 ``error`` 를 보낸다. 응답 진행 이벤트는 ``delta`` (답변 텍스트),
+    ``reasoning`` (추론 과정), ``tool_start`` / ``tool_end`` (도구 호출)이다. 화면에 보여준
+    텍스트와 실행 단계는 assistant 메시지로 저장한다 (``stream_and_save`` 참고). LLM 에 들어가는 대화 이력은
     checkpointer 가 관리하고, ``messages`` 테이블은 화면 표시용이다.
 
     같은 대화의 응답이 이미 생성 중이면(다른 창에서 보낸 경우) 메시지를 저장하지 않고
@@ -270,17 +280,22 @@ INTERRUPTED_SUFFIX = "\n\n_(응답이 중단되었습니다.)_"
 ERROR_SUFFIX = "\n\n_(오류로 응답이 중단되었습니다.)_"
 
 
-async def save_assistant_message(conversation_id: uuid.UUID, content: str) -> None:
+async def save_assistant_message(
+    conversation_id: uuid.UUID, content: str, steps: list[dict[str, Any]] | None
+) -> None:
     """Assistant 메시지를 저장한다.
 
     응답 스트리밍 도중이나 끝난 뒤에 호출되므로 요청 스코프와 별개의 세션을 쓴다.
 
     Args:
         conversation_id: 대화 ID.
-        content: 저장할 텍스트.
+        content: 저장할 답변 텍스트.
+        steps: 실행 단계 (추론 과정, 도구 호출). 없으면 ``None``.
     """
     async with SessionLocal() as s:
-        s.add(Message(conversation_id=conversation_id, role="assistant", content=content))
+        s.add(
+            Message(conversation_id=conversation_id, role="assistant", content=content, steps=steps)
+        )
         await s.commit()
 
 
@@ -289,8 +304,9 @@ async def stream_and_save(
 ) -> AsyncIterator[str]:
     """에이전트 응답을 SSE 이벤트로 스트리밍하고, 화면에 보여준 텍스트를 저장한다.
 
-    끝까지 응답하면 전체 텍스트를 저장한다. 중간에 끝나면 그때까지 보여준 텍스트에
-    표시를 붙여 저장해서, 새로고침해도 화면에 보였던 내용이 남게 한다.
+    끝까지 응답하면 전체 텍스트와 실행 단계를 저장한다. 중간에 끝나면 그때까지 보여준
+    텍스트에 표시를 붙이고, 실행 중이던 도구는 중단/오류로 바꿔 저장해서, 새로고침해도
+    화면에 보였던 내용이 남게 한다.
 
     - 오류: ``error`` 이벤트를 보내고 ``ERROR_SUFFIX`` 를 붙인다.
     - 사용자가 중지했거나 연결이 끊김: 요청이 취소되므로 이벤트는 보낼 수 없고
@@ -306,48 +322,77 @@ async def stream_and_save(
         images: ``(mime_type, base64)`` 목록.
 
     Yields:
-        SSE 이벤트 문자열 (``meta`` → ``delta``... → ``done`` 또는 ``error``).
+        SSE 이벤트 문자열 (``meta`` → ``delta`` / ``reasoning`` / ``tool_start`` /
+        ``tool_end``... → ``done`` 또는 ``error``).
     """
     run_id = str(conversation_id)
     shown: list[str] = []
+    recorder = StepRecorder()
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
     try:
         yield sse("meta", {"conversation_id": run_id})
-        async for chunk in stream_reply(run_id, text, images):
-            if isinstance(chunk, TextDelta):
-                shown.append(chunk.text)
+        async for event in stream_reply(run_id, text, images):
+            recorder.apply(event)
+            if not isinstance(event, Finished):
                 await run_registry.touch(run_id)
-                yield sse("delta", {"text": chunk.text})
-            elif isinstance(chunk, Finished):
+            if isinstance(event, TextDelta):
+                shown.append(event.text)
+                yield sse("delta", {"text": event.text})
+            elif isinstance(event, ReasoningDelta):
+                yield sse("reasoning", {"text": event.text})
+            elif isinstance(event, ToolStarted):
+                yield sse(
+                    "tool_start",
+                    {
+                        "id": event.id,
+                        "name": event.name,
+                        "label": event.label.running,
+                        "done_label": event.label.done,
+                        "args": event.args,
+                    },
+                )
+            elif isinstance(event, ToolFinished):
+                yield sse(
+                    "tool_end", {"id": event.id, "output": event.output, "status": event.status}
+                )
+            elif isinstance(event, Finished):
                 # 저장과 해제는 도중에 연결이 끊겨도 끝까지 실행되게 보호한다.
                 # (보호하지 않으면 저장 직후 취소되어 해제가 빠지고, 대화가 "생성 중" 으로 남는다)
                 with anyio.CancelScope(shield=True):
                     outcome = "finished"
-                    if chunk.text:
-                        await save_assistant_message(conversation_id, chunk.text)
+                    recorder.finalize("finished")
+                    if event.text or recorder.steps:
+                        await save_assistant_message(
+                            conversation_id, event.text, recorder.to_json()
+                        )
                     await run_registry.release(run_id)
-                yield sse("done", {"stop_reason": chunk.stop_reason, "model": chunk.model})
+                yield sse("done", {"stop_reason": event.stop_reason, "model": event.model})
     except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
         logger.exception("Agent run failed")
         with anyio.CancelScope(shield=True):
             outcome = "error"
-            await _save_partial(conversation_id, shown, ERROR_SUFFIX)
+            recorder.finalize("error")
+            await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX)
             await run_registry.release(run_id)
         yield sse("error", {"message": f"LLM 호출 실패: {type(e).__name__}: {e}"[:500]})
     finally:
         # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.
         with anyio.CancelScope(shield=True):
             if outcome == "interrupted":
-                await _save_partial(conversation_id, shown, INTERRUPTED_SUFFIX)
+                recorder.finalize("interrupted")
+                await _save_partial(conversation_id, shown, recorder, INTERRUPTED_SUFFIX)
             # 어떤 경로로 끝나든 생성 중 표시는 반드시 해제한다 (이미 해제됐으면 아무 일 없음).
             await run_registry.release(run_id)
 
 
-async def _save_partial(conversation_id: uuid.UUID, shown: list[str], suffix: str) -> None:
-    """끝까지 오지 못한 응답을 표시와 함께 저장한다. 보여준 텍스트가 없으면 저장하지 않는다."""
-    if not shown:
+async def _save_partial(
+    conversation_id: uuid.UUID, shown: list[str], recorder: StepRecorder, suffix: str
+) -> None:
+    """끝까지 오지 못한 응답을 표시와 함께 저장한다. 보여준 것이 없으면 저장하지 않는다."""
+    if not shown and not recorder.steps:
         return
+    content = "".join(shown) + suffix if shown else suffix.strip()
     try:
-        await save_assistant_message(conversation_id, "".join(shown) + suffix)
+        await save_assistant_message(conversation_id, content, recorder.to_json())
     except Exception:
         logger.exception("failed to save partial reply for %s", conversation_id)

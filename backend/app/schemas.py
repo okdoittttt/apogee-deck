@@ -4,7 +4,7 @@ import base64
 import binascii
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -67,6 +67,45 @@ class ChatRequest(BaseModel):
         return self
 
 
+class ReasoningStep(BaseModel):
+    """실행 단계: 모델의 추론 과정.
+
+    Attributes:
+        type: 항상 ``"reasoning"``.
+        text: 추론 텍스트 (Claude 는 요약, qwen 등은 원문).
+    """
+
+    type: Literal["reasoning"] = "reasoning"
+    text: str
+
+
+class ToolStep(BaseModel):
+    """실행 단계: 도구 호출 하나.
+
+    Attributes:
+        type: 항상 ``"tool"``.
+        id: 도구 호출 ID.
+        name: 도구 이름.
+        label: 실행 중 표시 문구 (예: ``"시간을 확인하는 중"``).
+        done_label: 완료 표시 문구 (예: ``"시간 확인함"``).
+        args: 모델이 채운 인자.
+        output: 도구 결과 (길이 제한됨). 끝나지 않았으면 ``None``.
+        status: ``running`` / ``done`` / ``error`` / ``interrupted``.
+    """
+
+    type: Literal["tool"] = "tool"
+    id: str
+    name: str
+    label: str
+    done_label: str
+    args: dict[str, Any]
+    output: str | None = None
+    status: Literal["running", "done", "error", "interrupted"]
+
+
+Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]
+
+
 class MessageOut(BaseModel):
     """화면에 보여줄 메시지.
 
@@ -76,6 +115,7 @@ class MessageOut(BaseModel):
         content: 메시지 텍스트.
         created_at: 생성 시각.
         image_ids: 첨부 이미지 ID. 이미지는 ``GET /api/images/{id}`` 로 따로 받는다.
+        steps: assistant 응답의 실행 단계 (일어난 순서).
     """
 
     id: uuid.UUID
@@ -83,6 +123,7 @@ class MessageOut(BaseModel):
     content: str
     created_at: datetime
     image_ids: list[uuid.UUID] = []
+    steps: list[Step] = []
 
 
 class ConversationOut(BaseModel):

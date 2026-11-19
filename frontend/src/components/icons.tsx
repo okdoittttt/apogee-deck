@@ -83,7 +83,40 @@ export const ClockIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
   </svg>
 );
 
-export const ImageIcon =({ className = "h-4 w-4" }: IconProps) => (
+export const ChevronIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} strokeWidth={2} aria-hidden>
+    <path d="m9 6 6 6-6 6" />
+  </svg>
+);
+
+export const CheckIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} strokeWidth={2.2} aria-hidden>
+    <path d="m5 12.5 4.5 4.5L19 7.5" />
+  </svg>
+);
+
+export const SpinnerIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={`${className} animate-spin`} fill="none" aria-hidden>
+    <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2.5" />
+    <path d="M20.5 12A8.5 8.5 0 0 0 12 3.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+  </svg>
+);
+
+export const ToolIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
+    <path d="M14.5 6.5a4 4 0 0 0 5 5l-8.5 8.5a2.1 2.1 0 0 1-3-3Z" />
+    <path d="M14.5 6.5 17 4l3 3-2.5 2.5" />
+  </svg>
+);
+
+export const BrainIcon = ({ className = "h-3.5 w-3.5" }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
+    <path d="M9.5 4.5a3 3 0 0 0-3 3 3 3 0 0 0-2 5.2A3.2 3.2 0 0 0 8 18a2.5 2.5 0 0 0 4 1V6a2 2 0 0 0-2.5-1.5Z" />
+    <path d="M14.5 4.5a3 3 0 0 1 3 3 3 3 0 0 1 2 5.2A3.2 3.2 0 0 1 16 18a2.5 2.5 0 0 1-4 1" />
+  </svg>
+);
+
+export const ImageIcon = ({ className = "h-4 w-4" }: IconProps) => (
   <svg viewBox="0 0 24 24" className={className} {...base} aria-hidden>
     <rect x="3" y="4" width="18" height="16" rx="3" />
     <circle cx="9" cy="10" r="1.6" />

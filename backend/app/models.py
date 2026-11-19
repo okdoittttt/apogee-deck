@@ -7,8 +7,10 @@ LLM 에 들어가는 대화 이력은 LangGraph checkpointer 가 관리한다. �
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -45,6 +47,9 @@ class Message(Base):
         conversation_id: 속한 대화 ID.
         role: ``"user"`` 또는 ``"assistant"``.
         content: 메시지 텍스트. assistant 는 화면에 스트리밍된 텍스트 그대로 저장한다.
+        steps: assistant 응답의 실행 단계(추론 과정, 도구 호출)를 일어난 순서대로 담은 JSON.
+            형식은 ``app.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
+            없는 응답은 ``None``.
         created_at: 생성 시각.
         conversation: 속한 대화.
         images: 사용자가 첨부한 이미지 (첨부 순).
@@ -58,6 +63,7 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
+    steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

@@ -5,11 +5,11 @@
 """
 
 import logging
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -18,10 +18,24 @@ from psycopg_pool import AsyncConnectionPool
 
 from app import prompts, tracing
 from app.agents import chat
+from app.agents.events import (
+    AgentEvent,
+    Finished,
+    ReasoningDelta,
+    TextDelta,
+    ToolFinished,
+    ToolLabel,
+    ToolStarted,
+    default_label,
+    reasoning_text,
+    tool_output_text,
+)
 from app.config import Settings, get_settings
 from app.llm import model_name
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["AGENTS", "AgentEvent", "AgentSpec", "Finished", "TextDelta", "stream_reply"]
 
 
 @dataclass(frozen=True)
@@ -31,14 +45,16 @@ class AgentSpec:
     Attributes:
         build_graph: ``(settings, checkpointer)`` 를 받아 컴파일된 그래프를 만드는 함수.
         stream_nodes: 이 노드들이 생성한 토큰만 사용자에게 스트리밍한다.
+        tool_labels: 도구 이름 → 화면 표시 문구. 없는 도구는 기본 문구를 쓴다.
     """
 
     build_graph: Callable[[Settings, BaseCheckpointSaver], CompiledStateGraph]
     stream_nodes: frozenset[str]
+    tool_labels: Mapping[str, ToolLabel] = field(default_factory=dict)
 
 
 AGENTS: dict[str, AgentSpec] = {
-    "chat": AgentSpec(chat.build_graph, chat.STREAM_NODES),
+    "chat": AgentSpec(chat.build_graph, chat.STREAM_NODES, chat.TOOL_LABELS),
 }
 DEFAULT_AGENT = "chat"
 
@@ -125,32 +141,6 @@ async def prune_orphan_threads(keep: set[str]) -> int:
     return len(orphans)
 
 
-@dataclass
-class TextDelta:
-    """스트리밍 중인 응답 텍스트 조각.
-
-    Attributes:
-        text: 화면에 이어 붙일 텍스트.
-    """
-
-    text: str
-
-
-@dataclass
-class Finished:
-    """응답 스트리밍 종료.
-
-    Attributes:
-        text: 화면에 보여준 전체 텍스트 (UI 용 ``messages`` 테이블에 저장).
-        stop_reason: 공통 이름으로 맞춘 종료 사유 (``end_turn`` / ``max_tokens`` / ``refusal`` 등).
-        model: 응답한 모델 이름.
-    """
-
-    text: str
-    stop_reason: str | None
-    model: str
-
-
 # provider 별 종료 사유를 공통 이름으로 맞춘다 (프론트엔드는 이 값만 본다).
 _STOP_REASON_MAP = {"stop": "end_turn", "length": "max_tokens"}
 
@@ -190,11 +180,17 @@ async def stream_reply(
     user_text: str,
     images: list[tuple[str, str]] | None = None,
     agent: str = DEFAULT_AGENT,
-) -> AsyncIterator[TextDelta | Finished]:
-    """에이전트를 실행하고 응답을 스트리밍한다.
+) -> AsyncIterator[AgentEvent]:
+    """에이전트를 실행하고 응답과 실행 단계를 스트리밍한다.
 
     이전 대화는 checkpointer 가 들고 있으므로 새 사용자 메시지만 그래프에 넣는다.
-    tool 호출이 끼면 agent 노드가 여러 번 실행되므로, 응답 메시지가 바뀔 때 줄바꿈을 넣는다.
+    LangGraph 의 두 가지 스트림을 함께 받는다.
+
+    - ``messages``: 모델이 생성하는 토큰 → 답변 텍스트(``TextDelta``), 추론(``ReasoningDelta``)
+    - ``updates``: 노드가 끝날 때의 상태 변경 → 도구 호출 결정(``ToolStarted``),
+      도구 결과(``ToolFinished``)
+
+    tool 호출이 끼면 agent 노드가 여러 번 실행되므로, 답변 메시지가 바뀔 때 줄바꿈을 넣는다.
 
     Args:
         conversation_id: 대화 ID (= checkpointer ``thread_id``, Langfuse session ID).
@@ -203,7 +199,8 @@ async def stream_reply(
         agent: 실행할 에이전트 이름 (``AGENTS`` 의 키).
 
     Yields:
-        텍스트 조각마다 ``TextDelta``, 마지막에 ``Finished`` 하나.
+        일어난 순서대로 ``TextDelta`` / ``ReasoningDelta`` / ``ToolStarted`` / ``ToolFinished``,
+        마지막에 ``Finished`` 하나.
 
     Raises:
         RuntimeError: 런타임이 시작되지 않았거나 알 수 없는 에이전트일 때.
@@ -211,7 +208,7 @@ async def stream_reply(
     graph = _graphs.get(agent)
     if graph is None:
         raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
-    stream_nodes = AGENTS[agent].stream_nodes
+    spec = AGENTS[agent]
     config = {
         "configurable": {"thread_id": conversation_id},
         "callbacks": tracing.get_callbacks(),
@@ -219,24 +216,63 @@ async def stream_reply(
         "run_name": agent,
     }
 
-    shown: list[str] = []  # 화면에 보여준 텍스트 → UI 용 messages 테이블에 그대로 저장
+    shown: list[str] = []  # 화면에 보여준 답변 텍스트 → UI 용 messages 테이블에 그대로 저장
     current_msg_id: str | None = None
 
-    async for chunk, meta in graph.astream(
-        {"messages": [build_user_message(user_text, images or [])]}, config, stream_mode="messages"
+    async for mode, payload in graph.astream(
+        {"messages": [build_user_message(user_text, images or [])]},
+        config,
+        stream_mode=["messages", "updates"],
     ):
-        if meta.get("langgraph_node") not in stream_nodes or not isinstance(chunk, AIMessageChunk):
-            continue
-        text = chunk.text
-        if not text:
-            continue
-        if current_msg_id is not None and chunk.id != current_msg_id and shown:
-            text = "\n\n" + text
-        current_msg_id = chunk.id
-        shown.append(text)
-        yield TextDelta(text)
+        if mode == "messages":
+            chunk, meta = payload
+            if meta.get("langgraph_node") not in spec.stream_nodes:
+                continue
+            if not isinstance(chunk, AIMessageChunk):
+                continue
+            if reasoning := reasoning_text(chunk):
+                yield ReasoningDelta(reasoning)
+            if text := chunk.text:
+                if current_msg_id is not None and chunk.id != current_msg_id and shown:
+                    text = "\n\n" + text
+                current_msg_id = chunk.id
+                shown.append(text)
+                yield TextDelta(text)
+        elif mode == "updates":
+            for event in _tool_events(payload, spec.tool_labels):
+                yield event
 
     state = await graph.aget_state(config)
     last = state.values["messages"][-1]
     stop = _stop_reason(last) if isinstance(last, AIMessage) else None
     yield Finished(text="".join(shown), stop_reason=stop, model=model_name(get_settings()))
+
+
+def _tool_events(
+    update: Mapping[str, Any], labels: Mapping[str, ToolLabel]
+) -> list[ToolStarted | ToolFinished]:
+    """노드 업데이트에서 도구 호출 결정과 도구 결과를 찾아 이벤트로 바꾼다."""
+    events: list[ToolStarted | ToolFinished] = []
+    for node_update in update.values():
+        if not isinstance(node_update, Mapping):
+            continue
+        for message in node_update.get("messages") or []:
+            if isinstance(message, AIMessage):
+                events.extend(
+                    ToolStarted(
+                        id=call["id"],
+                        name=call["name"],
+                        args=call["args"],
+                        label=labels.get(call["name"]) or default_label(call["name"]),
+                    )
+                    for call in message.tool_calls
+                )
+            elif isinstance(message, ToolMessage):
+                events.append(
+                    ToolFinished(
+                        id=message.tool_call_id,
+                        output=tool_output_text(message.content),
+                        status="error" if message.status == "error" else "done",
+                    )
+                )
+    return events

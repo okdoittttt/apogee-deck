@@ -2,11 +2,33 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000
 
 export type Role = "user" | "assistant";
 
+/** 실행 단계: 모델의 추론 과정 (Claude 는 요약, qwen 등은 원문). */
+export interface ReasoningStep {
+  type: "reasoning";
+  text: string;
+}
+
+/** 실행 단계: 도구 호출 하나. */
+export interface ToolStep {
+  type: "tool";
+  id: string;
+  name: string;
+  label: string; // 실행 중 문구 (예: "시간을 확인하는 중")
+  done_label: string; // 완료 문구 (예: "시간 확인함")
+  args: Record<string, unknown>;
+  output: string | null;
+  status: "running" | "done" | "error" | "interrupted";
+}
+
+export type Step = ReasoningStep | ToolStep;
+
 export interface ChatMessage {
   id: string;
   role: Role;
   content: string;
   images?: string[]; // 표시용 URL (서버 이미지 URL 또는 data URL)
+  steps?: Step[]; // assistant 응답의 실행 단계 (일어난 순서)
+  thinking?: boolean; // 화면 전용: 지금 추론 과정을 받는 중인지
 }
 
 interface MessageOut {
@@ -14,6 +36,7 @@ interface MessageOut {
   role: Role;
   content: string;
   image_ids: string[];
+  steps: Step[];
 }
 
 export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
@@ -46,6 +69,7 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
       role: m.role,
       content: m.content,
       images: m.image_ids.map(imageUrl),
+      steps: m.steps,
     })),
   };
 }
@@ -82,9 +106,26 @@ export const INTERRUPTED_SUFFIX = "\n\n_(응답이 중단되었습니다.)_";
 export const ERROR_SUFFIX = "\n\n_(오류로 응답이 중단되었습니다.)_";
 export const NO_REPLY_TEXT = "_(응답 없음)_";
 
+export interface ToolStartEvent {
+  id: string;
+  name: string;
+  label: string;
+  done_label: string;
+  args: Record<string, unknown>;
+}
+
+export interface ToolEndEvent {
+  id: string;
+  output: string;
+  status: "done" | "error";
+}
+
 export interface StreamHandlers {
   onMeta?: (data: { conversation_id: string }) => void;
   onDelta?: (text: string) => void;
+  onReasoning?: (text: string) => void;
+  onToolStart?: (data: ToolStartEvent) => void;
+  onToolEnd?: (data: ToolEndEvent) => void;
   onDone?: (data: { stop_reason: string | null; model: string }) => void;
   onError?: (message: string) => void;
   /** 같은 대화의 응답이 다른 창에서 생성 중이라 거절됨 (409). 메시지는 저장되지 않았다. */
@@ -141,6 +182,15 @@ export async function streamChat(
           break;
         case "delta":
           handlers.onDelta?.(payload.text);
+          break;
+        case "reasoning":
+          handlers.onReasoning?.(payload.text);
+          break;
+        case "tool_start":
+          handlers.onToolStart?.(payload);
+          break;
+        case "tool_end":
+          handlers.onToolEnd?.(payload);
           break;
         case "done":
           handlers.onDone?.(payload);
