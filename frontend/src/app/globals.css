@@ -1,0 +1,66 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* 색상 토큰: 라이트 기본값, 시스템이 다크 모드면 아래에서 덮어쓴다. */
+@theme {
+  --color-app: #faf9f6;
+  --color-sidebar: #f2f1ed;
+  --color-surface: #ffffff;
+  --color-bubble: #ebe9e4;
+  --color-hover: rgb(0 0 0 / 0.045);
+  --color-active: rgb(0 0 0 / 0.08);
+  --color-line: #e3e1db;
+  --color-line-strong: #d3d0c8;
+  --color-fg: #1c1b19;
+  --color-muted: #6f6c65;
+  --color-subtle: #9a978f;
+
+  --font-display: var(--font-serif-kr), ui-serif, Georgia, serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-app: #262624;
+    --color-sidebar: #1e1e1c;
+    --color-surface: #31312e;
+    --color-bubble: #3a3a37;
+    --color-hover: rgb(255 255 255 / 0.05);
+    --color-active: rgb(255 255 255 / 0.09);
+    --color-line: #393935;
+    --color-line-strong: #4a4a45;
+    --color-fg: #ecebe7;
+    --color-muted: #a8a59e;
+    --color-subtle: #7d7a74;
+    color-scheme: dark;
+  }
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--color-app);
+  color: var(--color-fg);
+}
+
+/* 얇은 스크롤바 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+/* 응답 대기 중 점 애니메이션 */
+@keyframes typing {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.typing-dot {
+  animation: typing 1.2s infinite ease-in-out;
+}
