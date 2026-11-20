@@ -17,7 +17,7 @@ import logging
 from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, SystemMessage
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -26,6 +26,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from app import prompts
 from app.core.config import Settings
 from app.core.storage import get_storage
+from app.documents.reading import document_list
 from app.images import resolve_images
 from app.llm import build_chat_model, build_summary_model
 from app.llm.catalog import model_id
@@ -102,21 +103,31 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
     # langfuse_prompt 를 보고, 그 아래 LLM 호출(generation)을 해당 프롬프트 버전에 연결한다.
     call_model = RunnableLambda(model.ainvoke, name="call_model")
 
-    async def agent(state: ChatState) -> dict[str, Any]:
-        """System 프롬프트 + (요약) + 최근 대화로 모델을 호출한다.
+    async def agent(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+        """System 프롬프트 + (프로젝트 정보) + (요약) + 최근 대화로 모델을 호출한다.
 
         system 프롬프트는 상태에 저장하지 않고 호출할 때마다 렌더링해서 앞에 붙인다.
-        대화 이력 예산이 있고 요약이 있으면, 요약을 system 프롬프트 끝에 붙이고
-        요약 이후의 메시지만 보낸다.
+        프로젝트 안의 대화면 프로젝트 지시문과 문서 목록을 붙인다 (``config["configurable"]["project"]``,
+        ``app.projects.service.ProjectContext``). 대화 이력 예산이 있고 요약이 있으면, 요약을
+        system 프롬프트 끝에 붙이고 요약 이후의 메시지만 보낸다.
 
         Args:
             state: 그래프 상태 (전체 대화 이력과 요약).
+            config: 실행 설정. 이번 턴의 프로젝트 정보가 들어 있을 수 있다.
 
         Returns:
             상태에 추가할 모델 응답 메시지.
         """
         prompt = await prompts.arender("chat/system", today=today(settings))
         text = prompt.text
+        if (project := (config.get("configurable") or {}).get("project")) is not None:
+            project_prompt = await prompts.arender(
+                "chat/project",
+                name=project.name,
+                instructions=project.instructions or "(none)",
+                documents=document_list(project.documents) or "(none)",
+            )
+            text = f"{text}\n\n{project_prompt.text}"
         history = model_view(state["messages"])
         if budget is not None and state.get("summary"):
             summary_prompt = await prompts.arender(

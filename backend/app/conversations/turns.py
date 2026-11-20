@@ -23,6 +23,7 @@ from app.orchestration.events import (
     ToolStarted,
 )
 from app.orchestration.runtime import stream_reply
+from app.projects import service as projects
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ async def run_turn(
     text: str,
     images: list[dict[str, Any]],
     model: str | None = None,
+    project_id: uuid.UUID | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """에이전트 응답을 이벤트로 내보내고, 화면에 보여준 텍스트를 저장한다.
 
@@ -100,6 +102,7 @@ async def run_turn(
         text: 모델에게 보낼 사용자 메시지 텍스트 (첨부 목록 포함).
         images: 이미지 참조 블록 (``app.images.image_ref_block``).
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
+        project_id: 대화가 속한 프로젝트 ID. 있으면 프로젝트 정보(지시문, 문서 목록)를 에이전트에게 준다.
 
     Yields:
         ``meta`` → ``delta`` / ``reasoning`` / ``tool_start`` / ``tool_end``... → ``done`` 또는
@@ -111,7 +114,8 @@ async def run_turn(
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
     try:
         yield StreamEvent("meta", {"conversation_id": run_id})
-        async for event in stream_reply(run_id, text, images, model=model):
+        context = await _agent_context(project_id)
+        async for event in stream_reply(run_id, text, images, model=model, context=context):
             recorder.apply(event)
             if not isinstance(event, Finished):
                 await runs.run_registry.touch(run_id)
@@ -180,6 +184,15 @@ async def run_turn(
                 await _save_partial(conversation_id, shown, recorder, INTERRUPTED_SUFFIX, model)
             # 어떤 경로로 끝나든 생성 중 표시는 반드시 해제한다 (이미 해제됐으면 아무 일 없음).
             await runs.run_registry.release(run_id)
+
+
+async def _agent_context(project_id: uuid.UUID | None) -> dict[str, Any]:
+    """에이전트에게 넘길 턴 정보. 프로젝트 대화면 이번 턴 시작 시점의 프로젝트 정보를 담는다."""
+    if project_id is None:
+        return {}
+    async with SessionLocal() as s:
+        project = await projects.load_context(s, project_id)
+    return {"project": project} if project is not None else {}
 
 
 async def _save_partial(

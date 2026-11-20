@@ -291,13 +291,22 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
             images=[(img.mime_type, img.to_bytes()) for img in req.images],
             document_ids=req.document_ids,
             model=req.model,
+            project_id=req.project_id,
         )
     except (ConversationError, AttachError) as exc:
         raise _http_error(exc) from exc
 
     # 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장, 생성 중 표시 해제
     return StreamingResponse(
-        sse_stream(turns.run_turn(turn.conversation_id, turn.text, turn.images, turn.model)),
+        sse_stream(
+            turns.run_turn(
+                turn.conversation_id,
+                turn.text,
+                turn.images,
+                turn.model,
+                project_id=turn.project_id,
+            )
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

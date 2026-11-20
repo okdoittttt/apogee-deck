@@ -101,6 +101,7 @@ class Settings(BaseSettings):
             (도구 호출 한 번을 아낀다). 0 이면 항상 ``read_document`` 로 읽게 한다.
         document_read_max_chars: ``read_document`` 가 한 번에 보여줄 최대 글자 수.
         max_documents_per_message: 메시지 하나에 붙일 수 있는 문서 수.
+        project_max_tokens: 프로젝트 하나에 넣을 수 있는 문서 분량(추정 토큰 수 합계). 문서 수는 제한하지 않는다.
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -216,6 +217,7 @@ class Settings(BaseSettings):
     document_inline_max_tokens: int = 2000
     document_read_max_chars: int = 8000
     max_documents_per_message: int = 5
+    project_max_tokens: int = 1_000_000
 
     # --- Auth ---
     auth_required: bool = True

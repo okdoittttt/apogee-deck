@@ -98,6 +98,35 @@ class ApprovalToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Project(Base):
+    """프로젝트: 문서 묶음과 지시문, 그 안의 대화들.
+
+    프로젝트 문서는 첨부 문서와 달리 보관 기간이 없다 (사용자가 지울 때까지 둔다). 프로젝트를 지우면
+    그 안의 대화와 문서가 함께 지워진다.
+
+    Attributes:
+        id: 프로젝트 ID.
+        user_id: 프로젝트의 주인.
+        name: 프로젝트 이름.
+        instructions: 이 프로젝트의 대화에서 모델이 따를 지시문 (system 프롬프트에 붙는다).
+        created_at: 만든 시각.
+        updated_at: 이름이나 지시문을 마지막으로 바꾼 시각.
+    """
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    instructions: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Conversation(Base):
     """대화 하나. ``id`` 가 LangGraph checkpointer 의 ``thread_id`` 로도 쓰인다.
 
@@ -105,6 +134,7 @@ class Conversation(Base):
         id: 대화 ID.
         user_id: 대화의 주인. 로그인 기능 전에 만든 대화는 ``None`` 이고, 관리자가 처음 로그인할 때
             관리자에게 옮긴다.
+        project_id: 속한 프로젝트. 프로젝트 밖의 대화는 ``None``.
         title: 사이드바에 보이는 제목 (첫 메시지 앞부분).
         created_at: 생성 시각.
         messages: 대화의 메시지 (생성 순).
@@ -115,6 +145,9 @@ class Conversation(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     title: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -189,15 +222,20 @@ class MessageImage(Base):
 
 
 class Document(Base):
-    """사용자가 첨부한 문서. 원본은 첨부 저장소(MinIO)에, 파싱한 텍스트는 이 테이블에 둔다.
+    """사용자가 올린 문서. 원본은 첨부 저장소(MinIO)에, 파싱한 텍스트는 이 테이블에 둔다.
 
-    문서는 올리는 순간에는 어느 대화에도 속하지 않는다. 메시지와 함께 보낼 때 대화와 메시지에
-    연결되고, 그 대화 안에서만 읽을 수 있다. 보내지 않은 문서는 정리 작업이 지운다.
+    두 종류가 있다.
+
+    - 대화 첨부: 올리는 순간에는 어느 대화에도 속하지 않는다. 메시지와 함께 보낼 때 대화와 메시지에
+      연결되고, 그 대화 안에서만 읽을 수 있다. 보내지 않은 문서와 보관 기간이 지난 문서는 정리 작업이 지운다.
+    - 프로젝트 문서 (``project_id`` 가 있음): 대화에 붙지 않고, 그 프로젝트의 모든 대화에서 읽을 수 있다.
+      보관 기간 없이 사용자가 지울 때까지 둔다.
 
     Attributes:
         id: 문서 ID.
         user_id: 문서를 올린 사용자. 로그인 기능 전에 올린 문서는 ``None``.
-        conversation_id: 속한 대화 ID. 메시지로 보내기 전에는 ``None``.
+        project_id: 속한 프로젝트 ID. 대화 첨부는 ``None``.
+        conversation_id: 속한 대화 ID. 메시지로 보내기 전이나 프로젝트 문서는 ``None``.
         message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전에는 ``None``.
         filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
         kind: 내용으로 확인한 형식 (``app.documents.formats.DocumentKind``).
@@ -209,6 +247,7 @@ class Document(Base):
         error: 실패 사유 (사용자에게 보여줄 문구).
         page_count: 쪽수 (쪽 구분이 없는 형식은 ``None``).
         content: 파싱한 본문 (Markdown). 준비되기 전에는 ``None``.
+        token_count: 본문의 추정 토큰 수 (프로젝트 용량 계산에 쓴다). 준비되기 전에는 ``None``.
         created_at: 올린 시각.
         parsed_at: 파싱이 끝난 시각 (성공·실패 모두).
     """
@@ -218,6 +257,9 @@ class Document(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=True
@@ -235,6 +277,7 @@ class Document(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.auth.users import is_admin
 from app.core.config import Settings
-from app.models import Document, User
+from app.models import Document, Project, User
 
 MAX_IMAGES_PER_MESSAGE = 4
 MAX_DOCUMENTS_PER_MESSAGE_LIMIT = 20
@@ -61,9 +61,11 @@ class ChatRequest(BaseModel):
         images: 첨부 이미지 (최대 ``MAX_IMAGES_PER_MESSAGE`` 장).
         document_ids: 첨부 문서 ID (``POST /api/documents`` 로 올리고 파싱이 끝난 문서).
         model: 응답할 모델 ID (``GET /api/models`` 의 ``id``). 없으면 기본 모델.
+        project_id: 새 대화를 만들 프로젝트 ID. 이어가는 대화에서는 무시한다.
     """
 
     conversation_id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
     model: str | None = Field(default=None, max_length=200)
     message: str = Field(default="", max_length=100_000)
     images: list[ImageIn] = Field(default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE)
@@ -196,6 +198,7 @@ class ConversationOut(BaseModel):
         id: 대화 ID.
         title: 대화 제목.
         created_at: 생성 시각.
+        project_id: 속한 프로젝트 ID. 프로젝트 밖의 대화는 ``None``.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -203,6 +206,7 @@ class ConversationOut(BaseModel):
     id: uuid.UUID
     title: str
     created_at: datetime
+    project_id: uuid.UUID | None = None
 
 
 class ConversationDetail(ConversationOut):
@@ -243,6 +247,7 @@ class DocumentOut(BaseModel):
         error: 실패 사유.
         page_count: 쪽 수 (쪽 구분이 없는 형식은 ``None``).
         char_count: 파싱한 본문의 글자 수 (준비되기 전에는 ``None``).
+        token_count: 본문의 추정 토큰 수 (프로젝트 문서만, 준비되기 전에는 ``None``).
         created_at: 올린 시각.
         parsed_at: 파싱이 끝난 시각.
     """
@@ -256,8 +261,73 @@ class DocumentOut(BaseModel):
     error: str | None = None
     page_count: int | None = None
     char_count: int | None = None
+    token_count: int | None = None
     created_at: datetime
     parsed_at: datetime | None = None
+
+
+ProjectName = Annotated[str, Field(min_length=1, max_length=100, pattern=r"\S")]
+ProjectInstructions = Annotated[str, Field(max_length=20_000)]
+
+
+class ProjectIn(BaseModel):
+    """``POST /api/projects`` 요청.
+
+    Attributes:
+        name: 프로젝트 이름 (공백만으로는 안 된다).
+        instructions: 지시문.
+    """
+
+    name: ProjectName
+    instructions: ProjectInstructions = ""
+
+
+class ProjectUpdate(BaseModel):
+    """``PATCH /api/projects/{id}`` 요청. 보낸 값만 바꾼다.
+
+    Attributes:
+        name: 새 이름.
+        instructions: 새 지시문.
+    """
+
+    name: ProjectName | None = None
+    instructions: ProjectInstructions | None = None
+
+
+class ProjectOut(BaseModel):
+    """프로젝트 목록의 항목.
+
+    Attributes:
+        id: 프로젝트 ID.
+        name: 이름.
+        instructions: 지시문.
+        created_at: 만든 시각.
+        updated_at: 마지막으로 바꾼 시각.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    instructions: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectDetail(ProjectOut):
+    """문서와 대화, 용량을 포함한 프로젝트.
+
+    Attributes:
+        documents: 프로젝트 문서 (올린 순).
+        conversations: 프로젝트 안의 대화 (최신순).
+        used_tokens: 쓰고 있는 용량 (준비된 문서의 추정 토큰 수 합계).
+        max_tokens: 용량 상한.
+    """
+
+    documents: list[DocumentOut]
+    conversations: list[ConversationOut]
+    used_tokens: int
+    max_tokens: int
 
 
 MessageOut.model_rebuild()
@@ -310,6 +380,18 @@ def user_out(user: User, settings: Settings) -> UserOut:
     )
 
 
+def project_out(project: Project) -> ProjectOut:
+    """DB 의 프로젝트를 응답 형식으로 바꾼다.
+
+    Args:
+        project: 프로젝트.
+
+    Returns:
+        응답용 프로젝트 정보.
+    """
+    return ProjectOut.model_validate(project)
+
+
 def document_out(doc: Document, char_count: int | None) -> DocumentOut:
     """DB 의 문서를 응답 형식으로 바꾼다 (본문 제외).
 
@@ -330,6 +412,7 @@ def document_out(doc: Document, char_count: int | None) -> DocumentOut:
         error=doc.error,
         page_count=doc.page_count,
         char_count=char_count,
+        token_count=doc.token_count if doc.project_id is not None else None,
         created_at=doc.created_at,
         parsed_at=doc.parsed_at,
     )

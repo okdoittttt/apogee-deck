@@ -140,7 +140,7 @@ async def download_document(
 
 @router.delete("/{document_id}", status_code=204)
 async def delete_document(document_id: uuid.UUID, session: SessionDep, user: ApprovedUser) -> None:
-    """아직 보내지 않은 문서를 지운다 (입력창에서 첨부를 뺄 때).
+    """아직 보내지 않은 첨부 문서를 지운다 (입력창에서 첨부를 뺄 때).
 
     Args:
         document_id: 문서 ID.
@@ -148,11 +148,15 @@ async def delete_document(document_id: uuid.UUID, session: SessionDep, user: App
         user: 승인된 사용자.
 
     Raises:
-        HTTPException: 문서가 없거나 내 것이 아니면 404, 이미 메시지로 보낸 문서면 409.
+        HTTPException: 문서가 없거나 내 것이 아니면 404, 이미 메시지로 보낸 문서나 프로젝트 문서면 409.
     """
     doc = await session.get(Document, document_id)
     if doc is None or doc.user_id != user.id:
         raise HTTPException(status_code=404, detail="Document not found")
+    if doc.project_id is not None:
+        raise HTTPException(
+            status_code=409, detail="프로젝트 문서는 프로젝트 화면에서 지워 주세요."
+        )
     if doc.conversation_id is not None:
         raise HTTPException(
             status_code=409, detail="이미 보낸 문서는 대화를 지울 때 함께 지워집니다."

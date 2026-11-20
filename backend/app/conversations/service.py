@@ -1,4 +1,4 @@
-"""대화 서비스: 대화 조회·삭제, 이미지 원본 읽기, 새 턴 준비(검증 + 사용자 메시지 저장).
+"""대화 서비스: 대화 조회·삭제, 프로젝트 삭제, 이미지 원본 읽기, 새 턴 준비(검증 + 사용자 메시지 저장).
 
 HTTP 를 모른다. 사용자에게 보여줄 실패는 ``ConversationError`` (상태 코드 포함)로 던지고, API 계층이
 응답으로 바꾼다. 문서를 붙일 수 없을 때는 문서 서비스의 ``AttachError`` 가 그대로 올라간다.
@@ -23,6 +23,7 @@ from app.documents import service as documents
 from app.llm.catalog import available_models
 from app.models import Conversation, Document, Message, MessageImage
 from app.orchestration import runtime
+from app.projects import service as projects
 
 logger = logging.getLogger(__name__)
 
@@ -223,10 +224,58 @@ async def delete(session: AsyncSession, conversation_id: uuid.UUID, user_id: uui
     await session.commit()
     await documents.delete_objects(document_keys)
     await chat_images.delete_images(get_storage(), image_keys)
-    try:
-        await runtime.delete_thread(str(conversation_id))
-    except Exception:
-        logger.exception("failed to delete checkpoint thread %s", conversation_id)
+    await _delete_threads([conversation_id])
+
+
+async def _delete_threads(conversation_ids: Sequence[uuid.UUID]) -> None:
+    """대화들의 checkpoint 를 지운다. 실패하면 기록만 남긴다 (다음 기동 때 정리된다)."""
+    for conversation_id in conversation_ids:
+        try:
+            await runtime.delete_thread(str(conversation_id))
+        except Exception:
+            logger.exception("failed to delete checkpoint thread %s", conversation_id)
+
+
+async def delete_project(session: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """프로젝트와 그 안의 대화·문서를 모두 지운다.
+
+    DB 기록은 프로젝트와 함께 지워지고(CASCADE), 프로젝트 문서·대화 첨부 문서·이미지 원본은
+    저장소에서, 대화 기록은 checkpoint 에서 지운다.
+
+    Args:
+        session: DB 세션.
+        project_id: 프로젝트 ID.
+        user_id: 요청한 사용자 ID.
+
+    Raises:
+        ProjectError: 프로젝트가 없거나 내 것이 아니면 404.
+        ConversationError: 프로젝트 안의 대화가 응답 생성 중이면 409.
+    """
+    project = await projects.get_own(session, project_id, user_id)
+    conversation_ids = list(
+        await session.scalars(select(Conversation.id).where(Conversation.project_id == project_id))
+    )
+    for conversation_id in conversation_ids:
+        if await runs.run_registry.is_running(str(conversation_id)):
+            raise ConversationError(
+                409, "응답 생성 중인 대화가 있어 프로젝트를 삭제할 수 없습니다."
+            )
+    in_project = (Document.project_id == project_id) | Document.conversation_id.in_(
+        conversation_ids
+    )
+    document_keys = list(await session.scalars(select(Document.storage_key).where(in_project)))
+    image_keys = list(
+        await session.scalars(
+            select(MessageImage.storage_key)
+            .join(Message, Message.id == MessageImage.message_id)
+            .where(Message.conversation_id.in_(conversation_ids))
+        )
+    )
+    await session.delete(project)
+    await session.commit()
+    await documents.delete_objects(document_keys)
+    await chat_images.delete_images(get_storage(), image_keys)
+    await _delete_threads(conversation_ids)
 
 
 @dataclass(frozen=True)
@@ -238,12 +287,14 @@ class Turn:
         text: 모델에게 보낼 사용자 메시지 텍스트 (첨부 목록 포함).
         images: 이미지 참조 블록 (``app.images.image_ref_block``).
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
+        project_id: 대화가 속한 프로젝트 ID. 프로젝트 밖의 대화는 ``None``.
     """
 
     conversation_id: uuid.UUID
     text: str
     images: list[dict[str, Any]]
     model: str | None
+    project_id: uuid.UUID | None = None
 
 
 def new_title(message: str, has_documents: bool) -> str:
@@ -270,6 +321,7 @@ async def start_turn(
     images: Sequence[tuple[str, bytes]],
     document_ids: Sequence[uuid.UUID],
     model: str | None,
+    project_id: uuid.UUID | None = None,
 ) -> Turn:
     """새 턴을 검증하고, 대화를 생성 중으로 표시하고, 사용자 메시지를 저장한다.
 
@@ -288,14 +340,15 @@ async def start_turn(
         images: ``(MIME 타입, 원본 바이트)`` 목록.
         document_ids: 붙일 문서 ID.
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
+        project_id: 새 대화를 만들 프로젝트 ID. 이어가는 대화에는 쓰지 않는다 (대화의 프로젝트를 따른다).
 
     Returns:
         에이전트 실행에 넘길 턴.
 
     Raises:
         ConversationError: 이미지 입력이 꺼져 있으면 400, 저장소가 없어 이미지를 받을 수 없으면 503,
-            지금 쓸 수 없는 모델이면 400, 문서가 너무 많으면 400, 대화가 없거나 내 것이 아니면 404,
-            같은 대화의 응답이 생성 중이면 409.
+            지금 쓸 수 없는 모델이면 400, 문서가 너무 많으면 400, 대화나 프로젝트가 없거나 내 것이
+            아니면 404, 같은 대화의 응답이 생성 중이면 409.
         AttachError: 붙일 수 없는 문서일 때 (``documents.check_attachable``).
     """
     settings = get_settings()
@@ -318,7 +371,14 @@ async def start_turn(
     if conversation_id:
         conv = await get_own(session, conversation_id, user_id)
     else:
-        conv = Conversation(title=new_title(message, bool(document_ids)), user_id=user_id)
+        if project_id is not None:
+            try:
+                await projects.get_own(session, project_id, user_id)
+            except projects.ProjectError as exc:
+                raise ConversationError(404, "Project not found") from exc
+        conv = Conversation(
+            title=new_title(message, bool(document_ids)), user_id=user_id, project_id=project_id
+        )
         session.add(conv)
         await session.flush()
     if not await runs.run_registry.try_acquire(str(conv.id)):
@@ -360,4 +420,5 @@ async def start_turn(
         ),
         images=[chat_images.image_ref_block(row) for row in image_rows],
         model=model,
+        project_id=conv.project_id,
     )

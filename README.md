@@ -163,9 +163,9 @@ backend/
 │   ├── api/                 # HTTP 계층: 인증, 입력 검증, 응답 형식, SSE 변환만
 │   │   ├── deps.py          # DB 세션, 요청별 현재 사용자 (FastAPI 의존성)
 │   │   ├── schemas.py       # 요청/응답 스키마
-│   │   └── routers/         # auth, approvals, admin, documents, chat(/api/chat SSE, 대화, 이미지)
+│   │   └── routers/         # auth, approvals, admin, documents, projects, chat(/api/chat SSE, 대화, 이미지)
 │   ├── conversations/       # 대화 도메인
-│   │   ├── service.py       # 대화 조회·삭제, 새 턴 준비(검증 + 사용자 메시지 저장)
+│   │   ├── service.py       # 대화 조회·삭제, 프로젝트 삭제, 새 턴 준비(검증 + 사용자 메시지 저장)
 │   │   ├── turns.py         # 한 턴의 응답 실행: 이벤트 내보내기 + 답변 저장
 │   │   └── runs.py          # 대화별 "생성 중" 상태
 │   ├── agents/              # 에이전트 정의와 등록 목록(AGENTS)
@@ -179,7 +179,8 @@ backend/
 │   │   ├── summary.py       # 오래된 대화 요약
 │   │   └── tooling.py       # 도구 오류 처리, 반복 제한
 │   ├── tools/               # 공용 도구 (registry.py 에 등록, 에이전트가 이름으로 골라 씀)
-│   ├── documents/           # 첨부 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
+│   ├── projects/            # 프로젝트: 만들기·조회, 프로젝트 문서, 에이전트에게 줄 프로젝트 정보
+│   ├── documents/           # 첨부·프로젝트 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
 │   ├── web/                 # 웹 검색(Tavily), 페이지 읽기
 │   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제)
 │   ├── images.py            # 채팅 이미지: 저장소 저장, checkpoint 참조 ↔ 원본
@@ -195,7 +196,7 @@ backend/
 
 ```
 main → api → conversations → agents → orchestration → tools
-     → documents · web · auth · images → llm · prompts → models → core
+     → projects · documents · web · auth · images → llm · prompts → models → core
 ```
 
 **대화 이력 저장 방식 (A안)**
@@ -215,6 +216,7 @@ prompts.render("chat/system", today="2026-11-19 (Thursday)").text
 | 이름 | 파일 |
 |---|---|
 | `chat/system` | `app/agents/chat/prompts/system.md` |
+| `chat/project` | `app/agents/chat/prompts/project.md` (프로젝트 대화일 때 system 프롬프트에 덧붙임) |
 | `shared/language` | `app/prompts/shared/language.md` |
 
 파일 형식은 YAML frontmatter + Jinja2 본문입니다.
@@ -345,7 +347,8 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다.
 
 - Langfuse 용 MinIO 와 계정·볼륨을 나눴습니다. Langfuse 없이도 동작하고, Langfuse 를 초기화해도 첨부 원본은 남습니다.
-- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일, 문서 원본 `documents/` 에만 적용)을 만듭니다.
+- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일, 대화 첨부 원본 `documents/` 에만 적용)을 만듭니다.
+  프로젝트 문서 원본(`projects/`)과 채팅 이미지(`images/`)는 보관 기간 없이 지울 때까지 둡니다.
   MinIO 에 연결하지 못해도 앱은 시작하고, 첨부만 쓸 수 없습니다.
 - 코드는 MinIO 전용 API 가 아니라 S3 API(boto3)만 씁니다. `S3_ENDPOINT_URL`과 키만 바꾸면 AWS S3, Cloudflare R2 등으로 옮길 수 있습니다.
 
@@ -372,6 +375,20 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 - 짧은 문서(추정 2,000토큰 이하, `DOCUMENT_INLINE_MAX_TOKENS`)는 본문까지 바로 넣어서 도구 호출을 아낍니다.
 - 긴 문서는 `read_document(document_id, offset)` 도구로 8,000자(`DOCUMENT_READ_MAX_CHARS`)씩 나눠 읽습니다. 다른 대화의 문서 ID 를 넣으면 찾을 수 없다고 답합니다.
 - 문서 본문은 `<document_content>` 태그로 감싸 지시가 아닌 참고 자료로 표시합니다 (웹 페이지 읽기와 같은 프롬프트 인젝션 방어).
+
+### 프로젝트
+
+문서를 모아 두고 그 안에서 여러 대화를 하는 기능입니다 (Claude 의 프로젝트와 비슷). 사이드바의 "프로젝트"에서 만듭니다.
+
+- 프로젝트 = 이름 + **지시문** + **문서** + 그 안의 **대화들**. 프로젝트 화면에서 보낸 메시지는 그 프로젝트 안의 새 대화가 됩니다.
+- 지시문과 문서 목록은 매 응답마다 system 프롬프트 끝에 붙입니다 (`chat/project`). 지시문을 고치면 다음 응답부터 적용됩니다.
+  checkpoint 에는 저장하지 않습니다 (실행 설정 `configurable["project"]` 로 넘김).
+- 모델은 `read_document` 로 프로젝트 문서를 읽습니다. 읽을 수 있는 프로젝트는 서버가 정하므로, 모델이 다른 프로젝트의 문서 ID 를 넣어도 읽지 못합니다.
+- **보관**: 프로젝트 문서는 30일 정리를 받지 않고 지울 때까지 둡니다. 메시지에 첨부할 수는 없습니다.
+  프로젝트를 지우면 그 안의 대화·문서·이미지·checkpoint 가 모두 지워집니다 (응답 생성 중인 대화가 있으면 409).
+- **용량**: 문서 수는 제한하지 않고, 준비된 문서의 추정 토큰 수 합계로 제한합니다 (`PROJECT_MAX_TOKENS`, 기본 100만).
+  꽉 찬 프로젝트에는 올릴 수 없고, 파싱해 보니 넘치는 문서는 "용량 초과" 로 실패 처리합니다.
+- 지금은 문서를 검색하지 않고 목록을 보여준 뒤 필요한 문서를 읽게 합니다. 검색(RAG)은 다음 단계에서 붙입니다.
 
 ## DB 마이그레이션 (Alembic)
 
@@ -465,7 +482,7 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | Method | Path | 설명 |
 |---|---|---|
 | GET | `/api/models` | 고를 수 있는 모델 목록과 기본 모델 ID |
-| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}], document_ids?, model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
+| POST | `/api/chat` | `{conversation_id?, project_id?, message, images?: [{mime_type, data}], document_ids?, model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409. `project_id` 는 새 대화를 그 프로젝트 안에 만든다 |
 | GET | `/api/conversations` | 대화 목록 |
 | GET | `/api/conversations/{id}` | 대화 + 메시지 + 생성 중 여부 |
 | GET | `/api/conversations/{id}/status` | 생성 중 여부 (다른 창 확인용) |
@@ -474,7 +491,14 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | POST | `/api/documents` | 문서 올리기 (multipart `file`) → `processing` 상태로 201. 너무 크면 413, 지원하지 않는 형식이면 415 |
 | GET | `/api/documents/{id}` | 문서 정보와 파싱 상태 (`processing` / `ready` / `failed`, 실패 사유, 쪽 수, 글자 수) |
 | GET | `/api/documents/{id}/file` | 원본 내려받기 (보관 기간이 지났으면 410) |
-| DELETE | `/api/documents/{id}` | 보내지 않은 문서 지우기 (이미 보낸 문서면 409) |
+| DELETE | `/api/documents/{id}` | 보내지 않은 첨부 문서 지우기 (이미 보낸 문서나 프로젝트 문서면 409) |
+| GET | `/api/projects` | 프로젝트 목록 |
+| POST | `/api/projects` | 프로젝트 만들기 `{name, instructions?}` |
+| GET | `/api/projects/{id}` | 프로젝트 + 문서 + 대화 + 용량(`used_tokens`, `max_tokens`) |
+| PATCH | `/api/projects/{id}` | 이름·지시문 바꾸기 (보낸 값만) |
+| DELETE | `/api/projects/{id}` | 프로젝트와 그 안의 대화·문서 삭제 (생성 중인 대화가 있으면 409) |
+| POST | `/api/projects/{id}/documents` | 프로젝트 문서 올리기 (multipart `file`). 용량이 꽉 찼으면 409 |
+| DELETE | `/api/projects/{id}/documents/{doc_id}` | 프로젝트 문서 지우기 |
 | GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |

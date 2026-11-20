@@ -53,7 +53,7 @@ class FakeSession:
         self.commits = 0
 
     async def get(self, model, ident, options=None):
-        return SimpleNamespace(id=ident, user_id=USER.id)
+        return SimpleNamespace(id=ident, user_id=USER.id, project_id=None)
 
     def add(self, obj):
         self.added.append(obj)

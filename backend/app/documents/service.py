@@ -1,7 +1,10 @@
-"""첨부 문서 처리: 올리기, 백그라운드 파싱, 정리.
+"""문서 처리: 올리기, 백그라운드 파싱, 정리, 대화 첨부와 읽기.
 
 흐름: 올리기 → 크기·형식 검사 → 원본을 첨부 저장소에 저장 → DB 에 ``processing`` 으로 기록 →
 백그라운드에서 별도 프로세스로 파싱 → ``ready`` / ``failed`` 로 갱신.
+
+대화 첨부 문서와 프로젝트 문서(``project_id`` 가 있음)가 같은 흐름을 쓴다. 프로젝트 문서는 보관 기간
+정리를 받지 않고, 메시지에 붙일 수 없으며, 파싱이 끝날 때 프로젝트 용량을 확인한다.
 """
 
 import asyncio
@@ -17,7 +20,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import Settings, get_settings
 from app.core.db import SessionLocal
-from app.core.storage import DOCUMENTS_PREFIX, ObjectStorage, get_storage
+from app.core.storage import DOCUMENTS_PREFIX, PROJECTS_PREFIX, ObjectStorage, get_storage
 from app.documents.formats import DocumentKind, detect, safe_filename
 from app.documents.parser import ParseError
 from app.documents.reading import AttachedDocument, estimate_tokens, max_inline_chars
@@ -27,6 +30,9 @@ from app.models import Document
 logger = logging.getLogger(__name__)
 
 INTERRUPTED_ERROR = "서버가 다시 시작되어 처리가 중단되었습니다. 다시 올려 주세요."
+PROJECT_FULL_ERROR = (
+    "프로젝트 용량을 넘어서 추가할 수 없습니다. 다른 문서를 지운 뒤 다시 올려 주세요."
+)
 CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 _tasks: set[asyncio.Task] = set()
@@ -34,15 +40,21 @@ _tasks: set[asyncio.Task] = set()
 _parse_slots: asyncio.Semaphore | None = None
 
 
-def storage_key(document_id: uuid.UUID) -> str:
+def storage_key(document_id: uuid.UUID, project_id: uuid.UUID | None = None) -> str:
     """문서 원본의 객체 키.
+
+    대화 첨부는 ``documents/`` 아래에 두어 보관 기간 lifecycle 을 받고, 프로젝트 문서는
+    ``projects/`` 아래에 두어 받지 않는다.
 
     Args:
         document_id: 문서 ID.
+        project_id: 프로젝트 문서면 프로젝트 ID.
 
     Returns:
-        ``"documents/<문서 ID>"``.
+        ``"documents/<문서 ID>"`` 또는 ``"projects/<프로젝트 ID>/documents/<문서 ID>"``.
     """
+    if project_id is not None:
+        return f"{PROJECTS_PREFIX}{project_id}/documents/{document_id}"
     return f"{DOCUMENTS_PREFIX}{document_id}"
 
 
@@ -52,6 +64,7 @@ async def create_document(
     data: bytes,
     filename: str | None,
     user_id: uuid.UUID,
+    project_id: uuid.UUID | None = None,
 ) -> Document:
     """문서를 검사하고 원본을 저장한 뒤 ``processing`` 상태로 기록한다.
 
@@ -63,6 +76,7 @@ async def create_document(
         data: 파일 내용. 크기 제한은 호출하는 쪽에서 먼저 확인한다.
         filename: 사용자가 올린 파일 이름.
         user_id: 올린 사용자.
+        project_id: 프로젝트 문서면 프로젝트 ID (호출하는 쪽에서 내 프로젝트인지 확인한다).
 
     Returns:
         기록한 문서.
@@ -75,6 +89,7 @@ async def create_document(
     doc = Document(
         id=uuid.uuid4(),
         user_id=user_id,
+        project_id=project_id,
         filename=name,
         kind=fmt.kind.value,
         mime_type=fmt.mime_type,
@@ -82,7 +97,7 @@ async def create_document(
         sha256=hashlib.sha256(data).hexdigest(),
         status="processing",
     )
-    doc.storage_key = storage_key(doc.id)
+    doc.storage_key = storage_key(doc.id, project_id)
     await storage.put(doc.storage_key, data, fmt.mime_type)
     session.add(doc)
     await session.commit()
@@ -140,6 +155,7 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
             "status": "ready",
             "content": result.content,
             "page_count": result.page_count,
+            "token_count": estimate_tokens(result.content),
             "parsed_at": datetime.now(UTC),
         }
         logger.info(
@@ -149,6 +165,18 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
             len(result.content),
         )
     async with SessionLocal() as session:
+        if values["status"] == "ready":
+            project_id = await session.scalar(
+                select(Document.project_id).where(Document.id == document_id)
+            )
+            if project_id is not None:
+                used = await project_usage(session, project_id, exclude=document_id)
+                if used + values["token_count"] > settings.project_max_tokens:
+                    values = {
+                        "status": "failed",
+                        "error": PROJECT_FULL_ERROR,
+                        "parsed_at": values["parsed_at"],
+                    }
         # 파싱하는 동안 문서가 지워졌으면 아무것도 갱신되지 않는다.
         await session.execute(
             update(Document)
@@ -156,6 +184,27 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
             .values(**values)
         )
         await session.commit()
+
+
+async def project_usage(
+    session: AsyncSession, project_id: uuid.UUID, exclude: uuid.UUID | None = None
+) -> int:
+    """프로젝트가 쓰고 있는 용량: 준비된 문서의 추정 토큰 수 합계.
+
+    Args:
+        session: DB 세션.
+        project_id: 프로젝트 ID.
+        exclude: 합계에서 뺄 문서 ID (방금 파싱한 문서).
+
+    Returns:
+        토큰 수 합계.
+    """
+    query = select(func.coalesce(func.sum(Document.token_count), 0)).where(
+        Document.project_id == project_id, Document.status == "ready"
+    )
+    if exclude is not None:
+        query = query.where(Document.id != exclude)
+    return int(await session.scalar(query) or 0)
 
 
 async def mark_interrupted() -> int:
@@ -193,7 +242,7 @@ async def delete_objects(keys: Iterable[str]) -> None:
 async def cleanup_expired(now: datetime | None = None) -> int:
     """보관 기간이 지난 문서와, 올렸지만 보내지 않은 채 오래된 문서를 지운다.
 
-    DB 기록(파싱 결과 포함)을 지우고 원본도 저장소에서 지운다.
+    DB 기록(파싱 결과 포함)을 지우고 원본도 저장소에서 지운다. 프로젝트 문서는 지우지 않는다.
 
     Args:
         now: 기준 시각. 테스트에서만 넘긴다.
@@ -209,7 +258,9 @@ async def cleanup_expired(now: datetime | None = None) -> int:
     )
     async with SessionLocal() as session:
         res = await session.execute(
-            delete(Document).where(or_(expired, unsent)).returning(Document.storage_key)
+            delete(Document)
+            .where(Document.project_id.is_(None), or_(expired, unsent))
+            .returning(Document.storage_key)
         )
         keys = list(res.scalars())
         await session.commit()
@@ -268,7 +319,9 @@ class AttachError(Exception):
 async def check_attachable(
     session: AsyncSession, document_ids: list[uuid.UUID], user_id: uuid.UUID
 ) -> None:
-    """문서들을 메시지에 붙일 수 있는지 확인한다 (내가 올렸고, 아직 보내지 않았고, 준비된 문서).
+    """문서들을 메시지에 붙일 수 있는지 확인한다 (내가 올렸고, 아직 보내지 않았고, 준비된 첨부 문서).
+
+    프로젝트 문서는 메시지에 붙이지 않는다 (없는 문서로 본다).
 
     대화를 만들거나 메시지를 저장하기 전에 불러서, 실패해도 아무것도 남지 않게 한다.
 
@@ -285,7 +338,9 @@ async def check_attachable(
     rows = (
         await session.execute(
             select(Document.id, Document.filename, Document.status, Document.conversation_id).where(
-                Document.id.in_(document_ids), Document.user_id == user_id
+                Document.id.in_(document_ids),
+                Document.user_id == user_id,
+                Document.project_id.is_(None),
             )
         )
     ).all()
@@ -327,6 +382,7 @@ async def attach_to_message(
         update(Document)
         .where(
             Document.id.in_(document_ids),
+            Document.project_id.is_(None),
             Document.conversation_id.is_(None),
             Document.status == "ready",
         )
@@ -388,23 +444,31 @@ async def load_attachments(
 
 
 async def read_chunk(
-    document_id: str, conversation_id: str, offset: int, max_chars: int
+    document_id: str,
+    conversation_id: str,
+    offset: int,
+    max_chars: int,
+    project_id: uuid.UUID | None = None,
 ) -> tuple[AttachedDocument, str, int] | None:
-    """대화에 붙은 문서 본문의 일부를 읽는다. 본문 전체를 불러오지 않고 필요한 부분만 읽는다.
+    """대화에 붙은 문서나 프로젝트 문서의 본문 일부를 읽는다. 본문 전체를 불러오지 않고 필요한 부분만 읽는다.
 
     Args:
         document_id: 문서 ID (문자열, 모델이 넘긴 값).
-        conversation_id: 지금 대화 ID. 다른 대화의 문서는 읽을 수 없다.
+        conversation_id: 지금 대화 ID. 다른 대화의 첨부 문서는 읽을 수 없다.
         offset: 읽을 첫 글자 위치 (0부터).
         max_chars: 읽을 최대 글자 수.
+        project_id: 지금 대화가 속한 프로젝트 ID (서버가 정한 값). 있으면 그 프로젝트의 문서도 읽는다.
 
     Returns:
-        ``(문서 정보, 읽은 본문, 전체 글자 수)``. 이 대화에 없는 문서이거나 준비되지 않았으면 ``None``.
+        ``(문서 정보, 읽은 본문, 전체 글자 수)``. 읽을 수 있는 문서가 아니거나 준비되지 않았으면 ``None``.
     """
     try:
         doc_uuid, conv_uuid = uuid.UUID(document_id.strip()), uuid.UUID(conversation_id)
     except (ValueError, AttributeError):
         return None
+    readable = Document.conversation_id == conv_uuid
+    if project_id is not None:
+        readable = or_(readable, Document.project_id == project_id)
     async with SessionLocal() as session:
         row = (
             await session.execute(
@@ -417,7 +481,7 @@ async def read_chunk(
                     func.substr(Document.content, max(offset, 0) + 1, max_chars).label("chunk"),
                 ).where(
                     Document.id == doc_uuid,
-                    Document.conversation_id == conv_uuid,
+                    readable,
                     Document.status == "ready",
                 )
             )

@@ -20,7 +20,10 @@ from app.core.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 DOCUMENTS_PREFIX = "documents/"
-"""보관 기간 규칙을 받는 객체 키 접두어 (문서 원본)."""
+"""보관 기간 규칙을 받는 객체 키 접두어 (대화 첨부 문서 원본)."""
+
+PROJECTS_PREFIX = "projects/"
+"""프로젝트 문서 원본의 객체 키 접두어. 보관 기간 규칙을 받지 않는다 (사용자가 지울 때까지 둔다)."""
 
 LIFECYCLE_RULE_ID = "expire-attachments"
 """첨부 원본을 보관 기간 뒤에 지우는 버킷 lifecycle 규칙의 ID."""

@@ -78,6 +78,18 @@ def _describe(doc: AttachedDocument) -> str:
     return f'- "{_attr(doc.filename)}" ({doc.kind}, {size}), document_id: {doc.id}'
 
 
+def document_list(docs: list[AttachedDocument]) -> str:
+    """문서 목록 텍스트 (한 줄에 한 문서: 이름, 형식, 분량, ``document_id``).
+
+    Args:
+        docs: 문서 목록.
+
+    Returns:
+        모델에게 줄 목록. 문서가 없으면 빈 문자열.
+    """
+    return "\n".join(_describe(d) for d in docs)
+
+
 def attachment_block(docs: list[AttachedDocument], *, can_read: bool) -> str:
     """사용자 메시지 뒤에 붙일 첨부 목록. 짧은 문서는 본문까지 넣는다.
 

@@ -106,7 +106,7 @@ def test_format_chunk_end_and_past_end():
 async def test_read_document_tool_uses_current_conversation(monkeypatch):
     calls = []
 
-    async def fake_read_chunk(document_id, conversation_id, offset, max_chars):
+    async def fake_read_chunk(document_id, conversation_id, offset, max_chars, project_id=None):
         calls.append((document_id, conversation_id, offset, max_chars))
         if document_id != "d1":
             return None
@@ -121,7 +121,7 @@ async def test_read_document_tool_uses_current_conversation(monkeypatch):
     assert calls[0] == ("d1", "conv-1", 0, 100)
 
     missing = await tool.ainvoke({"document_id": "other"}, config=config)
-    assert "No readable attached document" in missing
+    assert "No readable document" in missing
     assert "config" not in tool.tool_call_schema.model_json_schema()["properties"]
 
 
