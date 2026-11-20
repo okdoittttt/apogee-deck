@@ -6,6 +6,7 @@ import { Composer } from "@/components/Composer";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
 import { ModelPicker } from "@/components/ModelPicker";
+import { NewProjectForm, ProjectView } from "@/components/ProjectView";
 import { Sidebar } from "@/components/Sidebar";
 import {
   type QueuedMessage,
@@ -18,6 +19,7 @@ import {
   type ChatMessage,
   type Conversation,
   type ModelOption,
+  type Project,
   type Step,
   type ToolStep,
   type DocumentInfo,
@@ -32,6 +34,7 @@ import {
   getInfo,
   getModels,
   listConversations,
+  listProjects,
   streamChat,
   uploadDocument,
 } from "@/lib/api";
@@ -115,6 +118,16 @@ function ChatApp({
   const closeToast = useCallback(() => setToast(null), []);
   // 이 창에서 마지막으로 보낸 사용자 메시지. 이 메시지를 화면 맨 위에 두고 응답을 그 아래에 채운다.
   const [pinnedId, setPinnedId] = useState<string | null>(null);
+  // 프로젝트: 목록, 지금 보고 있는 프로젝트(프로젝트 화면이거나 프로젝트 안의 대화), 새 프로젝트 만들기 화면인지
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectIdState] = useState<string | null>(null);
+  const projectIdRef = useRef<string | null>(null);
+  const [creatingProject, setCreatingProject] = useState(false);
+  // 프로젝트 화면에 끌어다 놓은 파일은 입력창이 아니라 프로젝트 문서로 올린다 (ProjectView 가 등록).
+  const projectDropRef = useRef<((files: FileList) => void) | null>(null);
+  const registerProjectDrop = useCallback((handler: ((files: FileList) => void) | null) => {
+    projectDropRef.current = handler;
+  }, []);
 
   // 응답이 끝난 뒤 대기 메시지를 자동 전송할 때 최신 값을 읽기 위한 ref.
   // (state 를 그대로 읽으면 이전 렌더의 값이라, 새 대화의 ID 가 없는 것으로 보여 대화가 하나 더 생긴다)
@@ -131,6 +144,11 @@ function ChatApp({
   function setActiveConversation(id: string | null) {
     conversationIdRef.current = id;
     setConversationId(id);
+  }
+
+  function setProjectId(id: string | null) {
+    projectIdRef.current = id;
+    setProjectIdState(id);
   }
 
   function setDocuments(update: (prev: PendingDocument[]) => PendingDocument[]) {
@@ -190,9 +208,16 @@ function ChatApp({
       .catch((e) => setError(String(e)));
   }, []);
 
+  const refreshProjects = useCallback(() => {
+    listProjects()
+      .then(setProjects)
+      .catch((e) => setError(String(e)));
+  }, []);
+
   // 초기 로드: 대화 목록, 모델 정보, 화면 크기에 따른 사이드바 상태
   useEffect(() => {
     refreshConversations();
+    refreshProjects();
     getInfo()
       .then(setInfo)
       .catch(() => setInfo(null));
@@ -215,7 +240,7 @@ function ChatApp({
     apply();
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
-  }, [refreshConversations, refreshModels]);
+  }, [refreshConversations, refreshProjects, refreshModels]);
 
   // ⌘K / Ctrl+K: 대화 검색
   useEffect(() => {
@@ -403,6 +428,8 @@ function ChatApp({
       const conv = await getConversation(id);
       jumpToBottomRef.current = true;
       setPinnedId(null);
+      setCreatingProject(false);
+      setProjectId(conv.project_id ?? null);
       setActiveConversation(conv.id);
       setMessages(conv.messages);
       setRemoteRunning(conv.running);
@@ -414,8 +441,8 @@ function ChatApp({
     }
   }
 
-  function newConversation() {
-    if (navigationBlocked()) return;
+  /** 빈 화면으로 간다: 대화를 닫고 입력창을 비운다. */
+  function resetToEmpty() {
     setActiveConversation(null);
     setRemoteRunning(false);
     setPinnedId(null);
@@ -424,8 +451,38 @@ function ChatApp({
     discardDocuments();
     setInput("");
     setError(null);
-    setHello(greeting());
     if (isMobile) setSidebarOpen(false);
+  }
+
+  function newConversation() {
+    if (navigationBlocked()) return;
+    resetToEmpty();
+    setProjectId(null);
+    setCreatingProject(false);
+    setHello(greeting());
+  }
+
+  /** 프로젝트 화면을 연다. 여기서 보내는 메시지는 이 프로젝트 안의 새 대화가 된다. */
+  function openProject(id: string) {
+    if (navigationBlocked()) return;
+    resetToEmpty();
+    setCreatingProject(false);
+    setProjectId(id);
+  }
+
+  function startNewProject() {
+    if (navigationBlocked()) return;
+    resetToEmpty();
+    setProjectId(null);
+    setCreatingProject(true);
+  }
+
+  function onProjectDeleted() {
+    refreshProjects();
+    refreshConversations();
+    resetToEmpty();
+    setProjectId(null);
+    setHello(greeting());
   }
 
   async function removeConversation(id: string) {
@@ -439,7 +496,12 @@ function ChatApp({
       setToast((e as Error).message); // 다른 창에서 응답 생성 중이면 서버가 거절
       return;
     }
-    if (id === conversationIdRef.current) newConversation();
+    if (id === conversationIdRef.current) {
+      // 프로젝트 안의 대화였으면 그 프로젝트 화면으로 돌아간다.
+      const project = projectIdRef.current;
+      if (project) openProject(project);
+      else newConversation();
+    }
     refreshConversations();
   }
 
@@ -543,6 +605,8 @@ function ChatApp({
       await streamChat(
         {
           conversation_id: conversationIdRef.current,
+          // 새 대화면 지금 보고 있는 프로젝트 안에 만든다 (이어가는 대화는 원래 프로젝트를 따른다).
+          project_id: conversationIdRef.current === null ? projectIdRef.current : null,
           message: text,
           images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
           document_ids: sendingDocs.map((d) => d.id),
@@ -689,6 +753,9 @@ function ChatApp({
   const pinned = pinIndex < 0 ? [] : messages.slice(pinIndex);
   const modelLabels = Object.fromEntries(models.map((m) => [m.id, m.label]));
   const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
+  const activeProject = projects.find((p) => p.id === projectId);
+  // 프로젝트 화면(프로젝트를 열었고 아직 대화를 시작하지 않음)
+  const projectHome = isEmpty && !creatingProject && projectId !== null;
 
   const composer = (
     <Composer
@@ -717,7 +784,9 @@ function ChatApp({
       visionEnabled={info?.vision ?? true}
       autoFocus={isEmpty}
       placeholder={
-        isEmpty
+        projectHome
+          ? "이 프로젝트에 대해 물어보세요"
+          : isEmpty
           ? "무엇이든 물어보세요"
           : streaming && !queued
             ? "응답이 끝나면 보낼 메시지를 입력하세요 (1개까지)"
@@ -750,6 +819,10 @@ function ChatApp({
           ref={searchRef}
           conversations={conversations}
           activeId={conversationId}
+          projects={projects}
+          activeProjectId={projectHome ? projectId : null}
+          onNewProject={startNewProject}
+          onOpenProject={openProject}
           info={info}
           modelLabel={models.find((m) => m.id === selectedModel)?.label}
           onNew={newConversation}
@@ -776,7 +849,8 @@ function ChatApp({
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
-          void addFiles(e.dataTransfer.files);
+          if (projectHome && projectDropRef.current) projectDropRef.current(e.dataTransfer.files);
+          else void addFiles(e.dataTransfer.files);
         }}
       >
         {/* Top bar */}
@@ -802,17 +876,56 @@ function ChatApp({
             </>
           )}
           {!isEmpty && activeTitle && (
-            <h1 className="ml-1 truncate text-sm font-medium text-muted">{activeTitle}</h1>
+            <h1 className="ml-1 flex min-w-0 items-center gap-1.5 text-sm font-medium text-muted">
+              {activeProject && (
+                <>
+                  <button
+                    onClick={() => openProject(activeProject.id)}
+                    className="shrink-0 truncate rounded-md px-1 py-0.5 hover:bg-hover hover:text-fg"
+                    title="프로젝트로 돌아가기"
+                  >
+                    {activeProject.name}
+                  </button>
+                  <span className="text-subtle">/</span>
+                </>
+              )}
+              <span className="truncate">{activeTitle}</span>
+            </h1>
           )}
         </header>
 
         {dragging && (
           <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-line-strong bg-app/85 text-muted">
-            파일을 여기에 놓으세요
+            {projectHome ? "프로젝트에 문서를 올리려면 여기에 놓으세요" : "파일을 여기에 놓으세요"}
           </div>
         )}
 
-        {isEmpty ? (
+        {creatingProject ? (
+          <NewProjectForm
+            onCreated={(project) => {
+              refreshProjects();
+              openProject(project.id);
+            }}
+            onCancel={newConversation}
+          />
+        ) : projectHome ? (
+          <ProjectView
+            key={projectId}
+            projectId={projectId}
+            composer={
+              <>
+                {errorBox}
+                {composer}
+              </>
+            }
+            documentExtensions={info?.documents?.extensions ?? []}
+            onOpenConversation={openConversation}
+            onChanged={refreshProjects}
+            onDeleted={onProjectDeleted}
+            onToast={setToast}
+            registerDrop={registerProjectDrop}
+          />
+        ) : isEmpty ? (
           /* 빈 화면: 가운데 인사말 + 입력창 */
           <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
             <div className="mb-8 flex items-center gap-3">

@@ -22,6 +22,7 @@ export function FileChip({
   error,
   href,
   onRemove,
+  removeLabel = "첨부 빼기",
 }: {
   name: string;
   meta?: string;
@@ -29,6 +30,7 @@ export function FileChip({
   error?: string | null;
   href?: string; // 원본 받기 주소
   onRemove?: () => void;
+  removeLabel?: string; // 빼기 버튼의 접근성 문구 (예: "첨부 빼기", "문서 삭제")
 }) {
   const failed = status === "failed";
   const busy = status === "uploading" || status === "processing";
@@ -85,7 +87,8 @@ export function FileChip({
           type="button"
           onClick={onRemove}
           className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-line bg-surface text-muted shadow-sm hover:text-fg"
-          aria-label={`${name} 첨부 빼기`}
+          aria-label={`${name} ${removeLabel}`}
+          title={removeLabel}
         >
           <CloseIcon />
         </button>

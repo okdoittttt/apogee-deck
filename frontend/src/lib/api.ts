@@ -66,6 +66,7 @@ export interface DocumentInfo {
   error: string | null;
   page_count: number | null;
   char_count: number | null;
+  token_count?: number | null; // 프로젝트 문서만: 본문의 추정 토큰 수 (용량 계산)
   created_at: string;
   parsed_at: string | null;
 }
@@ -97,6 +98,7 @@ export interface Conversation {
   id: string;
   title: string;
   created_at: string;
+  project_id?: string | null; // 속한 프로젝트 (프로젝트 밖의 대화는 null)
 }
 
 export async function listConversations(): Promise<Conversation[]> {
@@ -195,6 +197,7 @@ export interface StreamHandlers {
 export async function streamChat(
   body: {
     conversation_id: string | null;
+    project_id?: string | null; // 새 대화를 만들 프로젝트 (이어가는 대화에서는 무시됨)
     message: string;
     images?: ImageInput[];
     document_ids?: string[];
@@ -334,4 +337,78 @@ export async function getModels(): Promise<ModelList> {
   const res = await apiFetch(`/api/models`);
   if (!res.ok) throw new Error(`Failed to load models (${res.status})`);
   return res.json();
+}
+
+// --- 프로젝트 ---
+
+/** 프로젝트: 문서 묶음과 지시문, 그 안의 대화들. */
+export interface Project {
+  id: string;
+  name: string;
+  instructions: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectDetail extends Project {
+  documents: DocumentInfo[];
+  conversations: Conversation[];
+  used_tokens: number; // 준비된 문서의 추정 토큰 수 합계
+  max_tokens: number; // 용량 상한
+}
+
+async function json<T>(res: Response, fallback: string): Promise<T> {
+  if (!res.ok) throw new Error((await errorDetail(res)) || `${fallback} (${res.status})`);
+  return res.json();
+}
+
+export async function listProjects(): Promise<Project[]> {
+  return json(await apiFetch(`/api/projects`), "프로젝트 목록을 불러오지 못했습니다");
+}
+
+export async function getProject(id: string): Promise<ProjectDetail> {
+  return json(await apiFetch(`/api/projects/${id}`), "프로젝트를 불러오지 못했습니다");
+}
+
+export async function createProject(body: { name: string; instructions: string }): Promise<Project> {
+  const res = await apiFetch(`/api/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return json(res, "프로젝트를 만들지 못했습니다");
+}
+
+/** 보낸 값만 바꾼다. */
+export async function updateProject(
+  id: string,
+  body: { name?: string; instructions?: string },
+): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return json(res, "프로젝트를 저장하지 못했습니다");
+}
+
+/** 프로젝트와 그 안의 대화·문서를 모두 지운다. 응답 생성 중인 대화가 있으면 서버가 거절한다. */
+export async function deleteProject(id: string): Promise<void> {
+  const res = await apiFetch(`/api/projects/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
+}
+
+/** 프로젝트에 문서를 올린다. 서버는 바로 processing 상태로 응답하고 백그라운드에서 읽는다. */
+export async function uploadProjectDocument(projectId: string, file: File): Promise<DocumentInfo> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch(`/api/projects/${projectId}/documents`, { method: "POST", body: form });
+  return json(res, "업로드 실패");
+}
+
+export async function deleteProjectDocument(projectId: string, documentId: string): Promise<void> {
+  const res = await apiFetch(`/api/projects/${projectId}/documents/${documentId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
 }
