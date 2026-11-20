@@ -534,6 +534,7 @@ async def _chunk_rows(
             heading=chunk.heading[:500] if chunk.heading else None,
             content=chunk.content,
             image_element_id=chunk.image_element_id,
+            element_ids=list(chunk.element_ids) or None,
             token_count=chunk.token_count,
             embedding=vectors[position] if vectors is not None else None,
             embedding_model=model_name,

@@ -51,6 +51,7 @@ class Chunk:
         heading: 제목 경로.
         image_element_id: 그림 청크의 그림 요소 ID.
         token_count: 추정 토큰 수.
+        element_ids: 이 청크를 만든 요소들의 ID (문서 보기 패널에서 근거 위치를 강조할 때 쓴다).
     """
 
     kind: str
@@ -60,6 +61,7 @@ class Chunk:
     heading: str | None
     image_element_id: uuid.UUID | None
     token_count: int
+    element_ids: tuple[uuid.UUID, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,7 @@ def make_chunks(elements: list[SourceElement], sizes: ChunkSizes | None = None) 
                     min(pages, default=None),
                     max(pages, default=None),
                     buffer[0].heading,
+                    element_ids=tuple(e.id for e in buffer),
                 )
             )
             buffer.clear()
@@ -114,16 +117,44 @@ def make_chunks(elements: list[SourceElement], sizes: ChunkSizes | None = None) 
         if element.kind == "image":
             flush()
             chunks.append(
-                _chunk("image", content, element.page, element.page, element.heading, element.id)
+                _chunk(
+                    "image",
+                    content,
+                    element.page,
+                    element.page,
+                    element.heading,
+                    element.id,
+                    (element.id,),
+                )
             )
         elif element.kind == "table":
             flush()
             for part in split_table(content, sizes.max_tokens):
-                chunks.append(_chunk("table", part, element.page, element.page, element.heading))
+                chunks.append(
+                    _chunk(
+                        "table",
+                        part,
+                        element.page,
+                        element.page,
+                        element.heading,
+                        None,
+                        (element.id,),
+                    )
+                )
         elif tokens > sizes.max_tokens:
             flush()
             for part in split_text(content, sizes):
-                chunks.append(_chunk("text", part, element.page, element.page, element.heading))
+                chunks.append(
+                    _chunk(
+                        "text",
+                        part,
+                        element.page,
+                        element.page,
+                        element.heading,
+                        None,
+                        (element.id,),
+                    )
+                )
         else:
             buffered = sum(estimate_tokens(e.content) for e in buffer)
             if buffer and (
@@ -142,9 +173,17 @@ def _chunk(
     page_end: int | None,
     heading: str | None,
     image_element_id: uuid.UUID | None = None,
+    element_ids: tuple[uuid.UUID, ...] = (),
 ) -> Chunk:
     return Chunk(
-        kind, content, page_start, page_end, heading, image_element_id, estimate_tokens(content)
+        kind,
+        content,
+        page_start,
+        page_end,
+        heading,
+        image_element_id,
+        estimate_tokens(content),
+        element_ids,
     )
 
 

@@ -77,6 +77,23 @@ def test_large_table_is_split_by_rows_with_header():
     assert len(body) == 60  # 행은 빠지거나 겹치지 않는다
 
 
+def test_chunks_remember_their_source_elements():
+    a, b = _el("첫 문단입니다.", page=1), _el("둘째 문단입니다.", page=1)
+    long_text = _el(" ".join(f"문장{i}은 이렇게 끝난다." for i in range(80)), page=2)
+    rows = "\n".join(f"| {i} | 제품{i} 설명 |" for i in range(60))
+    table = _el(f"| 번호 | 제품 |\n| --- | --- |\n{rows}", kind="table", page=3)
+    image = _el("그림 설명", kind="image", page=3)
+    chunks = chunking.make_chunks([a, b, long_text, table, image], SIZES)
+
+    assert chunks[0].element_ids == (a.id, b.id)  # 묶은 본문은 묶인 요소 모두
+    by_kind = {}
+    for chunk in chunks[1:]:
+        by_kind.setdefault(chunk.kind, set()).update(chunk.element_ids)
+    assert by_kind["text"] == {long_text.id}  # 나눈 본문 조각은 모두 원래 요소
+    assert by_kind["table"] == {table.id}
+    assert by_kind["image"] == {image.id}
+
+
 def test_image_becomes_its_own_chunk_with_element_id():
     image = _el("막대 차트: 서울 120", kind="image", page=4, heading="1장")
     chunks = chunking.make_chunks([_el("본문", heading="1장"), image, _el("  ")], SIZES)

@@ -10,8 +10,8 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -345,6 +345,8 @@ class DocumentChunk(Base):
         heading: 제목 경로. 없으면 ``None``.
         content: 청크 본문 (그림은 설명).
         image_element_id: 그림 청크의 그림 요소 ID (원본 그림을 보여줄 때 쓴다).
+        element_ids: 이 청크를 만든 요소들의 ID (문서 보기 패널에서 근거 위치를 강조할 때 쓴다).
+            이 열을 추가하기 전에 만든 청크는 ``None`` 이다 (다시 처리하면 채워진다).
         token_count: ``content`` 의 추정 토큰 수.
         embedding: 임베딩. 아직 만들지 못했으면 ``None`` (검색할 때 다시 만든다).
         embedding_model: 임베딩을 만든 모델 (``"openai:text-embedding-3-small"``).
@@ -381,6 +383,7 @@ class DocumentChunk(Base):
     image_element_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("document_elements.id", ondelete="SET NULL"), nullable=True
     )
+    element_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(Uuid), nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIMENSIONS), nullable=True
