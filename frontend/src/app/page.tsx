@@ -19,22 +19,28 @@ import {
   type ModelOption,
   type Step,
   type ToolStep,
+  type DocumentInfo,
   ERROR_SUFFIX,
   INTERRUPTED_SUFFIX,
   NO_REPLY_TEXT,
   deleteConversation,
+  deleteDocument,
   getConversation,
   getConversationStatus,
+  getDocument,
   getInfo,
   getModels,
   listConversations,
   streamChat,
+  uploadDocument,
 } from "@/lib/api";
+import { type PendingDocument, extensionOf, formatBytes, isImageFile } from "@/lib/documents";
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
 
 const SIDEBAR_KEY = "sidebar-open";
 const MODEL_KEY = "selected-model";
 const STATUS_POLL_MS = 2000;
+const DOCUMENT_POLL_MS = 1000;
 // 중지 직후 서버가 정리(부분 응답 저장, 생성 중 표시 해제)를 끝낼 때까지 기다리는 간격과 한도
 const IDLE_POLL_MS = 150;
 const IDLE_WAIT_MAX_MS = 10000;
@@ -59,6 +65,9 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // 입력창에 붙인 문서. 올리면 서버가 백그라운드에서 읽고, 다 읽은 뒤에 보낼 수 있다.
+  const [documents, setDocumentsState] = useState<PendingDocument[]>([]);
+  const documentsRef = useRef<PendingDocument[]>([]);
   const [dragging, setDragging] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +101,20 @@ export default function ChatPage() {
   function setActiveConversation(id: string | null) {
     conversationIdRef.current = id;
     setConversationId(id);
+  }
+
+  function setDocuments(update: (prev: PendingDocument[]) => PendingDocument[]) {
+    documentsRef.current = update(documentsRef.current);
+    setDocumentsState(documentsRef.current);
+  }
+
+  const patchDocument = (localId: string, patch: Partial<PendingDocument>) =>
+    setDocuments((prev) => prev.map((d) => (d.localId === localId ? { ...d, ...patch } : d)));
+
+  /** 입력창의 문서를 모두 뺀다. 서버에 올라간 문서는 지운다 (보내지 않은 문서). */
+  function discardDocuments() {
+    for (const d of documentsRef.current) if (d.doc) void deleteDocument(d.doc.id);
+    setDocuments(() => []);
   }
 
   function setQueued(message: QueuedMessage | null) {
@@ -205,6 +228,25 @@ export default function ChatPage() {
     return () => clearInterval(timer);
   }, [remoteRunning, conversationId]);
 
+  // 서버가 읽는 중인 문서의 상태를 주기적으로 확인한다.
+  const documentsProcessing = documents.some((d) => d.status === "processing");
+  useEffect(() => {
+    if (!documentsProcessing) return;
+    const timer = setInterval(() => {
+      for (const d of documentsRef.current) {
+        if (d.status !== "processing" || !d.doc) continue;
+        const { localId } = d;
+        getDocument(d.doc.id)
+          .then((doc) => {
+            if (doc.status !== "processing")
+              patchDocument(localId, { status: doc.status, error: doc.error, doc });
+          })
+          .catch((e) => patchDocument(localId, { status: "failed", error: (e as Error).message }));
+      }
+    }, DOCUMENT_POLL_MS);
+    return () => clearInterval(timer);
+  }, [documentsProcessing]);
+
   function toggleSidebar(open: boolean) {
     setSidebarOpen(open);
     if (!isMobile) {
@@ -215,8 +257,14 @@ export default function ChatPage() {
   }
 
   async function addFiles(files: Iterable<File>) {
-    const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    const all = Array.from(files);
+    addDocuments(all.filter((f) => !isImageFile(f)));
+    const images = all.filter(isImageFile);
     if (images.length === 0) return;
+    if (!(info?.vision ?? true)) {
+      setError("현재 모델은 이미지를 지원하지 않습니다.");
+      return;
+    }
     const room = MAX_IMAGES - attachments.length;
     if (images.length > room) setError(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다.`);
     if (room <= 0) return;
@@ -226,6 +274,49 @@ export default function ChatPage() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  /** 문서를 올린다. 크기·형식·개수는 서버도 검사하지만, 미리 걸러서 바로 알려준다. */
+  function addDocuments(files: File[]) {
+    if (files.length === 0) return;
+    const limits = info?.documents;
+    if (!limits?.enabled) {
+      setError("문서를 첨부할 수 없습니다 (서버에 첨부 저장소가 설정되지 않음).");
+      return;
+    }
+    const room = limits.max_per_message - documentsRef.current.length;
+    if (files.length > room) setError(`문서는 최대 ${limits.max_per_message}개까지 첨부할 수 있습니다.`);
+    for (const file of files.slice(0, Math.max(room, 0))) {
+      if (!limits.extensions.includes(extensionOf(file.name))) {
+        setError(`지원하지 않는 파일입니다: ${file.name}`);
+        continue;
+      }
+      if (file.size > limits.max_bytes) {
+        setError(`파일이 너무 큽니다 (최대 ${formatBytes(limits.max_bytes)}): ${file.name}`);
+        continue;
+      }
+      const localId = crypto.randomUUID();
+      setDocuments((prev) => [
+        ...prev,
+        { localId, filename: file.name, size: file.size, status: "uploading" },
+      ]);
+      uploadDocument(file)
+        .then((doc) => {
+          // 올리는 동안 사용자가 뺐으면 서버에서도 지운다.
+          if (!documentsRef.current.some((d) => d.localId === localId)) {
+            void deleteDocument(doc.id);
+            return;
+          }
+          patchDocument(localId, { status: doc.status, error: doc.error, doc });
+        })
+        .catch((e) => patchDocument(localId, { status: "failed", error: (e as Error).message }));
+    }
+  }
+
+  function removeDocument(localId: string) {
+    const target = documentsRef.current.find((d) => d.localId === localId);
+    if (target?.doc) void deleteDocument(target.doc.id);
+    setDocuments((prev) => prev.filter((d) => d.localId !== localId));
   }
 
   /** 응답 생성 중이거나 대기 메시지가 있으면 다른 대화로 이동하지 않는다. */
@@ -247,6 +338,7 @@ export default function ChatPage() {
       setMessages(conv.messages);
       setRemoteRunning(conv.running);
       setAttachments([]);
+      discardDocuments();
       if (isMobile) setSidebarOpen(false);
     } catch (e) {
       setError(String(e));
@@ -259,6 +351,7 @@ export default function ChatPage() {
     setRemoteRunning(false);
     setMessages([]);
     setAttachments([]);
+    discardDocuments();
     setInput("");
     setError(null);
     setHello(greeting());
@@ -288,7 +381,8 @@ export default function ChatPage() {
    */
   function submit() {
     const text = input.trim();
-    if (!text && attachments.length === 0) return;
+    if (!text && attachments.length === 0 && documents.length === 0) return;
+    if (documents.some((d) => d.status !== "ready" || !d.doc)) return; // 입력창이 버튼을 막는다
     if (remoteRunning) {
       setToast(REMOTE_BUSY_TEXT);
       return;
@@ -301,10 +395,12 @@ export default function ChatPage() {
       id: crypto.randomUUID(),
       text,
       attachments,
+      documents: documents.map((d) => d.doc as DocumentInfo),
       model: selectedModel,
     };
     setInput("");
     setAttachments([]);
+    setDocuments(() => []); // 보내는 문서이므로 서버에서 지우지 않는다
     if (streaming) {
       setQueued(message);
     } else {
@@ -321,7 +417,7 @@ export default function ChatPage() {
   }
 
   async function runSend(message: QueuedMessage) {
-    const { text, attachments: sending, model } = message;
+    const { text, attachments: sending, documents: sendingDocs, model } = message;
     setError(null);
     setStreaming(true);
 
@@ -329,7 +425,13 @@ export default function ChatPage() {
     const assistantId = crypto.randomUUID();
     setMessages((prev) => [
       ...prev,
-      { id: userId, role: "user", content: text, images: sending.map((a) => a.previewUrl) },
+      {
+        id: userId,
+        role: "user",
+        content: text,
+        images: sending.map((a) => a.previewUrl),
+        documents: sendingDocs,
+      },
       { id: assistantId, role: "assistant", content: "", model },
     ]);
 
@@ -371,6 +473,7 @@ export default function ChatPage() {
           conversation_id: conversationIdRef.current,
           message: text,
           images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
+          document_ids: sendingDocs.map((d) => d.id),
           model,
         },
         {
@@ -403,6 +506,17 @@ export default function ChatPage() {
             setMessages((prev) => prev.filter((m) => m.id !== userId && m.id !== assistantId));
             setInput((prev) => prev || text);
             setAttachments((prev) => (prev.length ? prev : sending));
+            setDocuments((prev) =>
+              prev.length
+                ? prev
+                : sendingDocs.map((doc) => ({
+                    localId: crypto.randomUUID(),
+                    filename: doc.filename,
+                    size: doc.size_bytes,
+                    status: "ready",
+                    doc,
+                  })),
+            );
             setRemoteRunning(true);
             setToast(detail || REMOTE_BUSY_TEXT);
           },
@@ -505,6 +619,10 @@ export default function ChatPage() {
       attachments={attachments}
       onAddFiles={addFiles}
       onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+      documents={documents}
+      onRemoveDocument={removeDocument}
+      documentsEnabled={info?.documents?.enabled ?? false}
+      documentExtensions={info?.documents?.extensions ?? []}
       onSend={submit}
       onStop={() => abortRef.current?.abort()}
       streaming={streaming}
@@ -577,7 +695,7 @@ export default function ChatPage() {
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
-          if (info?.vision ?? true) addFiles(e.dataTransfer.files);
+          void addFiles(e.dataTransfer.files);
         }}
       >
         {/* Top bar */}
@@ -609,7 +727,7 @@ export default function ChatPage() {
 
         {dragging && (
           <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-line-strong bg-app/85 text-muted">
-            이미지를 여기에 놓으세요
+            파일을 여기에 놓으세요
           </div>
         )}
 
@@ -626,7 +744,7 @@ export default function ChatPage() {
               {errorBox}
               {composer}
               <p className="mt-3 text-center text-xs text-subtle">
-                이미지를 붙여넣거나 끌어다 놓을 수 있어요 · Shift+Enter 로 줄바꿈
+                이미지와 문서를 붙여넣거나 끌어다 놓을 수 있어요 · Shift+Enter 로 줄바꿈
               </p>
             </div>
           </div>

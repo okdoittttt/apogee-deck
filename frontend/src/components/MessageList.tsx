@@ -2,7 +2,9 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage } from "@/lib/api";
+import { type ChatMessage, documentFileUrl } from "@/lib/api";
+import { documentMeta } from "@/lib/documents";
+import { FileChip } from "./FileChip";
 import { LogoIcon } from "./icons";
 import { Sources } from "./Sources";
 import { Steps } from "./Steps";
@@ -24,6 +26,18 @@ function TypingDots() {
 function UserMessage({ message }: { message: ChatMessage }) {
   return (
     <div className="flex flex-col items-end gap-2">
+      {message.documents && message.documents.length > 0 && (
+        <div className="flex max-w-[85%] flex-wrap justify-end gap-2">
+          {message.documents.map((d) => (
+            <FileChip
+              key={d.id}
+              name={d.filename}
+              meta={documentMeta(d)}
+              href={documentFileUrl(d.id)}
+            />
+          ))}
+        </div>
+      )}
       {message.images && message.images.length > 0 && (
         <div className="flex flex-wrap justify-end gap-2">
           {message.images.map((src) => (

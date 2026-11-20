@@ -30,6 +30,21 @@ export interface ToolStep {
 
 export type Step = ReasoningStep | ToolStep;
 
+/** 첨부 문서 정보와 파싱 상태 (본문 제외). */
+export interface DocumentInfo {
+  id: string;
+  filename: string;
+  kind: string; // pdf, docx, hwpx ...
+  mime_type: string;
+  size_bytes: number;
+  status: "processing" | "ready" | "failed";
+  error: string | null;
+  page_count: number | null;
+  char_count: number | null;
+  created_at: string;
+  parsed_at: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
@@ -38,6 +53,7 @@ export interface ChatMessage {
   steps?: Step[]; // assistant 응답의 실행 단계 (일어난 순서)
   thinking?: boolean; // 화면 전용: 지금 추론 과정을 받는 중인지
   model?: string | null; // assistant 응답을 만든 모델 ID
+  documents?: DocumentInfo[]; // 사용자 메시지에 첨부한 문서
 }
 
 interface MessageOut {
@@ -47,6 +63,7 @@ interface MessageOut {
   image_ids: string[];
   steps: Step[];
   model: string | null;
+  documents: DocumentInfo[];
 }
 
 export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
@@ -81,6 +98,7 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
       images: m.image_ids.map(imageUrl),
       steps: m.steps,
       model: m.model,
+      documents: m.documents ?? [],
     })),
   };
 }
@@ -150,6 +168,7 @@ export async function streamChat(
     conversation_id: string | null;
     message: string;
     images?: ImageInput[];
+    document_ids?: string[];
     model?: string | null;
   },
   handlers: StreamHandlers,
@@ -220,10 +239,43 @@ export async function streamChat(
   }
 }
 
+export interface DocumentLimits {
+  enabled: boolean; // 첨부 저장소를 쓸 수 있는지
+  max_bytes: number;
+  max_per_message: number;
+  extensions: string[]; // 받는 확장자 (점 없이)
+}
+
 export interface AppInfo {
   provider: string;
   model: string;
   vision: boolean;
+  documents?: DocumentLimits;
+}
+
+// --- 첨부 문서 ---
+
+export const documentFileUrl = (id: string) => `${API_URL}/api/documents/${id}/file`;
+
+/** 문서를 올린다. 서버는 바로 processing 상태로 응답하고 백그라운드에서 파싱한다. */
+export async function uploadDocument(file: File, signal?: AbortSignal): Promise<DocumentInfo> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/documents`, { method: "POST", body: form, signal });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `업로드 실패 (${res.status})`);
+  return res.json();
+}
+
+/** 문서의 파싱 상태를 확인한다. */
+export async function getDocument(id: string): Promise<DocumentInfo> {
+  const res = await fetch(`${API_URL}/api/documents/${id}`);
+  if (!res.ok) throw new Error((await errorDetail(res)) || `문서 조회 실패 (${res.status})`);
+  return res.json();
+}
+
+/** 보내지 않은 문서를 지운다 (입력창에서 첨부를 뺄 때). 실패해도 서버가 하루 뒤 지운다. */
+export async function deleteDocument(id: string): Promise<void> {
+  await fetch(`${API_URL}/api/documents/${id}`, { method: "DELETE" }).catch(() => undefined);
 }
 
 export async function getInfo(): Promise<AppInfo> {

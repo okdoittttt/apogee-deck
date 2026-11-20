@@ -1,12 +1,16 @@
 "use client";
 
+import type { DocumentInfo } from "@/lib/api";
+import { documentMeta } from "@/lib/documents";
 import type { Attachment } from "@/lib/images";
+import { FileChip } from "./FileChip";
 import { ClockIcon, CloseIcon, InfoIcon } from "./icons";
 
 export interface QueuedMessage {
   id: string;
   text: string;
   attachments: Attachment[];
+  documents: DocumentInfo[]; // 다 읽은 첨부 문서
   model: string | null; // 입력할 때 고른 모델 (나중에 보내져도 이 모델로 보낸다)
 }
 
@@ -26,6 +30,13 @@ export function QueuedMessageBubble({
     <div className="mt-7 flex flex-col items-end gap-1.5">
       <div className="flex max-w-[85%] items-start gap-2 rounded-2xl border border-dashed border-line-strong px-4 py-2.5 opacity-70">
         <div className="min-w-0">
+          {message.documents.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {message.documents.map((d) => (
+                <FileChip key={d.id} name={d.filename} meta={documentMeta(d)} />
+              ))}
+            </div>
+          )}
           {message.attachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {message.attachments.map((a) => (
