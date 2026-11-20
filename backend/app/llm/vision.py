@@ -18,8 +18,10 @@ understood without seeing it.
 Write the description in Korean. Describe what the image shows and what it means in the \
 document. For charts and diagrams, write out every number, axis name, label, legend item and \
 unit you can read, and the key comparison or trend. For tables in the image, write out the \
-rows. For photos, describe the subject briefly. If text in the image is unreadable, say so \
-instead of guessing. Do not add anything that is not in the image or the context. Answer with \
+rows. For photos, describe the subject briefly. If OCR text of the image is given in the \
+context, use it to get small labels and numbers exactly right, but trust what you see when they \
+disagree: OCR can misread characters and its line order does not follow the layout. If text in \
+the image is unreadable, say so instead of guessing. Do not add anything that is not in the image or the context. Answer with \
 the description only, in at most about 300 Korean words.
 
 Context from the document (may be empty):

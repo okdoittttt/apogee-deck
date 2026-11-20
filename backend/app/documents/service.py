@@ -314,7 +314,9 @@ async def _describe_images(
                 f"Document: {filename}",
                 f"Section: {element.heading}" if element.heading else "",
                 f"Page: {element.page}" if element.page else "",
-                f"Text read from the image by OCR: {element.image.ocr_text}"
+                # 작은 라벨·숫자(예: 막대 끝의 "-6")는 낮은 해상도로 보면 놓치기 쉬워서 OCR 글자를 함께 준다.
+                f"OCR text of this image (line order does not follow the layout): "
+                f"{' / '.join(line for line in element.image.ocr_text.splitlines() if line.strip())}"
                 if element.image.ocr_text
                 else "",
             )
