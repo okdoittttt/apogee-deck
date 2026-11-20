@@ -10,6 +10,7 @@ LangGraph 기반 LLM 에이전트 웹앱. Docker Compose로 실행합니다.
                                    ├─ LangGraph 에이전트 ──▶ LLM (Anthropic | OpenAI | Google | Ollama | fake)
                                    │      └─ checkpointer ──▶ postgres (에이전트 상태)
                                    ├─ messages 테이블 ─────▶ postgres (UI 표시용 대화 이력)
+                                   ├─ 첨부 원본 ───────────▶ minio (앱 전용, S3 API)
                                    └─ 트레이스 ────────────▶ Langfuse (셀프호스팅)
 ```
 
@@ -38,6 +39,7 @@ make up                     # 전체 실행 (변경된 이미지는 다시 빌�
 | 채팅 UI | http://localhost:3000 |
 | 백엔드 API | http://localhost:8000/docs |
 | Langfuse | http://localhost:3100 (`.env`의 `LANGFUSE_INIT_USER_EMAIL` / `PASSWORD`로 로그인) |
+| MinIO 콘솔 (첨부 저장소) | http://localhost:9101 (`.env`의 `MINIO_ROOT_USER` / `PASSWORD`로 로그인) |
 
 포트가 이미 사용 중이면 `.env`의 `*_PORT` 값을 바꾸세요.
 모든 포트는 기본적으로 `127.0.0.1`에만 열려서 이 컴퓨터에서만 접속할 수 있습니다.
@@ -160,6 +162,9 @@ backend/
 │   ├── db.py / models.py    # SQLAlchemy (UI용 conversations, messages, message_images)
 │   ├── schemas.py
 │   ├── tracing.py           # Langfuse CallbackHandler
+│   ├── storage.py           # 첨부 파일 저장소 (S3 API, 앱 전용 MinIO)
+│   ├── documents/           # 첨부 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
+│   ├── routers/documents.py # /api/documents (올리기, 상태, 원본 받기, 지우기)
 │   ├── routers/chat.py      # /api/chat (SSE), /api/conversations, /api/images
 │   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델
 │   ├── prompts/             # 프롬프트 로더 + 공용 조각
@@ -298,6 +303,38 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | `FETCH_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 15초) |
 | `FETCH_MAX_BYTES` | 받을 최대 크기 (기본 5MB) |
 
+## 첨부 파일 저장소 (MinIO)
+
+첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다. 문서 첨부 기능은 [ROADMAP.md](ROADMAP.md)에서 단계별로 만들고 있습니다.
+
+- Langfuse 용 MinIO 와 계정·볼륨을 나눴습니다. Langfuse 없이도 동작하고, Langfuse 를 초기화해도 첨부 원본은 남습니다.
+- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일)을 만듭니다.
+  MinIO 에 연결하지 못해도 앱은 시작하고, 첨부만 쓸 수 없습니다.
+- 코드는 MinIO 전용 API 가 아니라 S3 API(boto3)만 씁니다. `S3_ENDPOINT_URL`과 키만 바꾸면 AWS S3, Cloudflare R2 등으로 옮길 수 있습니다.
+
+### 첨부 문서 (진행 중)
+
+`POST /api/documents`로 문서를 올리면 원본을 저장소에 넣고, 백그라운드에서 텍스트로 바꿉니다.
+파싱이 끝난 문서를 `POST /api/chat`의 `document_ids`로 보내면 모델이 읽고 답합니다. 화면은 다음 단계에서 붙입니다 ([ROADMAP.md](ROADMAP.md)).
+
+- **형식**: PDF, DOCX, XLSX, PPTX, HWP, HWPX, TXT, MD, CSV. 확장자가 아니라 파일 내용으로 형식을 확인하고, 압축 폭탄을 막습니다.
+- **파싱**: [xberg](https://github.com/kreuzberg-dev/kreuzberg)(Kreuzberg 후속, MIT) + PaddleOCR 한국어 모델.
+  - PDF: 텍스트 레이어를 쓰고, 글자가 없는 쪽(스캔본)과 큰 그림이 섞인 쪽은 쪽 전체를 OCR 합니다.
+  - Office·한글: 문서 안 그림을 OCR 해서 제자리에 넣습니다. 표는 Markdown 표로 남습니다.
+  - XML 로 된 `.hwp`(국가법령정보센터 등의 HWPML)는 앱이 본문만 직접 뽑습니다.
+- **실행**: 문서마다 새 프로세스에서 시간 제한(`DOCUMENT_PARSE_TIMEOUT_SECONDS`, 기본 3분)을 걸고 파싱합니다.
+  파서가 멈추거나 죽어도 백엔드는 영향을 받지 않습니다. 백엔드가 재시작되면 파싱 중이던 문서는 실패로 표시합니다.
+- **상태**: `processing` → `ready` / `failed`(실패 사유: 암호 문서, 손상, 쪽 수 초과, 시간 초과 등).
+- **정리**: 올렸지만 보내지 않은 문서는 하루(`DOCUMENT_UNSENT_TTL_HOURS`), 보낸 문서는 30일 뒤 지웁니다. 대화를 지우면 그 문서도 지웁니다.
+- OCR 모델(약 30MB)은 Docker 이미지를 만들 때 미리 받습니다 (`backend/scripts/prefetch_ocr_models.py`).
+
+**모델이 읽는 방법**
+- 보낸 문서는 그 대화와 메시지에 연결되고, **그 대화 안에서만** 읽을 수 있습니다. 한 메시지에 5개까지(`MAX_DOCUMENTS_PER_MESSAGE`) 붙일 수 있고, 파싱 중이거나 실패한 문서는 보낼 수 없습니다.
+- 모델에게는 사용자 메시지 뒤에 첨부 목록(이름, 형식, 쪽 수, 글자 수, ID)을 붙여 보냅니다. 화면에 저장하는 메시지에는 붙이지 않습니다.
+- 짧은 문서(추정 2,000토큰 이하, `DOCUMENT_INLINE_MAX_TOKENS`)는 본문까지 바로 넣어서 도구 호출을 아낍니다.
+- 긴 문서는 `read_document(document_id, offset)` 도구로 8,000자(`DOCUMENT_READ_MAX_CHARS`)씩 나눠 읽습니다. 다른 대화의 문서 ID 를 넣으면 찾을 수 없다고 답합니다.
+- 문서 본문은 `<document_content>` 태그로 감싸 지시가 아닌 참고 자료로 표시합니다 (웹 페이지 읽기와 같은 프롬프트 인젝션 방어).
+
 ## DB 마이그레이션 (Alembic)
 
 앱 테이블(`conversations`, `messages`, `message_images`)은 Alembic으로 관리합니다.
@@ -387,12 +424,16 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | Method | Path | 설명 |
 |---|---|---|
 | GET | `/api/models` | 고를 수 있는 모델 목록과 기본 모델 ID |
-| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}], model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
+| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}], document_ids?, model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
 | GET | `/api/conversations` | 대화 목록 |
 | GET | `/api/conversations/{id}` | 대화 + 메시지 + 생성 중 여부 |
 | GET | `/api/conversations/{id}/status` | 생성 중 여부 (다른 창 확인용) |
-| DELETE | `/api/conversations/{id}` | 대화 삭제 (생성 중이면 409) |
+| DELETE | `/api/conversations/{id}` | 대화 삭제 (첨부 문서 포함, 생성 중이면 409) |
 | GET | `/api/images/{id}` | 첨부 이미지 원본 |
+| POST | `/api/documents` | 문서 올리기 (multipart `file`) → `processing` 상태로 201. 너무 크면 413, 지원하지 않는 형식이면 415 |
+| GET | `/api/documents/{id}` | 문서 정보와 파싱 상태 (`processing` / `ready` / `failed`, 실패 사유, 쪽 수, 글자 수) |
+| GET | `/api/documents/{id}/file` | 원본 내려받기 (보관 기간이 지났으면 410) |
+| DELETE | `/api/documents/{id}` | 보내지 않은 문서 지우기 (이미 보낸 문서면 409) |
 | GET | `/health` | 헬스 체크 |
 
 ## 다음 단계

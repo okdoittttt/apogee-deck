@@ -9,6 +9,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_IMAGES_PER_MESSAGE = 4
+MAX_DOCUMENTS_PER_MESSAGE_LIMIT = 20
+"""요청 형식 검사용 상한. 실제 개수 제한은 설정(``MAX_DOCUMENTS_PER_MESSAGE``)으로 검사한다."""
 MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 디코딩 후 기준 (Anthropic API 의 이미지당 한도와 동일)
 
 ImageMimeType = Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
@@ -47,12 +49,13 @@ class ImageIn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """``POST /api/chat`` 요청. 텍스트와 이미지 중 하나는 있어야 한다.
+    """``POST /api/chat`` 요청. 텍스트, 이미지, 문서 중 하나는 있어야 한다.
 
     Attributes:
         conversation_id: 이어갈 대화 ID. 없으면 새 대화를 만든다.
         message: 사용자 메시지 텍스트.
         images: 첨부 이미지 (최대 ``MAX_IMAGES_PER_MESSAGE`` 장).
+        document_ids: 첨부 문서 ID (``POST /api/documents`` 로 올리고 파싱이 끝난 문서).
         model: 응답할 모델 ID (``GET /api/models`` 의 ``id``). 없으면 기본 모델.
     """
 
@@ -60,12 +63,16 @@ class ChatRequest(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     message: str = Field(default="", max_length=100_000)
     images: list[ImageIn] = Field(default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE)
+    document_ids: list[uuid.UUID] = Field(
+        default_factory=list, max_length=MAX_DOCUMENTS_PER_MESSAGE_LIMIT
+    )
 
     @model_validator(mode="after")
     def _require_content(self) -> "ChatRequest":
-        """텍스트와 이미지가 모두 비어 있으면 거부한다."""
-        if not self.message.strip() and not self.images:
-            raise ValueError("message or images is required")
+        """텍스트, 이미지, 문서가 모두 비어 있으면 거부하고, 중복 문서 ID 는 하나로 합친다."""
+        if not self.message.strip() and not self.images and not self.document_ids:
+            raise ValueError("message, images or document_ids is required")
+        self.document_ids = list(dict.fromkeys(self.document_ids))
         return self
 
 
@@ -165,6 +172,7 @@ class MessageOut(BaseModel):
         image_ids: 첨부 이미지 ID. 이미지는 ``GET /api/images/{id}`` 로 따로 받는다.
         steps: assistant 응답의 실행 단계 (일어난 순서).
         model: 응답한 모델 ID. 사용자 메시지와 모델을 기록하기 전의 응답은 ``None``.
+        documents: 사용자 메시지에 첨부한 문서 (본문 없이 정보만).
     """
 
     id: uuid.UUID
@@ -174,6 +182,7 @@ class MessageOut(BaseModel):
     image_ids: list[uuid.UUID] = []
     steps: list[Step] = []
     model: str | None = None
+    documents: list["DocumentOut"] = []
 
 
 class ConversationOut(BaseModel):
@@ -212,3 +221,40 @@ class ConversationStatus(BaseModel):
     """
 
     running: bool
+
+
+DocumentStatus = Literal["processing", "ready", "failed"]
+
+
+class DocumentOut(BaseModel):
+    """첨부 문서의 정보와 파싱 상태. 본문은 담지 않는다.
+
+    Attributes:
+        id: 문서 ID.
+        filename: 파일 이름.
+        kind: 내용으로 확인한 형식 (``pdf``, ``docx``, ``hwpx`` 등).
+        mime_type: 원본 MIME 타입.
+        size_bytes: 원본 크기.
+        status: ``processing`` (파싱 중) | ``ready`` (준비됨) | ``failed`` (실패).
+        error: 실패 사유.
+        page_count: 쪽 수 (쪽 구분이 없는 형식은 ``None``).
+        char_count: 파싱한 본문의 글자 수 (준비되기 전에는 ``None``).
+        created_at: 올린 시각.
+        parsed_at: 파싱이 끝난 시각.
+    """
+
+    id: uuid.UUID
+    filename: str
+    kind: str
+    mime_type: str
+    size_bytes: int
+    status: DocumentStatus
+    error: str | None = None
+    page_count: int | None = None
+    char_count: int | None = None
+    created_at: datetime
+    parsed_at: datetime | None = None
+
+
+MessageOut.model_rebuild()
+ConversationDetail.model_rebuild()

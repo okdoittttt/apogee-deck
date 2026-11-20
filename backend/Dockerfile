@@ -5,13 +5,18 @@ COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    HF_HOME=/opt/models/huggingface
 
 WORKDIR /app
 
-# 의존성 레이어를 먼저 캐시
+# 의존성 레이어를 먼저 캐시. uv 다운로드 캐시는 빌드 중에만 붙여서 이미지에 남기지 않는다 (약 400MB).
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
+
+# 문서 OCR(PaddleOCR) 모델을 미리 받아 둔다 (약 30MB). 앱 코드보다 먼저 두어 코드가 바뀌어도 다시 받지 않는다.
+COPY scripts/prefetch_ocr_models.py ./scripts/
+RUN python scripts/prefetch_ocr_models.py
 
 COPY alembic.ini ./
 COPY migrations ./migrations

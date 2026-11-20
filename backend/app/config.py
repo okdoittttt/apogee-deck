@@ -83,6 +83,24 @@ class Settings(BaseSettings):
             정상적으로는 응답이 끝날 때 해제되며, 해제되지 못한 경우를 대비한 안전장치다.
             모델이 토큰 사이에 기다릴 수 있는 시간(``ollama_timeout_seconds``)보다 길어야 한다.
         database_url: 앱 DB URL (SQLAlchemy asyncpg 형식).
+        s3_endpoint_url: 첨부 파일 저장소(S3 호환) 주소. Compose 에서는 앱 전용 MinIO
+            (``http://minio:9000``). 비어 있으면 첨부 저장소를 쓰지 않는다.
+        s3_access_key_id: 저장소 access key.
+        s3_secret_access_key: 저장소 secret key.
+        s3_bucket: 첨부 파일을 담을 버킷. 없으면 시작할 때 만든다.
+        s3_region: 저장소 region. MinIO 는 값을 따지지 않지만 S3 API 서명에 필요하다.
+        attachment_retention_days: 첨부 원본을 보관하는 기간(일). 버킷 lifecycle 규칙으로 지우고,
+            DB 의 문서 정보와 파싱 결과는 정리 작업이 지운다.
+        document_max_bytes: 첨부 문서 하나의 최대 크기(바이트).
+        document_max_pages: 첨부 문서 하나의 최대 쪽수. 넘으면 파싱하지 않고 실패로 표시한다.
+        document_parse_timeout_seconds: 문서 하나를 파싱하는 최대 시간(초). 넘으면 파싱 프로세스를
+            끝내고 실패(시간 초과)로 표시한다.
+        document_parse_workers: 동시에 파싱하는 문서 수. OCR 은 CPU 와 메모리를 많이 쓴다.
+        document_unsent_ttl_hours: 올렸지만 메시지로 보내지 않은 문서를 지우기까지의 시간.
+        document_inline_max_tokens: 이보다 짧은 문서는 본문을 사용자 메시지에 바로 넣는다
+            (도구 호출 한 번을 아낀다). 0 이면 항상 ``read_document`` 로 읽게 한다.
+        document_read_max_chars: ``read_document`` 가 한 번에 보여줄 최대 글자 수.
+        max_documents_per_message: 메시지 하나에 붙일 수 있는 문서 수.
         langfuse_public_key: Langfuse public key. 비어 있으면 트레이싱이 꺼진다.
         langfuse_secret_key: Langfuse secret key.
         prompt_source: ``file`` 이면 항상 로컬 파일(git 원본), ``langfuse`` 이면 라벨이 붙은
@@ -163,6 +181,24 @@ class Settings(BaseSettings):
     # --- Database ---
     database_url: str = "postgresql+asyncpg://agent:agent@postgres:5432/agent"
 
+    # --- Attachment storage (S3 호환) ---
+    s3_endpoint_url: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket: str = "attachments"
+    s3_region: str = "us-east-1"
+    attachment_retention_days: int = 30
+
+    # --- Documents ---
+    document_max_bytes: int = 20 * 1024 * 1024
+    document_max_pages: int = 100
+    document_parse_timeout_seconds: float = 180.0
+    document_parse_workers: int = 1
+    document_unsent_ttl_hours: int = 24
+    document_inline_max_tokens: int = 2000
+    document_read_max_chars: int = 8000
+    max_documents_per_message: int = 5
+
     # --- Tracing (Langfuse) ---
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
@@ -201,6 +237,11 @@ class Settings(BaseSettings):
     def checkpointer_db_url(self) -> str:
         """LangGraph Postgres checkpointer 용 DB URL (psycopg 형식)."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    @property
+    def storage_enabled(self) -> bool:
+        """첨부 저장소 주소와 키가 모두 설정되어 쓸 수 있는지 여부."""
+        return bool(self.s3_endpoint_url and self.s3_access_key_id and self.s3_secret_access_key)
 
     @property
     def tracing_enabled(self) -> bool:

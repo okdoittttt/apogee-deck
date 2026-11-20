@@ -99,3 +99,52 @@ class MessageImage(Base):
     data: Mapped[bytes] = mapped_column(LargeBinary)
 
     message: Mapped[Message] = relationship(back_populates="images")
+
+
+class Document(Base):
+    """사용자가 첨부한 문서. 원본은 첨부 저장소(MinIO)에, 파싱한 텍스트는 이 테이블에 둔다.
+
+    문서는 올리는 순간에는 어느 대화에도 속하지 않는다. 메시지와 함께 보낼 때 대화와 메시지에
+    연결되고, 그 대화 안에서만 읽을 수 있다. 보내지 않은 문서는 정리 작업이 지운다.
+
+    Attributes:
+        id: 문서 ID.
+        conversation_id: 속한 대화 ID. 메시지로 보내기 전에는 ``None``.
+        message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전에는 ``None``.
+        filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
+        kind: 내용으로 확인한 형식 (``app.documents.formats.DocumentKind``).
+        mime_type: 원본을 내려줄 때 쓰는 MIME 타입.
+        size_bytes: 원본 크기.
+        sha256: 원본의 SHA-256 (16진수).
+        storage_key: 첨부 저장소의 객체 키.
+        status: ``processing`` (파싱 중) | ``ready`` (준비됨) | ``failed`` (실패).
+        error: 실패 사유 (사용자에게 보여줄 문구).
+        page_count: 쪽수 (쪽 구분이 없는 형식은 ``None``).
+        content: 파싱한 본문 (Markdown). 준비되기 전에는 ``None``.
+        created_at: 올린 시각.
+        parsed_at: 파싱이 끝난 시각 (성공·실패 모두).
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(20))
+    mime_type: Mapped[str] = mapped_column(String(150))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(20), default="processing", index=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

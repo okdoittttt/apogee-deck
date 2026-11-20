@@ -24,9 +24,13 @@ from app.agents.events import (
 from app.agents.runtime import stream_reply
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
+from app.documents import reading
+from app.documents import service as documents
+from app.documents.formats import SUPPORTED_EXTENSIONS
 from app.llm import describe_error, model_name
 from app.llm.catalog import available_models, default_model_id
 from app.models import Conversation, Message, MessageImage
+from app.routers.documents import document_out
 from app.runs import InMemoryRunRegistry, RunRegistry
 from app.schemas import (
     ChatRequest,
@@ -61,16 +65,23 @@ def sse(event: str, data: dict[str, Any]) -> str:
 
 @router.get("/info")
 async def info() -> dict[str, Any]:
-    """현재 provider, 모델, 이미지 입력 가능 여부를 알려준다 (프론트엔드 표시용).
+    """현재 provider, 모델, 이미지 입력 가능 여부, 문서 첨부 제한을 알려준다 (프론트엔드 표시용).
 
     Returns:
-        ``provider`` / ``model`` / ``vision`` 키를 가진 딕셔너리.
+        ``provider`` / ``model`` / ``vision`` / ``documents`` 키를 가진 딕셔너리. ``documents`` 는
+        첨부 가능 여부(저장소 설정), 최대 크기, 메시지당 개수, 받는 확장자다.
     """
     settings = get_settings()
     return {
         "provider": settings.llm_provider,
         "model": model_name(settings),
         "vision": settings.enable_vision,
+        "documents": {
+            "enabled": settings.storage_enabled,
+            "max_bytes": settings.document_max_bytes,
+            "max_per_message": settings.max_documents_per_message,
+            "extensions": list(SUPPORTED_EXTENSIONS),
+        },
     }
 
 
@@ -121,6 +132,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
     """메시지를 포함한 대화 하나를 돌려준다.
 
     이미지 바이너리는 포함하지 않고 ID 만 내려준다. 이미지는 ``GET /api/images/{id}`` 로 받는다.
+    첨부 문서는 본문 없이 정보만 내려준다.
 
     Args:
         conversation_id: 대화 ID.
@@ -143,6 +155,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    attached = await documents.documents_by_message(session, conv.id)
     return ConversationDetail(
         id=conv.id,
         title=conv.title,
@@ -156,6 +169,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
                 image_ids=[img.id for img in m.images],
                 steps=m.steps or [],
                 model=m.model,
+                documents=[document_out(d, chars) for d, chars in attached.get(m.id, [])],
             )
             for m in conv.messages
         ],
@@ -215,9 +229,11 @@ async def get_image(image_id: uuid.UUID, session: SessionDep) -> Response:
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
 async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -> None:
-    """대화와 그 에이전트 상태(checkpoint)를 삭제한다.
+    """대화와 그 에이전트 상태(checkpoint), 첨부 문서를 삭제한다.
 
     checkpoint 삭제가 실패해도 대화 삭제는 유지되고, 남은 checkpoint 는 다음 기동 시 정리된다.
+    첨부 문서의 DB 기록은 대화와 함께 지워지고, 원본은 저장소에서 지운다 (실패하면 보관 기간이
+    지나 저장소가 지운다).
 
     Args:
         conversation_id: 대화 ID.
@@ -231,8 +247,10 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -
         raise HTTPException(status_code=404, detail="Conversation not found")
     if await run_registry.is_running(str(conversation_id)):
         raise HTTPException(status_code=409, detail="응답 생성 중인 대화는 삭제할 수 없습니다.")
+    document_keys = await documents.conversation_storage_keys(session, conversation_id)
     await session.delete(conv)
     await session.commit()
+    await documents.delete_objects(document_keys)
     try:
         await runtime.delete_thread(str(conversation_id))
     except Exception:
@@ -259,8 +277,13 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     Returns:
         ``text/event-stream`` 스트리밍 응답.
 
+    첨부 문서(``document_ids``)는 사용자 메시지와 같은 트랜잭션에서 이 대화와 메시지에 연결한다.
+    모델에게는 메시지 뒤에 첨부 목록을 붙여 보내고(짧은 문서는 본문 포함), 긴 문서는
+    ``read_document`` 도구로 읽게 한다. 화면에 저장하는 메시지 텍스트에는 붙이지 않는다.
+
     Raises:
         HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 지금 쓸 수 없는 모델이면 400,
+            문서가 너무 많으면 400, 붙일 수 없는 문서면 400/404/409 (``documents.check_attachable``),
             대화가 없으면 404, 같은 대화의 응답이 생성 중이면 409.
     """
     settings = get_settings()
@@ -271,6 +294,15 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
             status_code=400,
             detail="선택한 모델을 지금 쓸 수 없습니다. 모델 목록을 새로고침해 주세요.",
         )
+    if len(req.document_ids) > settings.max_documents_per_message:
+        raise HTTPException(
+            status_code=400,
+            detail=f"문서는 한 번에 {settings.max_documents_per_message}개까지 보낼 수 있습니다.",
+        )
+    try:
+        await documents.check_attachable(session, req.document_ids)
+    except documents.AttachError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     # 1) 대화 조회/생성 → 생성 중 표시 (이미 생성 중이면 저장 전에 거절)
     if req.conversation_id:
@@ -278,37 +310,55 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
         if conv is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
     else:
-        conv = Conversation(title=req.message.strip()[:50] or "이미지")
+        conv = Conversation(title=_new_title(req))
         session.add(conv)
         await session.flush()
     if not await run_registry.try_acquire(str(conv.id)):
         raise HTTPException(status_code=409, detail=BUSY_DETAIL)
 
-    # 2) 사용자 메시지(+이미지) 저장. 실패하면 생성 중 표시를 되돌린다.
+    # 2) 사용자 메시지(+이미지) 저장, 문서 연결. 실패하면 생성 중 표시를 되돌린다.
     try:
-        session.add(
-            Message(
-                conversation_id=conv.id,
-                role="user",
-                content=req.message,
-                images=[
-                    MessageImage(position=i, mime_type=img.mime_type, data=img.to_bytes())
-                    for i, img in enumerate(req.images)
-                ],
-            )
+        user_message = Message(
+            conversation_id=conv.id,
+            role="user",
+            content=req.message,
+            images=[
+                MessageImage(position=i, mime_type=img.mime_type, data=img.to_bytes())
+                for i, img in enumerate(req.images)
+            ],
+        )
+        session.add(user_message)
+        await session.flush()
+        await documents.attach_to_message(session, req.document_ids, conv.id, user_message.id)
+        attachments = await documents.load_attachments(
+            session, req.document_ids, settings.document_inline_max_tokens
         )
         await session.commit()
+    except documents.AttachError as exc:
+        await session.rollback()
+        await run_registry.release(str(conv.id))
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except BaseException:
         await run_registry.release(str(conv.id))
         raise
     images = [(img.mime_type, img.data) for img in req.images]
+    model_text = reading.with_attachments(
+        req.message, reading.attachment_block(attachments, can_read=settings.enable_tools)
+    )
 
     # 3) 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장, 생성 중 표시 해제
     return StreamingResponse(
-        stream_and_save(conv.id, req.message, images, req.model),
+        stream_and_save(conv.id, model_text, images, req.model),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _new_title(req: ChatRequest) -> str:
+    """새 대화의 제목: 메시지 앞부분, 없으면 첨부 종류."""
+    if title := req.message.strip()[:50]:
+        return title
+    return "문서" if req.document_ids else "이미지"
 
 
 # 응답이 끝까지 오지 못했을 때 저장하는 텍스트 뒤에 붙이는 표시 (프론트엔드와 같은 문구).
@@ -368,7 +418,7 @@ async def stream_and_save(
 
     Args:
         conversation_id: 대화 ID. 호출 전에 ``run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
-        text: 사용자 메시지 텍스트.
+        text: 모델에게 보낼 사용자 메시지 텍스트 (첨부 목록 포함).
         images: ``(mime_type, base64)`` 목록.
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
 
