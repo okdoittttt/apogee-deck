@@ -4,11 +4,13 @@ import logging
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Cookie, Response
+from fastapi import APIRouter, Cookie, HTTPException, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.auth import google
+from app.auth.approval import MAX_REASON_CHARS, ApprovalError, request_access
+from app.auth.deps import CurrentUser
 from app.auth.sessions import SESSION_COOKIE, create_session, delete_session, user_for_token
 from app.auth.users import get_or_create_local_user, is_admin, upsert_google_user
 from app.config import Settings, get_settings
@@ -183,6 +185,50 @@ async def google_callback(
     _set_cookie(response, SESSION_COOKIE, token, settings.session_ttl_days * 24 * 60 * 60)
     response.delete_cookie(google.FLOW_COOKIE, path="/api/auth")
     return response
+
+
+class AccessRequest(BaseModel):
+    """가입 신청.
+
+    Attributes:
+        reason: 신청 사유 (관리자에게 메일로 보낸다).
+    """
+
+    reason: str = Field(default="", max_length=MAX_REASON_CHARS)
+
+
+class AccessRequestResult(BaseModel):
+    """가입 신청 결과.
+
+    Attributes:
+        notified: 관리자에게 알림 메일을 보냈는지 (메일 설정이 없거나 실패하면 ``False``).
+    """
+
+    notified: bool
+
+
+@router.post("/request", status_code=202)
+async def request_approval(
+    body: AccessRequest, session: SessionDep, user: CurrentUser
+) -> AccessRequestResult:
+    """가입을 신청한다. 관리자에게 승인·거절 링크가 담긴 메일을 보낸다.
+
+    Args:
+        body: 신청 사유.
+        session: DB 세션.
+        user: 로그인한 사용자 (승인 대기 상태).
+
+    Returns:
+        관리자에게 메일을 보냈는지.
+
+    Raises:
+        HTTPException: 승인 대기 상태가 아니면 409, 너무 자주 신청하면 429.
+    """
+    try:
+        notified = await request_access(session, user, body.reason, get_settings())
+    except ApprovalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return AccessRequestResult(notified=notified)
 
 
 @router.post("/logout", status_code=204)

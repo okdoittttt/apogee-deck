@@ -112,6 +112,13 @@ class Settings(BaseSettings):
             (``<주소>/api/auth/google/callback`` 을 OAuth 클라이언트에 등록해야 한다).
         session_ttl_days: 로그인 세션 유지 기간(일).
         cookie_secure: 세션 쿠키에 ``Secure`` 를 붙일지. ``None`` 이면 ``frontend_url`` 이 https 일 때만.
+        smtp_host: 알림 메일을 보낼 SMTP 서버 (Gmail: ``smtp.gmail.com``).
+        smtp_port: SMTP 포트 (587, STARTTLS).
+        smtp_username: SMTP 로그인 계정 (보내는 Gmail 주소).
+        smtp_password: SMTP 비밀번호. Gmail 은 계정 비밀번호가 아니라 **앱 비밀번호**다.
+        mail_from: 보내는 사람 주소. 비우면 ``smtp_username``.
+        approval_link_ttl_hours: 가입 승인·거절 링크의 유효 시간.
+        access_request_cooldown_minutes: 같은 사람이 가입 신청 메일을 다시 보낼 수 있기까지의 간격.
         langfuse_public_key: Langfuse public key. 비어 있으면 트레이싱이 꺼진다.
         langfuse_secret_key: Langfuse secret key.
         prompt_source: ``file`` 이면 항상 로컬 파일(git 원본), ``langfuse`` 이면 라벨이 붙은
@@ -220,6 +227,15 @@ class Settings(BaseSettings):
     session_ttl_days: int = 30
     cookie_secure: bool | None = None
 
+    # --- Mail (가입 신청 알림) ---
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    mail_from: str = ""
+    approval_link_ttl_hours: int = 48
+    access_request_cooldown_minutes: int = 10
+
     # --- Tracing (Langfuse) ---
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
@@ -268,6 +284,11 @@ class Settings(BaseSettings):
     def google_login_enabled(self) -> bool:
         """Google 로그인 클라이언트가 설정되어 있는지."""
         return bool(self.google_oauth_client_id and self.google_oauth_client_secret)
+
+    @property
+    def mail_enabled(self) -> bool:
+        """알림 메일을 보낼 수 있는지 (SMTP 계정과 앱 비밀번호가 설정됨)."""
+        return bool(self.smtp_host and self.smtp_username and self.smtp_password)
 
     @property
     def session_cookie_secure(self) -> bool:

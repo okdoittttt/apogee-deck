@@ -27,6 +27,7 @@ class User(Base):
         picture: 프로필 사진 주소.
         status: ``pending`` (승인 대기) | ``approved`` | ``rejected`` | ``suspended``.
         request_reason: 가입 신청 사유.
+        requested_at: 마지막으로 가입을 신청한 시각 (관리자에게 알림 메일을 보낸 시각).
         created_at: 처음 로그인한 시각.
         approved_at: 승인된 시각.
         last_login_at: 마지막 로그인 시각.
@@ -42,6 +43,7 @@ class User(Base):
     picture: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     request_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

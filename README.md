@@ -307,10 +307,18 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 
 ## 로그인과 접근 제어
 
-Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 수 있습니다 (승인 메일·화면은 작업 중).
+Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 수 있습니다.
+
+1. 화면에서 "Google 로 로그인" → 처음이면 "승인 대기" 화면에서 신청 사유를 적어 신청합니다.
+2. 관리자(`ADMIN_EMAILS`)에게 승인·거절 링크가 담긴 메일이 갑니다 (48시간, 한 번만, 확인 버튼을 눌러야 처리).
+   관리 화면 `/admin` 에서도 승인·거절·정지·정지 해제할 수 있습니다.
+3. 승인되면 신청자에게 메일이 가고, 대기 화면이 자동으로 채팅 화면으로 바뀝니다.
+
+설정:
 
 - `.env` 에 `GOOGLE_OAUTH_CLIENT_ID` / `SECRET`, `ADMIN_EMAILS` 를 넣습니다. OAuth 클라이언트의 승인된 리디렉션 URI 는
   `http://localhost:8000/api/auth/google/callback` 입니다 (배포 때는 도메인 주소).
+- 알림 메일은 Gmail SMTP 로 보냅니다: `SMTP_USERNAME`(보내는 Gmail), `SMTP_PASSWORD`(**앱 비밀번호**, 계정 비밀번호 아님).
 - 처음 로그인한 사람은 "승인 대기" 이고, 채팅·업로드 등 API 는 403 입니다. 관리자 이메일은 바로 승인됩니다.
 - 대화·문서·이미지는 **주인만** 볼 수 있습니다. 다른 사람의 ID 로 요청하면 404 를 돌려줍니다 (존재 여부도 숨김).
 - 세션은 DB 에 토큰 해시만 저장하고, 쿠키는 `HttpOnly`·`SameSite=Lax`(https 면 `Secure`)입니다. 상태를 바꾸는 요청은 출처(Origin)를 확인합니다.
@@ -452,6 +460,10 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |
 | POST | `/api/auth/logout` | 로그아웃 |
+| POST | `/api/auth/request` | 가입 신청 `{reason}` → 관리자에게 승인·거절 링크 메일 (10분에 한 번) |
+| GET·POST | `/api/auth/approvals/{token}` | 메일의 승인·거절 링크: 확인 화면(GET) → 처리(POST) |
+| GET | `/api/admin/users` | (관리자) 사용자 목록 |
+| POST | `/api/admin/users/{id}/{approve\|reject\|suspend\|reactivate}` | (관리자) 사용자 상태 변경 |
 | GET | `/health` | 헬스 체크 |
 
 ## 다음 단계
