@@ -20,10 +20,18 @@ import { FolderIcon, UploadIcon } from "./icons";
 
 const POLL_MS = 1000;
 
-/** 문서 칩의 보조 설명에 토큰 수를 붙인다: "PDF · 3쪽 · 1.2MB · 약 4,200 토큰". */
+/** 문서 칩의 보조 설명: "PDF · 3쪽 · 1.2MB · 그림 4개 · 약 4,200 토큰". */
 function projectDocumentMeta(doc: DocumentInfo): string {
-  const meta = documentMeta(doc);
-  return doc.token_count ? `${meta} · 약 ${doc.token_count.toLocaleString()} 토큰` : meta;
+  const parts = [documentMeta(doc)];
+  if (doc.image_count) parts.push(`그림 ${doc.image_count}개`);
+  if (doc.token_count) parts.push(`약 ${doc.token_count.toLocaleString()} 토큰`);
+  return parts.join(" · ");
+}
+
+/** 설명을 만들지 못한 그림이 있으면 알려준다 (그 그림은 그림 속 글자만 참고한다). */
+function fallbackNote(doc: DocumentInfo): string | null {
+  const n = doc.image_fallback_count ?? 0;
+  return doc.status === "ready" && n > 0 ? `그림 ${n}개는 설명을 만들지 못해 그림 속 글자만 참고합니다.` : null;
 }
 
 /** 새 프로젝트 만들기: 이름과 지시문을 받는다. */
@@ -147,8 +155,9 @@ export function ProjectView({
     });
   }, [load]);
 
-  // 읽는 중인 문서가 있으면 끝날 때까지 다시 읽는다.
-  const processing = detail?.documents.some((d) => d.status === "processing") ?? false;
+  // 읽는 중이거나 그림을 분석 중인 문서가 있으면 끝날 때까지 다시 읽는다.
+  const processing =
+    detail?.documents.some((d) => d.status === "processing" || d.status === "analyzing") ?? false;
   useEffect(() => {
     if (!processing) return;
     const timer = setInterval(() => void load(), POLL_MS);
@@ -336,16 +345,20 @@ export function ProjectView({
               ) : (
                 <div className="space-y-2">
                   {detail.documents.map((doc) => (
-                    <FileChip
-                      key={doc.id}
-                      name={doc.filename}
-                      meta={projectDocumentMeta(doc)}
-                      status={doc.status}
-                      error={doc.error}
-                      href={doc.status === "ready" ? documentFileUrl(doc.id) : undefined}
-                      onRemove={() => void removeDocument(doc)}
-                      removeLabel="문서 삭제"
-                    />
+                    <div key={doc.id}>
+                      <FileChip
+                        name={doc.filename}
+                        meta={projectDocumentMeta(doc)}
+                        status={doc.status}
+                        error={doc.error}
+                        href={doc.status === "ready" ? documentFileUrl(doc.id) : undefined}
+                        onRemove={() => void removeDocument(doc)}
+                        removeLabel="문서 삭제"
+                      />
+                      {fallbackNote(doc) && (
+                        <p className="mt-1 px-1 text-[11px] text-subtle">{fallbackNote(doc)}</p>
+                      )}
+                    </div>
                   ))}
                   {uploading > 0 && (
                     <FileChip name={`${uploading}개 올리는 중`} status="uploading" />

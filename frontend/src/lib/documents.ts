@@ -5,7 +5,7 @@ export interface PendingDocument {
   localId: string;
   filename: string;
   size: number;
-  status: "uploading" | "processing" | "ready" | "failed";
+  status: "uploading" | "processing" | "analyzing" | "ready" | "failed";
   error?: string | null;
   doc?: DocumentInfo; // 서버가 받은 뒤의 정보 (id, 쪽 수 등)
 }

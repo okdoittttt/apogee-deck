@@ -62,11 +62,13 @@ export interface DocumentInfo {
   kind: string; // pdf, docx, hwpx ...
   mime_type: string;
   size_bytes: number;
-  status: "processing" | "ready" | "failed";
+  status: "processing" | "analyzing" | "ready" | "failed"; // analyzing: 프로젝트 문서의 그림 설명 중
   error: string | null;
   page_count: number | null;
   char_count: number | null;
-  token_count?: number | null; // 프로젝트 문서만: 본문의 추정 토큰 수 (용량 계산)
+  token_count?: number | null; // 프로젝트 문서만: 본문과 그림 설명의 추정 토큰 수 (용량 계산)
+  image_count?: number | null; // 프로젝트 문서만: 설명할 그림 수
+  image_fallback_count?: number | null; // 프로젝트 문서만: 설명을 만들지 못해 OCR 글자로 대신한 그림 수
   created_at: string;
   parsed_at: string | null;
 }
