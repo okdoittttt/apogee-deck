@@ -1,13 +1,22 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
+import "katex/dist/katex.min.css";
+import ReactMarkdown, { type Options as MarkdownOptions } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { type ChatMessage, documentFileUrl } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
+import { normalizeMath } from "@/lib/math";
 import { FileChip } from "./FileChip";
 import { LogoIcon } from "./icons";
 import { Sources } from "./Sources";
 import { Steps } from "./Steps";
+
+// 수식: `$` 한 개는 금액과 헷갈리므로 끈다 (lib/math.ts 가 \( \) 를 $$ $$ 로 바꾼다).
+// 문법이 틀린 수식은 오류 대신 원문을 빨갛게 보여준다.
+const REMARK_PLUGINS: MarkdownOptions["remarkPlugins"] = [remarkGfm, [remarkMath, { singleDollarTextMath: false }]];
+const REHYPE_PLUGINS: MarkdownOptions["rehypePlugins"] = [[rehypeKatex, { throwOnError: false }]];
 
 function TypingDots() {
   return (
@@ -84,7 +93,9 @@ function AssistantMessage({
         {steps.length > 0 && <Steps steps={steps} thinking={active && (message.thinking ?? false)} />}
         {message.content && (
           <div className="prose prose-neutral max-w-none text-[15px] leading-relaxed text-fg dark:prose-invert prose-p:my-2.5 prose-pre:rounded-xl prose-pre:border prose-pre:border-line prose-code:before:content-none prose-code:after:content-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+              {normalizeMath(message.content)}
+            </ReactMarkdown>
           </div>
         )}
         {showDots && <TypingDots />}
