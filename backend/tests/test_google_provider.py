@@ -21,6 +21,7 @@ from app.llm import (
     build_chat_model,
     build_summary_model,
     describe_error,
+    is_transient_error,
     model_name,
 )
 from app.orchestration import runtime
@@ -184,6 +185,40 @@ def _client_error(code: int, status: str, message: str) -> genai_errors.ClientEr
     return genai_errors.ClientError(
         code, {"error": {"code": code, "status": status, "message": message}}
     )
+
+
+async def test_google_unavailable_is_transient(fake_google):
+    """Google 이 503 UNAVAILABLE 을 돌려주면 혼잡 안내를 보내고 일시적 오류로 본다."""
+
+    class FailingModels(FakeModels):
+        async def generate_content_stream(self, **request):
+            async def stream():
+                raise genai_errors.ServerError(
+                    503,
+                    {
+                        "error": {
+                            "code": 503,
+                            "status": "UNAVAILABLE",
+                            "message": "The model is overloaded. Please try again later.",
+                        }
+                    },
+                )
+                yield  # pragma: no cover
+
+            return stream()
+
+    fake = type("FakeAio", (), {"models": FailingModels([])})()
+    model = build_chat_model(SETTINGS)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ChatGoogleGenerativeAI, "async_client", property(lambda self: fake))
+        with pytest.raises(Exception) as exc:
+            async for _ in model.astream("hi"):
+                pass
+
+    described = describe_error(exc.value)
+    assert described is not None and "혼잡" in described
+    assert "overloaded" not in described
+    assert is_transient_error(exc.value)
 
 
 @pytest.mark.parametrize(

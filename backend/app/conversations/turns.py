@@ -12,7 +12,7 @@ import anyio
 
 from app.conversations import runs
 from app.core.db import SessionLocal
-from app.llm import describe_error
+from app.llm import describe_error, is_transient_error
 from app.models import Message
 from app.orchestration.events import (
     Finished,
@@ -86,7 +86,8 @@ async def run_turn(
     화면에 보였던 내용이 남게 한다.
 
     - 오류: ``error`` 이벤트를 보내고 ``ERROR_SUFFIX`` 를 붙인다. 이벤트에는 예외 원문 대신
-      일반 문구와 오류 ID 를 넣고, 원문은 같은 오류 ID 로 로그에 남긴다.
+      일반 문구와 오류 ID 를 넣고, 원문은 같은 오류 ID 로 로그에 남긴다. 서버 혼잡처럼
+      잠시 후 다시 보내면 풀릴 수 있는 오류면 ``transient`` 를 ``True`` 로 보낸다.
     - 사용자가 중지했거나 연결이 끊김: 요청이 취소되므로 이벤트는 보낼 수 없고
       ``INTERRUPTED_SUFFIX`` 를 붙인다. 취소된 요청 안에서도 저장이 끝나도록 저장을 보호한다.
 
@@ -163,7 +164,13 @@ async def run_turn(
             await runs.run_registry.release(run_id)
         message = describe_error(e) or "응답을 만드는 중 오류가 발생했습니다."
         yield StreamEvent(
-            "error", {"message": f"{message} (오류 ID: {error_id})", "error_id": error_id}
+            "error",
+            {
+                "message": f"{message} (오류 ID: {error_id})",
+                "error_id": error_id,
+                # 잠시 후 다시 보내면 풀릴 수 있는 오류 (화면은 알림으로 짧게 보여준다)
+                "transient": is_transient_error(e),
+            },
         )
     finally:
         # 연결이 끊기면 이 요청은 취소된 상태라, 보호하지 않으면 정리 중 await 도 취소된다.

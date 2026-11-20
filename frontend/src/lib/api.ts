@@ -182,7 +182,11 @@ export interface StreamHandlers {
   onToolStart?: (data: ToolStartEvent) => void;
   onToolEnd?: (data: ToolEndEvent) => void;
   onDone?: (data: { stop_reason: string | null; model: string }) => void;
-  onError?: (message: string) => void;
+  /**
+   * 응답 실패. `transient` 는 서버 혼잡(5xx)·사용 한도·시간 초과처럼
+   * 잠시 후 다시 보내면 풀릴 수 있는 오류인지 나타낸다.
+   */
+  onError?: (message: string, info: { transient: boolean }) => void;
   /** 같은 대화의 응답이 다른 창에서 생성 중이라 거절됨 (409). 메시지는 저장되지 않았다. */
   onBusy?: (detail: string) => void;
 }
@@ -211,7 +215,9 @@ export async function streamChat(
       handlers.onBusy?.(detail);
       return;
     }
-    handlers.onError?.(`요청 실패 (${res.status})${detail ? `: ${detail}` : ""}`);
+    handlers.onError?.(`요청 실패 (${res.status})${detail ? `: ${detail}` : ""}`, {
+      transient: false,
+    });
     return;
   }
 
@@ -257,7 +263,7 @@ export async function streamChat(
           handlers.onDone?.(payload);
           break;
         case "error":
-          handlers.onError?.(payload.message);
+          handlers.onError?.(payload.message, { transient: payload.transient === true });
           break;
       }
     }

@@ -8,13 +8,14 @@ import uuid
 import anyio
 import httpx
 import pytest
+from langchain_core.exceptions import ModelAPIError, ModelRateLimitError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app import prompts
 from app.api.routers import chat as chat_router
 from app.conversations import turns
 from app.core.config import Settings
-from app.llm import build_chat_model, describe_error
+from app.llm import build_chat_model, describe_error, is_transient_error
 from app.orchestration.context import (
     INTERRUPTED_TOOL_RESULT,
     close_dangling_tool_calls,
@@ -128,6 +129,8 @@ def _patch_stream(monkeypatch, steps):
                 await asyncio.sleep(30)
             elif step == "boom":
                 raise RuntimeError("model crashed")
+            elif isinstance(step, BaseException):
+                raise step
             else:
                 yield step
 
@@ -176,6 +179,40 @@ async def test_error_event_hides_exception_details(monkeypatch, caplog):
     assert data["error_id"] in data["message"]
     record = next(r for r in caplog.records if data["error_id"] in r.getMessage())
     assert "model crashed" in str(record.exc_info[1])
+
+
+async def test_unknown_error_is_not_transient(monkeypatch):
+    _patch_stream(monkeypatch, ["boom"])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
+    assert events[-1][1]["transient"] is False
+
+
+async def test_server_error_event_is_transient(monkeypatch):
+    _patch_stream(monkeypatch, [TextDelta("부분"), ModelAPIError("503 UNAVAILABLE")])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
+    event, data = events[-1]
+    assert event == "error"
+    assert data["transient"] is True
+    assert "혼잡" in data["message"]
+    assert "UNAVAILABLE" not in data["message"]
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (ModelAPIError("503"), True),
+        (ModelRateLimitError("429"), True),
+        (httpx.ReadTimeout("timed out"), True),
+        (ConnectionError("refused"), False),
+        (RuntimeError("model crashed"), False),
+    ],
+)
+def test_is_transient_error(error, transient):
+    assert is_transient_error(error) is transient
 
 
 @pytest.mark.parametrize(
