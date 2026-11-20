@@ -353,12 +353,39 @@ def _pdf_elements(scan: Any, page_bodies: dict[int, str]) -> list[el.Element]:
         for p in sorted(scan.pages or [], key=lambda p: p.page_number)
         for t in p.tables or []
     ]
+    masks = _soft_masks(scan.images or [])
     images = [
         (img.page_number, image, _image_kind(img))
         for img in scan.images or []
-        if img.page_number and (image := _image_data(img)) is not None
+        if img.page_number and id(img) not in masks and (image := _image_data(img)) is not None
     ]
     return el.from_pdf(page_bodies, tables, images)
+
+
+def _soft_masks(images: list[Any]) -> set[int]:
+    """그림의 투명도 마스크로 보이는 그림(``id``)을 찾는다.
+
+    PDF 는 투명한 부분이 있는 그림(차트 PNG 등)을 컬러 그림과 회색조 마스크로 나눠 저장하는데, xberg 는 둘을
+    따로 돌려주고 마스크라고 표시하지 않는다. 같은 쪽에 같은 크기의 컬러 그림이 있는 회색조 그림을 마스크로 본다.
+    (투명도가 단순한 마스크는 빈 그림 검사에서도 걸리지만, 투명도에 모양이 있으면 그 검사를 지나간다.)
+
+    Args:
+        images: xberg 그림 목록.
+
+    Returns:
+        마스크로 볼 그림 객체의 ``id`` 집합.
+    """
+    colored = {
+        (img.page_number, img.width, img.height)
+        for img in images
+        if str(getattr(img, "colorspace", "") or "") != "DeviceGray"
+    }
+    return {
+        id(img)
+        for img in images
+        if str(getattr(img, "colorspace", "") or "") == "DeviceGray"
+        and (img.page_number, img.width, img.height) in colored
+    }
 
 
 def _combine_ocr(text_layer: str, ocr_text: str) -> str:

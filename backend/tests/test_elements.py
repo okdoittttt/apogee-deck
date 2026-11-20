@@ -7,7 +7,8 @@ from app.llm import vision
 
 
 def _image(width=600, height=400, ocr=""):
-    return el.ImageData(b"img", "image/webp", width, height, ocr)
+    # 실제 그림처럼 픽셀당 약 0.01바이트 (빈 그림 검사에 걸리지 않게)
+    return el.ImageData(b"x" * (width * height // 100), "image/webp", width, height, ocr)
 
 
 def _grid(rows):
@@ -70,6 +71,13 @@ def test_keep_image_drops_small_and_decorative():
     assert not el.keep_image(600, 400, "DECORATION")
     assert not el.keep_image(60, 900, None)  # 짧은 변이 작다
     assert not el.keep_image(200, 200, None)  # 넓이가 작다
+
+
+def test_keep_image_drops_blank_images():
+    # 실측값: 차트 856x490 은 WebP 12,446바이트, 같은 크기의 투명도 마스크는 244바이트
+    assert el.keep_image(856, 490, None, 12_446)
+    assert not el.keep_image(856, 490, None, 244)
+    assert el.keep_image(856, 490, None)  # 용량을 모르면 빈 그림 검사를 하지 않는다
 
 
 def test_table_markdown_escapes_and_pads():

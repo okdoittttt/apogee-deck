@@ -18,6 +18,10 @@ MIN_IMAGE_SIDE = 80
 MIN_IMAGE_AREA = 50_000
 """이보다 작은 그림(아이콘·글머리표 등)은 버린다 (픽셀)."""
 
+BLANK_MAX_BYTES_PER_PIXEL = 0.002
+"""압축한 그림 용량이 픽셀당 이보다 작으면 거의 한 가지 색인 빈 그림으로 본다. PDF 그림의 투명도 마스크가
+흰색 그림으로 따로 나오는 경우 등이다 (실측: 차트는 픽셀당 약 0.03바이트, 빈 마스크는 0.0006바이트)."""
+
 SKIPPED_IMAGE_KINDS = frozenset({"icon", "logo", "decoration", "mask", "tile_fragment"})
 """xberg 그림 분류에서 버리는 종류. 차트·사진 등 나머지는 vision 모델이 설명한다."""
 
@@ -75,20 +79,26 @@ class Element:
     image: ImageData | None = field(default=None, repr=False)
 
 
-def keep_image(width: int, height: int, image_kind: str | None) -> bool:
-    """설명할 만한 그림인지: 아이콘·로고·장식과 작은 그림을 버린다.
+def keep_image(
+    width: int, height: int, image_kind: str | None, data_size: int | None = None
+) -> bool:
+    """설명할 만한 그림인지: 아이콘·로고·장식, 작은 그림, 빈 그림을 버린다.
 
     Args:
         width: 너비(픽셀).
         height: 높이(픽셀).
         image_kind: xberg 그림 분류 (``icon``, ``chart`` 등). 모르면 ``None``.
+        data_size: 압축한 그림의 바이트 수 (WebP·PNG). 주면 빈 그림인지도 확인한다.
 
     Returns:
         남길 그림이면 ``True``.
     """
     if image_kind and image_kind.lower() in SKIPPED_IMAGE_KINDS:
         return False
-    return min(width, height) >= MIN_IMAGE_SIDE and width * height >= MIN_IMAGE_AREA
+    if min(width, height) < MIN_IMAGE_SIDE or width * height < MIN_IMAGE_AREA:
+        return False
+    # 거의 한 가지 색인 그림은 아주 작게 압축된다. 설명해도 "흰 바탕만 보인다" 가 되므로 버린다.
+    return data_size is None or data_size >= width * height * BLANK_MAX_BYTES_PER_PIXEL
 
 
 def table_markdown(rows: list[list[str]]) -> str:
@@ -179,7 +189,7 @@ def from_structure(
             found = images.get(int(node.get("image_index", -1)))
             if found is not None:
                 image, image_kind = found
-                if keep_image(image.width, image.height, image_kind):
+                if keep_image(image.width, image.height, image_kind, len(image.data)):
                     elements.append(Element("image", image.ocr_text, page, path(), image))
         elif node_type in TEXT_NODE_TYPES and isinstance(node.get("text"), str):
             if buffer and page != buffer_page:
@@ -270,7 +280,7 @@ def from_pdf(
         if md := table_markdown(table.rows):
             by_page.setdefault(table.page, []).append(Element("table", md, table.page))
     for page, image, image_kind in images:
-        if keep_image(image.width, image.height, image_kind):
+        if keep_image(image.width, image.height, image_kind, len(image.data)):
             by_page.setdefault(page, []).append(Element("image", image.ocr_text, page, None, image))
     return [e for page in sorted(by_page) for e in by_page[page]]
 

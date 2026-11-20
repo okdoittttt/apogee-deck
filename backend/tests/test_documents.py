@@ -197,6 +197,17 @@ def test_pdf_text_layers_fall_back_when_pdfium_cannot_open():
     assert layers == {1: "Hello page one", 2: "Second page"}
 
 
+def test_soft_mask_companions_are_dropped():
+    def img(page, w, h, colorspace):
+        return SimpleNamespace(page_number=page, width=w, height=h, colorspace=colorspace)
+
+    chart, mask = img(1, 856, 490, "DeviceRGB"), img(1, 856, 490, "DeviceGray")
+    gray_photo = img(2, 640, 480, "DeviceGray")  # 같은 크기의 컬러 그림이 없으면 마스크가 아니다
+    other_page = img(2, 856, 490, "DeviceGray")  # 다른 쪽이면 짝이 아니다
+    masks = parser_module._soft_masks([chart, mask, gray_photo, other_page])
+    assert masks == {id(mask)}
+
+
 def test_parse_pdf_page_limit_and_broken_pdf():
     with pytest.raises(ParseError, match="쪽 수"):
         parse(text_pdf(["a", "b", "c"]), DocumentKind.PDF, "a.pdf", 2)
