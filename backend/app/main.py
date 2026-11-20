@@ -5,8 +5,9 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from app.agents import runtime
@@ -14,7 +15,7 @@ from app.config import get_settings
 from app.db import SessionLocal, run_migrations
 from app.documents import service as documents
 from app.models import Conversation
-from app.routers import chat
+from app.routers import auth, chat
 from app.routers import documents as documents_router
 from app.storage import get_storage
 
@@ -73,10 +74,32 @@ app = FastAPI(title="Agent API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origin_list,
+    allow_credentials=True,  # 화면(다른 포트)이 세션 쿠키를 붙여 요청한다
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def check_origin(request: Request, call_next):
+    """상태를 바꾸는 요청이 다른 사이트에서 왔으면 거절한다 (CSRF 방어).
+
+    세션 쿠키는 ``SameSite=Lax`` 라 다른 사이트의 POST 에는 붙지 않지만, 한 번 더 막는다.
+    브라우저는 이런 요청에 ``Origin`` 을 붙인다. ``Origin`` 이 없는 요청(curl 등)은 쿠키를
+    자동으로 붙이지 않으므로 통과시킨다.
+    """
+    origin = request.headers.get("origin")
+    if request.method in UNSAFE_METHODS and origin:
+        settings = get_settings()
+        allowed = {*settings.cors_origin_list, settings.backend_public_url.rstrip("/")}
+        if origin.rstrip("/") not in allowed:
+            return JSONResponse({"detail": "허용되지 않은 출처의 요청입니다."}, status_code=403)
+    return await call_next(request)
+
+
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(documents_router.router)
 

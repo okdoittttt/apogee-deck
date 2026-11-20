@@ -101,6 +101,17 @@ class Settings(BaseSettings):
             (도구 호출 한 번을 아낀다). 0 이면 항상 ``read_document`` 로 읽게 한다.
         document_read_max_chars: ``read_document`` 가 한 번에 보여줄 최대 글자 수.
         max_documents_per_message: 메시지 하나에 붙일 수 있는 문서 수.
+        auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
+            (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
+        google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
+        google_oauth_client_secret: Google 로그인 OAuth 클라이언트 secret.
+        admin_emails: 관리자 Google 이메일 (쉼표로 구분). 처음 로그인할 때 바로 승인되고,
+            가입 신청 알림 메일을 받는다.
+        frontend_url: 화면 주소. 로그인이 끝나면 여기로 돌려보낸다.
+        backend_public_url: 브라우저에서 본 백엔드 주소. Google 로그인 콜백 주소를 만든다
+            (``<주소>/api/auth/google/callback`` 을 OAuth 클라이언트에 등록해야 한다).
+        session_ttl_days: 로그인 세션 유지 기간(일).
+        cookie_secure: 세션 쿠키에 ``Secure`` 를 붙일지. ``None`` 이면 ``frontend_url`` 이 https 일 때만.
         langfuse_public_key: Langfuse public key. 비어 있으면 트레이싱이 꺼진다.
         langfuse_secret_key: Langfuse secret key.
         prompt_source: ``file`` 이면 항상 로컬 파일(git 원본), ``langfuse`` 이면 라벨이 붙은
@@ -199,6 +210,16 @@ class Settings(BaseSettings):
     document_read_max_chars: int = 8000
     max_documents_per_message: int = 5
 
+    # --- Auth ---
+    auth_required: bool = True
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    admin_emails: str = ""
+    frontend_url: str = "http://localhost:3000"
+    backend_public_url: str = "http://localhost:8000"
+    session_ttl_days: int = 30
+    cookie_secure: bool | None = None
+
     # --- Tracing (Langfuse) ---
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
@@ -237,6 +258,23 @@ class Settings(BaseSettings):
     def checkpointer_db_url(self) -> str:
         """LangGraph Postgres checkpointer 용 DB URL (psycopg 형식)."""
         return self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        """관리자 이메일 (소문자)."""
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
+    @property
+    def google_login_enabled(self) -> bool:
+        """Google 로그인 클라이언트가 설정되어 있는지."""
+        return bool(self.google_oauth_client_id and self.google_oauth_client_secret)
+
+    @property
+    def session_cookie_secure(self) -> bool:
+        """세션 쿠키에 ``Secure`` 를 붙일지."""
+        if self.cookie_secure is not None:
+            return self.cookie_secure
+        return self.frontend_url.startswith("https://")
 
     @property
     def storage_enabled(self) -> bool:

@@ -163,6 +163,8 @@ backend/
 │   ├── schemas.py
 │   ├── tracing.py           # Langfuse CallbackHandler
 │   ├── storage.py           # 첨부 파일 저장소 (S3 API, 앱 전용 MinIO)
+│   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제), 요청별 현재 사용자
+│   ├── routers/auth.py      # /api/auth (Google 로그인·콜백, 로그아웃, 내 정보)
 │   ├── documents/           # 첨부 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
 │   ├── routers/documents.py # /api/documents (올리기, 상태, 원본 받기, 지우기)
 │   ├── routers/chat.py      # /api/chat (SSE), /api/conversations, /api/images
@@ -303,6 +305,17 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | `FETCH_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 15초) |
 | `FETCH_MAX_BYTES` | 받을 최대 크기 (기본 5MB) |
 
+## 로그인과 접근 제어
+
+Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 수 있습니다 (승인 메일·화면은 작업 중).
+
+- `.env` 에 `GOOGLE_OAUTH_CLIENT_ID` / `SECRET`, `ADMIN_EMAILS` 를 넣습니다. OAuth 클라이언트의 승인된 리디렉션 URI 는
+  `http://localhost:8000/api/auth/google/callback` 입니다 (배포 때는 도메인 주소).
+- 처음 로그인한 사람은 "승인 대기" 이고, 채팅·업로드 등 API 는 403 입니다. 관리자 이메일은 바로 승인됩니다.
+- 대화·문서·이미지는 **주인만** 볼 수 있습니다. 다른 사람의 ID 로 요청하면 404 를 돌려줍니다 (존재 여부도 숨김).
+- 세션은 DB 에 토큰 해시만 저장하고, 쿠키는 `HttpOnly`·`SameSite=Lax`(https 면 `Secure`)입니다. 상태를 바꾸는 요청은 출처(Origin)를 확인합니다.
+- `AUTH_REQUIRED=false` 면 로그인 없이 로컬 사용자 한 명으로 동작합니다 (개발용). **다른 사람이 접속하는 환경에서는 반드시 `true`.**
+
 ## 첨부 파일 저장소 (MinIO)
 
 첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다.
@@ -435,6 +448,10 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | GET | `/api/documents/{id}` | 문서 정보와 파싱 상태 (`processing` / `ready` / `failed`, 실패 사유, 쪽 수, 글자 수) |
 | GET | `/api/documents/{id}/file` | 원본 내려받기 (보관 기간이 지났으면 410) |
 | DELETE | `/api/documents/{id}` | 보내지 않은 문서 지우기 (이미 보낸 문서면 409) |
+| GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
+| GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
+| GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |
+| POST | `/api/auth/logout` | 로그아웃 |
 | GET | `/health` | 헬스 체크 |
 
 ## 다음 단계

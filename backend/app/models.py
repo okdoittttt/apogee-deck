@@ -9,11 +9,91 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+
+class User(Base):
+    """앱 사용자. Google 계정으로 로그인하고, 관리자가 승인해야 쓸 수 있다.
+
+    Attributes:
+        id: 사용자 ID.
+        google_sub: Google 계정 고유 ID (OpenID Connect ``sub``). 이메일은 바뀔 수 있어서 이 값으로 찾는다.
+        email: Google 계정 이메일 (Google 이 확인한 주소).
+        name: 표시 이름.
+        picture: 프로필 사진 주소.
+        status: ``pending`` (승인 대기) | ``approved`` | ``rejected`` | ``suspended``.
+        request_reason: 가입 신청 사유.
+        created_at: 처음 로그인한 시각.
+        approved_at: 승인된 시각.
+        last_login_at: 마지막 로그인 시각.
+        is_local: 인증을 끈 개발 환경에서 쓰는 로컬 사용자인지.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    picture: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    request_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_local: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class UserSession(Base):
+    """로그인 세션. 쿠키에는 무작위 토큰을, DB 에는 그 해시만 둔다 (DB 가 새도 세션을 쓸 수 없다).
+
+    Attributes:
+        token_hash: 세션 토큰의 SHA-256 (16진수).
+        user_id: 사용자 ID.
+        created_at: 로그인 시각.
+        expires_at: 만료 시각.
+        last_seen_at: 마지막으로 쓴 시각.
+    """
+
+    __tablename__ = "sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ApprovalToken(Base):
+    """관리자 메일의 승인·거절 링크 토큰. DB 에는 해시만 두고, 한 번 쓰면 같은 신청의 토큰이 모두 무효가 된다.
+
+    Attributes:
+        token_hash: 토큰의 SHA-256 (16진수).
+        user_id: 신청한 사용자 ID.
+        action: ``approve`` | ``reject``.
+        expires_at: 만료 시각 (만든 뒤 48시간).
+        used_at: 쓴 시각. 쓰지 않았으면 ``None``.
+        created_at: 만든 시각.
+    """
+
+    __tablename__ = "approval_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(10))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Conversation(Base):
@@ -21,6 +101,8 @@ class Conversation(Base):
 
     Attributes:
         id: 대화 ID.
+        user_id: 대화의 주인. 로그인 기능 전에 만든 대화는 ``None`` 이고, 관리자가 처음 로그인할 때
+            관리자에게 옮긴다.
         title: 사이드바에 보이는 제목 (첫 메시지 앞부분).
         created_at: 생성 시각.
         messages: 대화의 메시지 (생성 순).
@@ -29,6 +111,9 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -109,6 +194,7 @@ class Document(Base):
 
     Attributes:
         id: 문서 ID.
+        user_id: 문서를 올린 사용자. 로그인 기능 전에 올린 문서는 ``None``.
         conversation_id: 속한 대화 ID. 메시지로 보내기 전에는 ``None``.
         message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전에는 ``None``.
         filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
@@ -128,6 +214,9 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=True
     )

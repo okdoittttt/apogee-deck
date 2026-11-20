@@ -47,7 +47,11 @@ def storage_key(document_id: uuid.UUID) -> str:
 
 
 async def create_document(
-    session: AsyncSession, storage: ObjectStorage, data: bytes, filename: str | None
+    session: AsyncSession,
+    storage: ObjectStorage,
+    data: bytes,
+    filename: str | None,
+    user_id: uuid.UUID,
 ) -> Document:
     """문서를 검사하고 원본을 저장한 뒤 ``processing`` 상태로 기록한다.
 
@@ -58,6 +62,7 @@ async def create_document(
         storage: 첨부 저장소.
         data: 파일 내용. 크기 제한은 호출하는 쪽에서 먼저 확인한다.
         filename: 사용자가 올린 파일 이름.
+        user_id: 올린 사용자.
 
     Returns:
         기록한 문서.
@@ -69,6 +74,7 @@ async def create_document(
     fmt = detect(data, name)
     doc = Document(
         id=uuid.uuid4(),
+        user_id=user_id,
         filename=name,
         kind=fmt.kind.value,
         mime_type=fmt.mime_type,
@@ -259,14 +265,17 @@ class AttachError(Exception):
         self.status_code = status_code
 
 
-async def check_attachable(session: AsyncSession, document_ids: list[uuid.UUID]) -> None:
-    """문서들을 메시지에 붙일 수 있는지 확인한다 (아직 보내지 않았고 준비된 문서).
+async def check_attachable(
+    session: AsyncSession, document_ids: list[uuid.UUID], user_id: uuid.UUID
+) -> None:
+    """문서들을 메시지에 붙일 수 있는지 확인한다 (내가 올렸고, 아직 보내지 않았고, 준비된 문서).
 
     대화를 만들거나 메시지를 저장하기 전에 불러서, 실패해도 아무것도 남지 않게 한다.
 
     Args:
         session: DB 세션.
         document_ids: 붙일 문서 ID.
+        user_id: 보내는 사용자. 다른 사람이 올린 문서는 없는 문서로 본다.
 
     Raises:
         AttachError: 없는 문서(404), 이미 보낸 문서(409), 파싱 중(409), 파싱 실패(400)일 때.
@@ -276,7 +285,7 @@ async def check_attachable(session: AsyncSession, document_ids: list[uuid.UUID])
     rows = (
         await session.execute(
             select(Document.id, Document.filename, Document.status, Document.conversation_id).where(
-                Document.id.in_(document_ids)
+                Document.id.in_(document_ids), Document.user_id == user_id
             )
         )
     ).all()

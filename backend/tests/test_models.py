@@ -1,6 +1,7 @@
 """화면에서 모델을 고르는 기능 검증: 모델 목록, 모델별 그래프, 대화 도중 모델 전환."""
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -23,6 +24,8 @@ from app.llm.catalog import (
 )
 from app.routers import chat as chat_router
 from app.schemas import ChatRequest
+
+USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
 
 # --- 모델 ID ------------------------------------------------------------------------------------
 
@@ -109,7 +112,7 @@ async def test_models_endpoint(ollama, monkeypatch):
         "get_settings",
         lambda: Settings(llm_provider="ollama", ollama_model="qwen3.5:9b", google_api_key="k"),
     )
-    res = await chat_router.list_models()
+    res = await chat_router.list_models(USER)
     assert res.default == "ollama:qwen3.5:9b"
     assert [m.id for m in res.models][-1] == "ollama:qwen3.5:9b"
 
@@ -118,7 +121,7 @@ async def test_chat_rejects_unavailable_model(ollama, monkeypatch):
     ollama([])
     monkeypatch.setattr(chat_router, "get_settings", lambda: Settings(llm_provider="ollama"))
     with pytest.raises(HTTPException) as exc:
-        await chat_router.chat(ChatRequest(message="hi", model="ollama:qwen3.5:9b"), None)
+        await chat_router.chat(ChatRequest(message="hi", model="ollama:qwen3.5:9b"), None, USER)
     assert exc.value.status_code == 400
 
 

@@ -22,6 +22,7 @@ from app.documents.reading import (
 from app.routers import chat as chat_router
 from app.schemas import ChatRequest
 
+USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
 DOC = AttachedDocument(id="d1", filename="보고서.pdf", kind="pdf", page_count=3, char_count=12000)
 
 # --- 토큰 추정 ----------------------------------------------------------------------------------
@@ -146,18 +147,18 @@ async def test_chat_rejects_too_many_documents(monkeypatch):
     )
     req = ChatRequest(message="q", document_ids=[uuid.uuid4() for _ in range(3)])
     with pytest.raises(HTTPException) as exc:
-        await chat_router.chat(req, None)
+        await chat_router.chat(req, None, USER)
     assert exc.value.status_code == 400
 
 
 async def test_chat_maps_attach_errors(monkeypatch):
-    async def not_ready(session, ids):
+    async def not_ready(session, ids, user_id):
         raise service.AttachError(409, "아직 문서를 읽는 중입니다: a.pdf")
 
     monkeypatch.setattr(chat_router, "get_settings", lambda: Settings(llm_provider="fake"))
     monkeypatch.setattr(chat_router.documents, "check_attachable", not_ready)
     with pytest.raises(HTTPException) as exc:
-        await chat_router.chat(ChatRequest(document_ids=[uuid.uuid4()]), None)
+        await chat_router.chat(ChatRequest(document_ids=[uuid.uuid4()]), None, USER)
     assert (exc.value.status_code, exc.value.detail) == (409, "아직 문서를 읽는 중입니다: a.pdf")
 
 
@@ -188,11 +189,11 @@ async def test_check_attachable_rules(make_row, code):
     doc_id = uuid.uuid4()
     r = make_row(doc_id)
     with pytest.raises(service.AttachError) as exc:
-        await service.check_attachable(FakeSession([r] if r else []), [doc_id])
+        await service.check_attachable(FakeSession([r] if r else []), [doc_id], USER.id)
     assert exc.value.status_code == code
 
 
 async def test_check_attachable_accepts_ready_unsent():
     doc_id = uuid.uuid4()
-    await service.check_attachable(FakeSession([row(doc_id)]), [doc_id])
-    await service.check_attachable(FakeSession([]), [])
+    await service.check_attachable(FakeSession([row(doc_id)]), [doc_id], USER.id)
+    await service.check_attachable(FakeSession([]), [], USER.id)

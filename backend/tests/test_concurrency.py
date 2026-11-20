@@ -41,15 +41,18 @@ async def test_registry_expires_runs_without_heartbeat():
 # --- API: 거절은 메시지를 저장하기 전에 ---------------------------------------------------------
 
 
+USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
+
+
 class FakeSession:
-    """대화가 존재한다고 가정하고, 저장 시도를 기록하는 가짜 DB 세션."""
+    """대화가 존재한다고(USER 의 대화) 가정하고, 저장 시도를 기록하는 가짜 DB 세션."""
 
     def __init__(self):
         self.added: list = []
         self.commits = 0
 
     async def get(self, model, ident, options=None):
-        return SimpleNamespace(id=ident)
+        return SimpleNamespace(id=ident, user_id=USER.id)
 
     def add(self, obj):
         self.added.append(obj)
@@ -77,7 +80,7 @@ async def test_chat_rejects_busy_conversation_without_saving(registry):
     session = FakeSession()
 
     with pytest.raises(HTTPException) as exc:
-        await chat_router.chat(ChatRequest(conversation_id=cid, message="끼어들기"), session)
+        await chat_router.chat(ChatRequest(conversation_id=cid, message="끼어들기"), session, USER)
 
     assert exc.value.status_code == 409
     assert exc.value.detail == chat_router.BUSY_DETAIL
@@ -87,7 +90,7 @@ async def test_chat_rejects_busy_conversation_without_saving(registry):
 async def test_chat_marks_conversation_running(registry):
     cid = uuid.uuid4()
     session = FakeSession()
-    response = await chat_router.chat(ChatRequest(conversation_id=cid, message="hi"), session)
+    response = await chat_router.chat(ChatRequest(conversation_id=cid, message="hi"), session, USER)
     assert session.commits == 1
     assert await registry.is_running(str(cid))
     await response.body_iterator.aclose()  # 스트림을 시작하지 않고 닫아도
@@ -98,15 +101,15 @@ async def test_delete_rejected_while_running(registry):
     cid = uuid.uuid4()
     await registry.try_acquire(str(cid))
     with pytest.raises(HTTPException) as exc:
-        await chat_router.delete_conversation(cid, FakeSession())
+        await chat_router.delete_conversation(cid, FakeSession(), USER)
     assert exc.value.status_code == 409
 
 
 async def test_status_endpoint(registry):
     cid = uuid.uuid4()
-    assert (await chat_router.get_conversation_status(cid, FakeSession())).running is False
+    assert (await chat_router.get_conversation_status(cid, FakeSession(), USER)).running is False
     await registry.try_acquire(str(cid))
-    assert (await chat_router.get_conversation_status(cid, FakeSession())).running is True
+    assert (await chat_router.get_conversation_status(cid, FakeSession(), USER)).running is True
 
 
 # --- 해제 시점: done/error 를 보내기 전에, 중단되면 정리 단계에서 -------------------------------

@@ -4,6 +4,7 @@ import io
 import uuid
 import zipfile
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 import subprocess_targets
@@ -220,6 +221,9 @@ async def test_subprocess_crash_is_reported():
 # --- 업로드 API (DB 없이 검사 단계만) ------------------------------------------------------------
 
 
+USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
+
+
 def upload(data: bytes, name: str = "a.txt") -> UploadFile:
     return UploadFile(io.BytesIO(data), filename=name, headers=Headers({}))
 
@@ -227,7 +231,7 @@ def upload(data: bytes, name: str = "a.txt") -> UploadFile:
 async def test_upload_requires_storage(monkeypatch):
     monkeypatch.setattr(documents_router, "get_storage", lambda: None)
     with pytest.raises(HTTPException) as exc:
-        await documents_router.upload_document(upload(b"hi"), None)
+        await documents_router.upload_document(upload(b"hi"), None, USER)
     assert exc.value.status_code == 503
 
 
@@ -235,14 +239,16 @@ async def test_upload_rejects_large_file(monkeypatch):
     monkeypatch.setattr(documents_router, "get_storage", lambda: object())
     monkeypatch.setattr(documents_router, "get_settings", lambda: Settings(document_max_bytes=10))
     with pytest.raises(HTTPException) as exc:
-        await documents_router.upload_document(upload(b"x" * 11), None)
+        await documents_router.upload_document(upload(b"x" * 11), None, USER)
     assert exc.value.status_code == 413
 
 
 async def test_upload_rejects_unsupported_file(monkeypatch):
     monkeypatch.setattr(documents_router, "get_storage", lambda: object())
     with pytest.raises(HTTPException) as exc:
-        await documents_router.upload_document(upload(b"MZ\x90\x00" + bytes(64), "a.exe"), None)
+        await documents_router.upload_document(
+            upload(b"MZ\x90\x00" + bytes(64), "a.exe"), None, USER
+        )
     assert exc.value.status_code == 415
 
 
@@ -264,7 +270,9 @@ async def test_upload_stores_original_and_starts_parsing(monkeypatch):
     monkeypatch.setattr(
         documents_router.service, "schedule_parse", lambda *args: scheduled.append(args)
     )
-    out = await documents_router.upload_document(upload("메모".encode(), "dir/메모.md"), Session())
+    out = await documents_router.upload_document(
+        upload("메모".encode(), "dir/메모.md"), Session(), USER
+    )
 
     assert out.status == "processing" and out.kind == "md" and out.filename == "메모.md"
     assert stored[f"documents/{out.id}"] == ("메모".encode(), "text/markdown; charset=utf-8")

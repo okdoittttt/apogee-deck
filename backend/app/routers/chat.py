@@ -22,6 +22,7 @@ from app.agents.events import (
     ToolStarted,
 )
 from app.agents.runtime import stream_reply
+from app.auth.deps import ApprovedUser
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
 from app.documents import reading
@@ -29,7 +30,7 @@ from app.documents import service as documents
 from app.documents.formats import SUPPORTED_EXTENSIONS
 from app.llm import describe_error, model_name
 from app.llm.catalog import available_models, default_model_id
-from app.models import Conversation, Message, MessageImage
+from app.models import Conversation, Message, MessageImage, User
 from app.routers.documents import document_out
 from app.runs import InMemoryRunRegistry, RunRegistry
 from app.schemas import (
@@ -63,9 +64,35 @@ def sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _own_conversation(
+    session: SessionDep, conversation_id: uuid.UUID, user: User, **kwargs: Any
+) -> Conversation:
+    """내 대화를 읽는다. 없거나 다른 사람의 대화면 404 (존재 여부도 숨긴다).
+
+    Args:
+        session: DB 세션.
+        conversation_id: 대화 ID.
+        user: 요청한 사용자.
+        **kwargs: ``session.get`` 에 넘길 옵션 (관계 미리 읽기 등).
+
+    Returns:
+        대화.
+
+    Raises:
+        HTTPException: 대화가 없거나 내 것이 아니면 404.
+    """
+    conv = await session.get(Conversation, conversation_id, **kwargs)
+    if conv is None or conv.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
 @router.get("/info")
-async def info() -> dict[str, Any]:
+async def info(user: ApprovedUser) -> dict[str, Any]:
     """현재 provider, 모델, 이미지 입력 가능 여부, 문서 첨부 제한을 알려준다 (프론트엔드 표시용).
+
+    Args:
+        user: 승인된 사용자.
 
     Returns:
         ``provider`` / ``model`` / ``vision`` / ``documents`` 키를 가진 딕셔너리. ``documents`` 는
@@ -86,10 +113,13 @@ async def info() -> dict[str, Any]:
 
 
 @router.get("/models")
-async def list_models() -> ModelList:
+async def list_models(user: ApprovedUser) -> ModelList:
     """화면에서 고를 수 있는 모델 목록과 기본 모델을 돌려준다.
 
     API 키가 있는 provider 의 모델과, 실행 중인 Ollama 에 설치된 모델이 들어간다.
+
+    Args:
+        user: 승인된 사용자.
 
     Returns:
         모델 목록과 기본 모델 ID.
@@ -112,23 +142,29 @@ async def list_models() -> ModelList:
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
-async def list_conversations(session: SessionDep) -> list[Conversation]:
-    """최근 대화 목록을 최신순으로 돌려준다 (최대 100개).
+async def list_conversations(session: SessionDep, user: ApprovedUser) -> list[Conversation]:
+    """내 최근 대화 목록을 최신순으로 돌려준다 (최대 100개).
 
     Args:
         session: DB 세션.
+        user: 승인된 사용자.
 
     Returns:
         대화 목록.
     """
     result = await session.scalars(
-        select(Conversation).order_by(Conversation.created_at.desc()).limit(100)
+        select(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Conversation.created_at.desc())
+        .limit(100)
     )
     return list(result.all())
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
-async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> ConversationDetail:
+async def get_conversation(
+    conversation_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> ConversationDetail:
     """메시지를 포함한 대화 하나를 돌려준다.
 
     이미지 바이너리는 포함하지 않고 ID 만 내려준다. 이미지는 ``GET /api/images/{id}`` 로 받는다.
@@ -137,24 +173,24 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
     Args:
         conversation_id: 대화 ID.
         session: DB 세션.
+        user: 승인된 사용자.
 
     Returns:
         대화와 메시지 목록, 그리고 응답 생성 중인지 여부.
 
     Raises:
-        HTTPException: 대화가 없으면 404.
+        HTTPException: 대화가 없거나 내 것이 아니면 404.
     """
-    conv = await session.get(
-        Conversation,
+    conv = await _own_conversation(
+        session,
         conversation_id,
+        user,
         options=[
             selectinload(Conversation.messages)
             .selectinload(Message.images)
             .load_only(MessageImage.id, MessageImage.position)
         ],
     )
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
     attached = await documents.documents_by_message(session, conv.id)
     return ConversationDetail(
         id=conv.id,
@@ -179,7 +215,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
 
 @router.get("/conversations/{conversation_id}/status", response_model=ConversationStatus)
 async def get_conversation_status(
-    conversation_id: uuid.UUID, session: SessionDep
+    conversation_id: uuid.UUID, session: SessionDep, user: ApprovedUser
 ) -> ConversationStatus:
     """대화의 응답 생성 여부를 돌려준다.
 
@@ -189,20 +225,20 @@ async def get_conversation_status(
     Args:
         conversation_id: 대화 ID.
         session: DB 세션.
+        user: 승인된 사용자.
 
     Returns:
         실행 상태.
 
     Raises:
-        HTTPException: 대화가 없으면 404.
+        HTTPException: 대화가 없거나 내 것이 아니면 404.
     """
-    if await session.get(Conversation, conversation_id) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    await _own_conversation(session, conversation_id, user)
     return ConversationStatus(running=await run_registry.is_running(str(conversation_id)))
 
 
 @router.get("/images/{image_id}")
-async def get_image(image_id: uuid.UUID, session: SessionDep) -> Response:
+async def get_image(image_id: uuid.UUID, session: SessionDep, user: ApprovedUser) -> Response:
     """첨부 이미지 원본을 돌려준다.
 
     이미지는 저장 후 바뀌지 않으므로 브라우저가 오래 캐시하도록 한다.
@@ -210,14 +246,20 @@ async def get_image(image_id: uuid.UUID, session: SessionDep) -> Response:
     Args:
         image_id: 이미지 ID.
         session: DB 세션.
+        user: 승인된 사용자.
 
     Returns:
         이미지 바이너리 응답.
 
     Raises:
-        HTTPException: 이미지가 없으면 404.
+        HTTPException: 이미지가 없거나 내 대화의 이미지가 아니면 404.
     """
-    img = await session.get(MessageImage, image_id)
+    img = await session.scalar(
+        select(MessageImage)
+        .join(Message, Message.id == MessageImage.message_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(MessageImage.id == image_id, Conversation.user_id == user.id)
+    )
     if img is None:
         raise HTTPException(status_code=404, detail="Image not found")
     return Response(
@@ -228,7 +270,9 @@ async def get_image(image_id: uuid.UUID, session: SessionDep) -> Response:
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
-async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -> None:
+async def delete_conversation(
+    conversation_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> None:
     """대화와 그 에이전트 상태(checkpoint), 첨부 문서를 삭제한다.
 
     checkpoint 삭제가 실패해도 대화 삭제는 유지되고, 남은 checkpoint 는 다음 기동 시 정리된다.
@@ -238,13 +282,12 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -
     Args:
         conversation_id: 대화 ID.
         session: DB 세션.
+        user: 승인된 사용자.
 
     Raises:
-        HTTPException: 대화가 없으면 404, 응답 생성 중이면 409.
+        HTTPException: 대화가 없거나 내 것이 아니면 404, 응답 생성 중이면 409.
     """
-    conv = await session.get(Conversation, conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = await _own_conversation(session, conversation_id, user)
     if await run_registry.is_running(str(conversation_id)):
         raise HTTPException(status_code=409, detail="응답 생성 중인 대화는 삭제할 수 없습니다.")
     document_keys = await documents.conversation_storage_keys(session, conversation_id)
@@ -258,7 +301,7 @@ async def delete_conversation(conversation_id: uuid.UUID, session: SessionDep) -
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
+async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> StreamingResponse:
     """사용자 메시지를 저장하고 에이전트 응답을 SSE 로 스트리밍한다.
 
     SSE 이벤트는 ``meta`` (대화 ID) → 응답 진행 이벤트 (여러 번) → ``done`` (종료 사유, 모델)
@@ -273,6 +316,7 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     Args:
         req: 채팅 요청.
         session: DB 세션.
+        user: 승인된 사용자. 새 대화의 주인이 된다.
 
     Returns:
         ``text/event-stream`` 스트리밍 응답.
@@ -284,7 +328,7 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
     Raises:
         HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 지금 쓸 수 없는 모델이면 400,
             문서가 너무 많으면 400, 붙일 수 없는 문서면 400/404/409 (``documents.check_attachable``),
-            대화가 없으면 404, 같은 대화의 응답이 생성 중이면 409.
+            대화가 없거나 내 것이 아니면 404, 같은 대화의 응답이 생성 중이면 409.
     """
     settings = get_settings()
     if req.images and not settings.enable_vision:
@@ -300,17 +344,15 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
             detail=f"문서는 한 번에 {settings.max_documents_per_message}개까지 보낼 수 있습니다.",
         )
     try:
-        await documents.check_attachable(session, req.document_ids)
+        await documents.check_attachable(session, req.document_ids, user.id)
     except documents.AttachError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     # 1) 대화 조회/생성 → 생성 중 표시 (이미 생성 중이면 저장 전에 거절)
     if req.conversation_id:
-        conv = await session.get(Conversation, req.conversation_id)
-        if conv is None:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+        conv = await _own_conversation(session, req.conversation_id, user)
     else:
-        conv = Conversation(title=_new_title(req))
+        conv = Conversation(title=_new_title(req), user_id=user.id)
         session.add(conv)
         await session.flush()
     if not await run_registry.try_acquire(str(conv.id)):
