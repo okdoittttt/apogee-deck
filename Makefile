@@ -82,5 +82,5 @@ test: ## 백엔드 테스트 (LLM 불필요)
 	@cd backend && uv run pytest -q
 
 lint: ## 백엔드 린트·포맷 검사, 프론트엔드 타입 검사·빌드
-	@cd backend && uv run ruff check app tests migrations && uv run ruff format --check app tests migrations
+	@cd backend && uv run ruff check app tests migrations && uv run ruff format --check app tests migrations && uv run lint-imports
 	@cd frontend && npm run build --silent

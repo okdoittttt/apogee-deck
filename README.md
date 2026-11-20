@@ -190,7 +190,8 @@ backend/
 └── tests/                   # make test
 ```
 
-**계층 규칙:** 위 계층은 아래 계층을 import 할 수 있지만 반대는 안 됩니다.
+**계층 규칙:** 위 계층은 아래 계층을 import 할 수 있지만 반대는 안 됩니다. `make lint`가 `lint-imports`로 검사합니다
+(규칙은 `backend/pyproject.toml`의 `[tool.importlinter]`).
 
 ```
 main → api → conversations → agents → orchestration → tools
