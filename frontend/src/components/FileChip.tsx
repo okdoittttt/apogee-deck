@@ -2,12 +2,13 @@
 
 import { CloseIcon, FileIcon, SpinnerIcon, WarningIcon } from "./icons";
 
-type ChipStatus = "uploading" | "processing" | "analyzing" | "ready" | "failed";
+type ChipStatus = "uploading" | "processing" | "analyzing" | "indexing" | "ready" | "failed";
 
 const STATUS_TEXT: Record<ChipStatus, string> = {
   uploading: "올리는 중",
   processing: "읽는 중",
   analyzing: "그림 분석 중",
+  indexing: "검색 준비 중",
   ready: "",
   failed: "읽지 못함",
 };
@@ -34,7 +35,9 @@ export function FileChip({
   removeLabel?: string; // 빼기 버튼의 접근성 문구 (예: "첨부 빼기", "문서 삭제")
 }) {
   const failed = status === "failed";
-  const busy = status === "uploading" || status === "processing" || status === "analyzing";
+  const busy = status === "uploading" || status === "processing" ||
+    status === "analyzing" ||
+    status === "indexing";
   const sub = failed ? (error ?? STATUS_TEXT.failed) : busy ? STATUS_TEXT[status] : meta;
 
   const body = (

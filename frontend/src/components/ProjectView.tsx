@@ -157,7 +157,7 @@ export function ProjectView({
 
   // 읽는 중이거나 그림을 분석 중인 문서가 있으면 끝날 때까지 다시 읽는다.
   const processing =
-    detail?.documents.some((d) => d.status === "processing" || d.status === "analyzing") ?? false;
+    detail?.documents.some((d) => d.status === "processing" || d.status === "analyzing" || d.status === "indexing") ?? false;
   useEffect(() => {
     if (!processing) return;
     const timer = setInterval(() => void load(), POLL_MS);

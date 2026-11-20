@@ -33,12 +33,25 @@ export interface ReasoningStep {
   text: string;
 }
 
-/** 도구가 참고한 페이지 (웹 검색 결과 등). 답변 아래 출처 목록에 보여준다. */
-export interface Source {
+/** 도구가 참고한 웹 페이지 (웹 검색 결과). 답변 아래 출처 목록에 보여준다. */
+export interface WebSource {
+  type?: undefined;
   title: string;
   url: string;
   published_date: string | null;
 }
+
+/** 도구가 참고한 프로젝트 문서 위치 (프로젝트 문서 검색 결과). */
+export interface DocumentSource {
+  type: "document";
+  title: string; // 문서 이름
+  document_id: string;
+  project_id: string;
+  location: string; // 쪽과 제목 경로 (예: "p.3 · 1장 > 1.1"), 없으면 빈 문자열
+  image_element_id: string | null; // 그림 결과면 그림 요소 ID (미리보기)
+}
+
+export type Source = WebSource | DocumentSource;
 
 /** 실행 단계: 도구 호출 하나. */
 export interface ToolStep {
@@ -62,7 +75,8 @@ export interface DocumentInfo {
   kind: string; // pdf, docx, hwpx ...
   mime_type: string;
   size_bytes: number;
-  status: "processing" | "analyzing" | "ready" | "failed"; // analyzing: 프로젝트 문서의 그림 설명 중
+  // analyzing: 프로젝트 문서의 그림 설명 중, indexing: 검색 준비(청크·임베딩) 중
+  status: "processing" | "analyzing" | "indexing" | "ready" | "failed";
   error: string | null;
   page_count: number | null;
   char_count: number | null;
@@ -95,6 +109,9 @@ interface MessageOut {
 }
 
 export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
+/** 프로젝트 문서 속 그림 원본 주소 (검색 결과 미리보기). */
+export const projectImageUrl = (projectId: string, elementId: string) =>
+  `${API_URL}/api/projects/${projectId}/images/${elementId}`;
 
 export interface Conversation {
   id: string;
