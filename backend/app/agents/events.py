@@ -127,7 +127,7 @@ def reasoning_text(message: BaseMessage) -> str:
 
     provider 마다 형식이 다르다.
 
-    - Anthropic: content 안의 ``{"type": "thinking", "thinking": ...}`` 블록
+    - Anthropic, Google: content 안의 ``{"type": "thinking", "thinking": ...}`` 블록
     - Ollama 등: ``additional_kwargs["reasoning_content"]``
     - LangChain 표준 블록: ``{"type": "reasoning", "reasoning": ...}``
 

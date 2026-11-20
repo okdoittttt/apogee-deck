@@ -7,7 +7,7 @@ LangGraph 기반 LLM 에이전트 웹앱. Docker Compose로 실행합니다.
    │
    └── POST /api/chat (SSE) ──▶ backend (FastAPI)
                                    │
-                                   ├─ LangGraph 에이전트 ──▶ LLM (Anthropic | Ollama | fake)
+                                   ├─ LangGraph 에이전트 ──▶ LLM (Anthropic | Google | Ollama | fake)
                                    │      └─ checkpointer ──▶ postgres (에이전트 상태)
                                    ├─ messages 테이블 ─────▶ postgres (UI 표시용 대화 이력)
                                    └─ 트레이스 ────────────▶ Langfuse (셀프호스팅)
@@ -51,6 +51,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 | 값 | 설명 |
 |---|---|
 | `anthropic` | Claude (`ANTHROPIC_API_KEY` 필요) |
+| `google` | Gemini API (`GOOGLE_API_KEY` 필요). 기본 모델은 무료 티어로 쓸 수 있는 `gemma-4-26b-a4b-it` |
 | `ollama` | 로컬 모델. **macOS에서는 Ollama를 호스트에서 직접 실행**하세요(Docker 안에서는 Metal GPU를 못 씀) |
 | `fake` | LLM 없이 받은 메시지를 그대로 돌려줌. 파이프라인과 트레이싱 검증용 |
 
@@ -63,10 +64,24 @@ ollama ps                  # 실제 로드된 context 크기, 메모리, runner 
 ```
 tool calling을 지원하지 않는 모델이면 `ENABLE_TOOLS=false`로 설정하세요.
 
+Google(Gemini API) 예시:
+```bash
+# https://aistudio.google.com 에서 API 키 발급 후 .env:
+# LLM_PROVIDER=google, GOOGLE_API_KEY=..., GOOGLE_MODEL=gemma-4-26b-a4b-it
+make backend
+```
+- 무료 티어는 분당/하루 요청 수 한도가 있습니다. 도구를 쓰는 답변은 모델을 여러 번 부르고(한 턴 최대 16단계),
+  대화 요약도 한 번 더 부르므로 한도가 생각보다 빨리 찹니다. 내 한도는 AI Studio의 rate limit 화면에서 확인하세요.
+  한도를 넘으면(429) 화면에 "사용 한도를 넘었습니다" 안내가 나옵니다. 재시도 횟수는 `GOOGLE_MAX_RETRIES`(기본 2).
+- 무료 티어는 입력 내용이 Google 제품 개선에 쓰일 수 있습니다. 개인정보나 회사 자료는 넣지 마세요.
+- 대화 이력 예산 기본값은 32,000 토큰입니다(`CONTEXT_MAX_TOKENS`로 변경). 컨텍스트는 26만 토큰이지만 매 턴 전체 이력을 보내면
+  분당 토큰 한도에 걸리기 쉬워서, 넘으면 Ollama와 같은 방식으로 앞부분을 요약합니다.
+- 추론 요약은 `thinking` 블록으로 와서 화면의 "생각 과정"에 그대로 보입니다(`GOOGLE_INCLUDE_THOUGHTS=false`로 끔).
+
 ### 이미지 입력 (VLM)
 채팅 입력창에서 이미지 버튼, 붙여넣기, 드래그 앤 드롭으로 첨부합니다(메시지당 최대 4장).
 - 프론트엔드가 긴 변 1024px로 줄여서 base64로 전송 → 백엔드가 검증(형식, 5MB, 장수) 후 `message_images` 테이블에 저장
-- LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 만들어 그래프에 전달 → Anthropic / Ollama 형식으로 자동 변환
+- LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 만들어 그래프에 전달 → Anthropic / Google / Ollama 형식으로 자동 변환
 - 화면에서는 `GET /api/images/{id}`로 이미지를 불러옴
 - vision을 지원하지 않는 모델이면 `ENABLE_VISION=false` (이미지 첨부 시 400 응답)
 
@@ -97,7 +112,7 @@ Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라�
 - `COMPACT_TOOL_RESULTS=false`로 끌 수 있습니다.
 
 #### 대화 요약
-예산이 있을 때(Ollama 기본, 또는 `CONTEXT_MAX_TOKENS` 지정)는 잘려 나갈 앞부분을 요약해서 남깁니다.
+예산이 있을 때(Ollama·Google 기본, 또는 `CONTEXT_MAX_TOKENS` 지정)는 잘려 나갈 앞부분을 요약해서 남깁니다.
 
 - 턴을 시작할 때 요약하지 않은 이력이 예산의 80%를 넘으면 `summarize` 노드가 실행됩니다.
   최근 이력은 예산의 40% 안에서 원문으로 남기고(항상 사용자 메시지부터), 그 앞을 기존 요약에 합쳐 새 요약을 만듭니다.
