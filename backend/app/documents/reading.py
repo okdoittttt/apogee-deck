@@ -78,16 +78,31 @@ def _describe(doc: AttachedDocument) -> str:
     return f'- "{_attr(doc.filename)}" ({doc.kind}, {size}), document_id: {doc.id}'
 
 
-def document_list(docs: list[AttachedDocument]) -> str:
+def document_list(docs: list[AttachedDocument], *, with_content: bool = False) -> str:
     """문서 목록 텍스트 (한 줄에 한 문서: 이름, 형식, 분량, ``document_id``).
 
     Args:
         docs: 문서 목록.
+        with_content: ``True`` 면 목록 뒤에 각 문서의 본문을 ``<document_content>`` 태그로 감싸 붙인다
+            (``content`` 가 있는 문서만).
 
     Returns:
         모델에게 줄 목록. 문서가 없으면 빈 문자열.
     """
-    return "\n".join(_describe(d) for d in docs)
+    lines = [_describe(d) for d in docs]
+    inline = [d for d in docs if with_content and d.content is not None]
+    if inline:
+        lines += ["", "The full text of every document is included below.", DOCUMENT_NOTE]
+        lines += [_content_block(d) for d in inline]
+    return "\n".join(lines)
+
+
+def _content_block(doc: AttachedDocument) -> str:
+    body = untag((doc.content or "").strip(), DOCUMENT_TAG)
+    return (
+        f'<{DOCUMENT_TAG} document_id="{doc.id}" name="{_attr(doc.filename)}">\n'
+        f"{body}\n</{DOCUMENT_TAG}>"
+    )
 
 
 def attachment_block(docs: list[AttachedDocument], *, can_read: bool) -> str:
@@ -121,12 +136,7 @@ def attachment_block(docs: list[AttachedDocument], *, can_read: bool) -> str:
     if inline:
         lines.append("The full text of short documents is included below.")
         lines.append(DOCUMENT_NOTE)
-        for d in inline:
-            body = untag((d.content or "").strip(), DOCUMENT_TAG)
-            lines.append(
-                f'<{DOCUMENT_TAG} document_id="{d.id}" name="{_attr(d.filename)}">\n'
-                f"{body}\n</{DOCUMENT_TAG}>"
-            )
+        lines += [_content_block(d) for d in inline]
     lines.append("</attachments>")
     return "\n".join(lines)
 

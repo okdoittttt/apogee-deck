@@ -233,21 +233,44 @@ class ProjectContext:
         id: 프로젝트 ID. ``read_document`` 가 이 프로젝트의 문서를 읽게 할 때 쓴다.
         name: 프로젝트 이름.
         instructions: 지시문.
-        documents: 읽을 수 있는(준비된) 프로젝트 문서. 본문은 담지 않는다.
+        documents: 읽을 수 있는(준비된) 프로젝트 문서. 프로젝트가 작으면 ``content`` 에 본문이 있다.
+        total_tokens: 준비된 문서의 추정 토큰 수 합계.
     """
 
     id: uuid.UUID
     name: str
     instructions: str
     documents: list[AttachedDocument]
+    total_tokens: int = 0
+
+    def inline_documents(self, limit: int) -> bool:
+        """문서 본문을 모두 프롬프트에 넣을지: 합계가 ``limit`` 이하이고 본문을 읽어 왔을 때.
+
+        Args:
+            limit: 본문을 넣을 토큰 상한 (모델마다 다르다, ``Settings.project_inline_limit``).
+
+        Returns:
+            본문을 모두 넣으면 ``True``.
+        """
+        return (
+            bool(self.documents)
+            and self.total_tokens <= limit
+            and all(d.content is not None for d in self.documents)
+        )
 
 
-async def load_context(session: AsyncSession, project_id: uuid.UUID) -> ProjectContext | None:
+async def load_context(
+    session: AsyncSession, project_id: uuid.UUID, content_max_tokens: int = 0
+) -> ProjectContext | None:
     """에이전트에게 줄 프로젝트 정보를 읽는다. 문서는 준비된 것만, 올린 순으로 담는다.
+
+    문서 합계가 ``content_max_tokens`` 이하면 본문도 읽어 온다. 실제로 본문을 넣을지는 모델에 따라
+    에이전트가 정한다 (``ProjectContext.inline_documents``).
 
     Args:
         session: DB 세션.
         project_id: 프로젝트 ID.
+        content_max_tokens: 본문까지 읽어 올 문서 합계의 상한. 0 이면 읽지 않는다.
 
     Returns:
         프로젝트 정보. 프로젝트가 없으면 ``None``.
@@ -255,17 +278,29 @@ async def load_context(session: AsyncSession, project_id: uuid.UUID) -> ProjectC
     project = await session.get(Project, project_id)
     if project is None:
         return None
-    rows = await session.execute(
-        select(
-            Document.id,
-            Document.filename,
-            Document.kind,
-            Document.page_count,
-            func.char_length(Document.content).label("chars"),
+    ready = (Document.project_id == project_id) & (Document.status == "ready")
+    # 토큰 수가 없는 문서(기록 전에 올린 것)는 크다고 보고 본문을 읽지 않는다.
+    total = int(
+        await session.scalar(
+            select(
+                func.coalesce(
+                    func.sum(func.coalesce(Document.token_count, content_max_tokens + 1)), 0
+                )
+            ).where(ready)
         )
-        .where(Document.project_id == project_id, Document.status == "ready")
-        .order_by(Document.created_at)
+        or 0
     )
+    with_content = 0 < total <= content_max_tokens
+    columns = [
+        Document.id,
+        Document.filename,
+        Document.kind,
+        Document.page_count,
+        func.char_length(Document.content).label("chars"),
+    ]
+    if with_content:
+        columns.append(Document.content)
+    rows = await session.execute(select(*columns).where(ready).order_by(Document.created_at))
     docs = [
         AttachedDocument(
             id=str(r.id),
@@ -273,9 +308,14 @@ async def load_context(session: AsyncSession, project_id: uuid.UUID) -> ProjectC
             kind=r.kind,
             page_count=r.page_count,
             char_count=r.chars or 0,
+            content=r.content if with_content else None,
         )
         for r in rows.all()
     ]
     return ProjectContext(
-        id=project.id, name=project.name, instructions=project.instructions, documents=docs
+        id=project.id,
+        name=project.name,
+        instructions=project.instructions,
+        documents=docs,
+        total_tokens=total,
     )

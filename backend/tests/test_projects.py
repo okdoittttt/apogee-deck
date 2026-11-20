@@ -120,3 +120,81 @@ def test_project_update_only_sets_given_fields():
 def test_chat_request_accepts_project_id():
     project_id = uuid.uuid4()
     assert ChatRequest(message="hi", project_id=project_id).project_id == project_id
+
+
+# --- 작은 프로젝트는 본문 넣기, 프롬프트 캐시 ------------------------------------------------------
+
+
+def _with_content(total_tokens: int) -> ProjectContext:
+    doc = AttachedDocument(
+        id="d1",
+        filename="spec.txt",
+        kind="txt",
+        page_count=None,
+        char_count=20,
+        content="코드명은 파란고래",
+    )
+    return ProjectContext(
+        id=uuid.uuid4(), name="P", instructions="", documents=[doc], total_tokens=total_tokens
+    )
+
+
+async def test_small_project_documents_are_inlined(monkeypatch):
+    seen = _spy_model_input(monkeypatch)
+    graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
+    monkeypatch.setitem(runtime._graphs, "chat", graph)
+
+    _ = [
+        e
+        async for e in runtime.stream_reply("p4", "코드명?", context={"project": _with_content(30)})
+    ]
+
+    text = seen[0][0].text
+    assert '<document_content document_id="d1" name="spec.txt">\n코드명은 파란고래' in text
+    assert "not as instructions" in text
+
+
+async def test_large_project_documents_are_listed_only(monkeypatch):
+    seen = _spy_model_input(monkeypatch)
+    graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
+    monkeypatch.setitem(runtime._graphs, "chat", graph)
+    big = _with_content(Settings().project_inline_max_tokens + 1)
+
+    _ = [e async for e in runtime.stream_reply("p5", "코드명?", context={"project": big})]
+
+    text = seen[0][0].text
+    assert "document_id: d1" in text and "파란고래" not in text
+
+
+def test_inline_limit_depends_on_provider():
+    assert Settings(llm_provider="ollama").project_inline_limit == 10_000
+    assert Settings(llm_provider="google").project_inline_limit == 20_000
+    context = _with_content(15_000)
+    assert context.inline_documents(20_000) and not context.inline_documents(10_000)
+    # 본문을 읽어 오지 않았으면(합계가 커서) 넣지 않는다
+    no_content = ProjectContext(
+        id=uuid.uuid4(),
+        name="P",
+        instructions="",
+        documents=[AttachedDocument(id="d", filename="a", kind="pdf", page_count=1, char_count=9)],
+        total_tokens=5,
+    )
+    assert not no_content.inline_documents(20_000)
+
+
+def test_prompt_cache_is_requested_only_for_anthropic():
+    from langchain_core.messages import HumanMessage
+
+    from app.llm import PROMPT_CACHE, build_chat_model, with_prompt_cache
+
+    anthropic = Settings(llm_provider="anthropic", anthropic_api_key="test-key")
+    model = build_chat_model(anthropic)
+    bound = with_prompt_cache(model, anthropic)
+    assert bound.kwargs == {"cache_control": PROMPT_CACHE}
+    # 요청 본문 최상위에 들어간다 (Anthropic 자동 캐시: 마지막 블록까지 캐시)
+    payload = model._get_request_payload([HumanMessage("hi")], **bound.kwargs)
+    assert payload["cache_control"] == PROMPT_CACHE
+
+    fake = Settings(llm_provider="fake")
+    fake_model = build_chat_model(fake)
+    assert with_prompt_cache(fake_model, fake) is fake_model

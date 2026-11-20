@@ -6,7 +6,9 @@ LangChain chat model 만 사용한다.
 
 from typing import NamedTuple
 
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
 
 from app.core.config import Settings
 
@@ -140,6 +142,33 @@ def build_summary_model(settings: Settings) -> BaseChatModel:
             update["openai_reasoning_effort"] = "low"
         settings = settings.model_copy(update=update)
     return build_chat_model(settings)
+
+
+PROMPT_CACHE = {"type": "ephemeral"}
+"""Anthropic 프롬프트 캐시 설정 (기본 5분 유지)."""
+
+
+def with_prompt_cache(
+    model: Runnable[LanguageModelInput, BaseMessage], settings: Settings
+) -> Runnable[LanguageModelInput, BaseMessage]:
+    """Anthropic 모델이면 요청마다 프롬프트 캐시를 켠다. 다른 provider 는 그대로 돌려준다.
+
+    요청의 최상위 ``cache_control`` 을 쓰면 Anthropic 이 마지막 블록까지(도구 정의, system 프롬프트,
+    대화 이력) 캐시하고, 다음 요청은 같은 앞부분을 캐시에서 읽는다. 프로젝트 문서 본문처럼 매 응답
+    다시 보내는 큰 system 프롬프트와, 한 턴 안에서 도구를 여러 번 부를 때의 입력 비용을 줄인다.
+    캐시에 쓰는 요청은 입력 단가가 1.25배, 읽는 요청은 0.1배다. 너무 짧은 프롬프트는 캐시되지 않는다.
+    OpenAI 와 Gemini 는 같은 앞부분을 자동으로 캐시하므로 따로 켜지 않는다.
+
+    Args:
+        model: chat model (도구를 붙인 것도 된다).
+        settings: 앱 설정 (provider 확인용).
+
+    Returns:
+        모델 호출에 캐시 설정을 붙인 Runnable, 또는 원래 모델.
+    """
+    if settings.llm_provider != "anthropic":
+        return model
+    return model.bind(cache_control=PROMPT_CACHE)
 
 
 def model_name(settings: Settings) -> str:

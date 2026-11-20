@@ -28,7 +28,7 @@ from app.core.config import Settings
 from app.core.storage import get_storage
 from app.documents.reading import document_list
 from app.images import resolve_images
-from app.llm import build_chat_model, build_summary_model
+from app.llm import build_chat_model, build_summary_model, with_prompt_cache
 from app.llm.catalog import model_id
 from app.orchestration import summary
 from app.orchestration.context import (
@@ -101,7 +101,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
 
     # 모델 호출을 한 단계(chain)로 감싼다. Langfuse 콜백은 이 단계의 metadata 에 있는
     # langfuse_prompt 를 보고, 그 아래 LLM 호출(generation)을 해당 프롬프트 버전에 연결한다.
-    call_model = RunnableLambda(model.ainvoke, name="call_model")
+    call_model = RunnableLambda(with_prompt_cache(model, settings).ainvoke, name="call_model")
 
     async def agent(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
         """System 프롬프트 + (프로젝트 정보) + (요약) + 최근 대화로 모델을 호출한다.
@@ -125,7 +125,11 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
                 "chat/project",
                 name=project.name,
                 instructions=project.instructions or "(none)",
-                documents=document_list(project.documents) or "(none)",
+                documents=document_list(
+                    project.documents,
+                    with_content=project.inline_documents(settings.project_inline_limit),
+                )
+                or "(none)",
             )
             text = f"{text}\n\n{project_prompt.text}"
         history = model_view(state["messages"])

@@ -102,6 +102,10 @@ class Settings(BaseSettings):
         document_read_max_chars: ``read_document`` 가 한 번에 보여줄 최대 글자 수.
         max_documents_per_message: 메시지 하나에 붙일 수 있는 문서 수.
         project_max_tokens: 프로젝트 하나에 넣을 수 있는 문서 분량(추정 토큰 수 합계). 문서 수는 제한하지 않는다.
+        project_inline_max_tokens: 프로젝트 문서 합계가 이 이하면 본문을 모두 system 프롬프트에 넣는다
+            (도구로 읽지 않고 바로 답한다). 넘으면 목록만 주고 ``read_document`` 로 읽게 한다.
+        ollama_project_inline_max_tokens: Ollama 모델일 때의 ``project_inline_max_tokens``.
+            로컬 모델은 컨텍스트가 작아서 따로 둔다.
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -218,6 +222,8 @@ class Settings(BaseSettings):
     document_read_max_chars: int = 8000
     max_documents_per_message: int = 5
     project_max_tokens: int = 1_000_000
+    project_inline_max_tokens: int = 20_000
+    ollama_project_inline_max_tokens: int = 10_000
 
     # --- Auth ---
     auth_required: bool = True
@@ -250,6 +256,13 @@ class Settings(BaseSettings):
 
     # --- CORS ---
     cors_origins: str = "http://localhost:3000"
+
+    @property
+    def project_inline_limit(self) -> int:
+        """지금 provider 에서 프로젝트 문서 본문을 모두 넣을 토큰 상한."""
+        if self.llm_provider == "ollama":
+            return self.ollama_project_inline_max_tokens
+        return self.project_inline_max_tokens
 
     @property
     def history_token_budget(self) -> int | None:

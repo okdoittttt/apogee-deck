@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import anyio
 
 from app.conversations import runs
+from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.llm import describe_error, is_transient_error
 from app.models import Message
@@ -190,8 +191,11 @@ async def _agent_context(project_id: uuid.UUID | None) -> dict[str, Any]:
     """에이전트에게 넘길 턴 정보. 프로젝트 대화면 이번 턴 시작 시점의 프로젝트 정보를 담는다."""
     if project_id is None:
         return {}
+    settings = get_settings()
+    # 모델마다 본문을 넣는 기준이 달라서(Ollama 는 작다) 큰 기준까지 본문을 읽어 두고 에이전트가 고른다.
+    content_max = max(settings.project_inline_max_tokens, settings.ollama_project_inline_max_tokens)
     async with SessionLocal() as s:
-        project = await projects.load_context(s, project_id)
+        project = await projects.load_context(s, project_id, content_max)
     return {"project": project} if project is not None else {}
 
 
