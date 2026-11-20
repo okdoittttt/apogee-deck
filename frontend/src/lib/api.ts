@@ -37,6 +37,7 @@ export interface ChatMessage {
   images?: string[]; // 표시용 URL (서버 이미지 URL 또는 data URL)
   steps?: Step[]; // assistant 응답의 실행 단계 (일어난 순서)
   thinking?: boolean; // 화면 전용: 지금 추론 과정을 받는 중인지
+  model?: string | null; // assistant 응답을 만든 모델 ID
 }
 
 interface MessageOut {
@@ -45,6 +46,7 @@ interface MessageOut {
   content: string;
   image_ids: string[];
   steps: Step[];
+  model: string | null;
 }
 
 export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
@@ -78,6 +80,7 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
       content: m.content,
       images: m.image_ids.map(imageUrl),
       steps: m.steps,
+      model: m.model,
     })),
   };
 }
@@ -143,7 +146,12 @@ export interface StreamHandlers {
 
 /** POST /api/chat 의 SSE 응답을 읽어 이벤트별 핸들러를 호출한다. */
 export async function streamChat(
-  body: { conversation_id: string | null; message: string; images?: ImageInput[] },
+  body: {
+    conversation_id: string | null;
+    message: string;
+    images?: ImageInput[];
+    model?: string | null;
+  },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -221,5 +229,26 @@ export interface AppInfo {
 export async function getInfo(): Promise<AppInfo> {
   const res = await fetch(`${API_URL}/api/info`);
   if (!res.ok) throw new Error(`Failed to load info (${res.status})`);
+  return res.json();
+}
+
+/** 화면에서 고를 수 있는 모델. id 를 채팅 요청의 model 로 보낸다. */
+export interface ModelOption {
+  id: string; // "<provider>:<모델 이름>"
+  provider: string;
+  provider_label: string;
+  model: string;
+  label: string;
+}
+
+export interface ModelList {
+  models: ModelOption[];
+  default: string | null;
+}
+
+/** 지금 쓸 수 있는 모델 목록 (API 키가 있는 provider, 실행 중인 Ollama 의 설치 모델). */
+export async function getModels(): Promise<ModelList> {
+  const res = await fetch(`${API_URL}/api/models`);
+  if (!res.ok) throw new Error(`Failed to load models (${res.status})`);
   return res.json();
 }

@@ -50,6 +50,7 @@ class Message(Base):
         steps: assistant 응답의 실행 단계(추론 과정, 도구 호출)를 일어난 순서대로 담은 JSON.
             형식은 ``app.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
             없는 응답은 ``None``.
+        model: 응답한 모델 ID (``"<provider>:<모델 이름>"``). 사용자 메시지는 ``None``.
         created_at: 생성 시각.
         conversation: 속한 대화.
         images: 사용자가 첨부한 이미지 (첨부 순).
@@ -64,6 +65,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

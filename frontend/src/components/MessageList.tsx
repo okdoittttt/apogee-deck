@@ -47,7 +47,15 @@ function UserMessage({ message }: { message: ChatMessage }) {
   );
 }
 
-function AssistantMessage({ message, active }: { message: ChatMessage; active: boolean }) {
+function AssistantMessage({
+  message,
+  active,
+  modelLabel,
+}: {
+  message: ChatMessage;
+  active: boolean;
+  modelLabel?: string;
+}) {
   const steps = message.steps ?? [];
   const last = steps.at(-1);
   // 진행 중인 단계(생각 중, 도구 실행 중)가 보이면 대기 점은 띄우지 않는다.
@@ -67,6 +75,11 @@ function AssistantMessage({ message, active }: { message: ChatMessage; active: b
         )}
         {showDots && <TypingDots />}
         <Sources steps={steps} />
+        {!active && modelLabel && (
+          <div className="mt-2 text-[11px] text-subtle" title={message.model ?? undefined}>
+            {modelLabel}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -75,13 +88,16 @@ function AssistantMessage({ message, active }: { message: ChatMessage; active: b
 /**
  * 대화 메시지 목록.
  * activeId 는 지금 응답을 받고 있는 assistant 메시지 (진행 표시를 그 메시지에만 보인다).
+ * modelLabels 는 모델 ID → 표시 이름. 목록에 없는 모델(지금 쓸 수 없는 모델)은 모델 이름을 보여준다.
  */
 export function MessageList({
   messages,
   activeId = null,
+  modelLabels = {},
 }: {
   messages: ChatMessage[];
   activeId?: string | null;
+  modelLabels?: Record<string, string>;
 }) {
   return (
     <div className="space-y-7">
@@ -89,7 +105,14 @@ export function MessageList({
         m.role === "user" ? (
           <UserMessage key={m.id} message={m} />
         ) : (
-          <AssistantMessage key={m.id} message={m} active={m.id === activeId} />
+          <AssistantMessage
+            key={m.id}
+            message={m}
+            active={m.id === activeId}
+            modelLabel={
+              m.model ? (modelLabels[m.model] ?? m.model.slice(m.model.indexOf(":") + 1)) : undefined
+            }
+          />
         ),
       )}
     </div>

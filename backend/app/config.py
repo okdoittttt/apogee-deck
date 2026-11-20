@@ -15,18 +15,21 @@ class Settings(BaseSettings):
     system 프롬프트는 설정이 아니라 ``app/agents/<에이전트>/prompts/*.md`` 에서 관리한다.
 
     Attributes:
-        llm_provider: 사용할 LLM. ``anthropic`` | ``google`` | ``ollama`` | ``fake`` (테스트용 echo 모델).
+        llm_provider: 기본 LLM provider. ``anthropic`` | ``google`` | ``ollama`` | ``fake``
+            (테스트용 echo 모델). 화면에서 모델을 고르지 않았을 때 쓴다 (``app.llm.catalog`` 참고).
         app_timezone: 프롬프트에 넣는 "오늘 날짜" 의 기준 시간대.
         enable_tools: 에이전트 도구 사용 여부. tool calling 을 지원하지 않는 모델이면 끈다.
         enable_vision: 이미지 입력 허용 여부. 모델이 vision 을 지원해야 한다.
         image_token_estimate: 컨텍스트 예산 계산 시 이미지 1장을 몇 토큰으로 볼지.
             프론트엔드가 긴 변 1024px 로 줄여 보내며, 이 크기면 Claude/Qwen 모두 1~1.5K 수준이다.
         anthropic_api_key: Anthropic API 키.
-        claude_model: Claude 모델 ID.
+        claude_model: 기본 Claude 모델 ID.
+        anthropic_models: 화면에서 고를 수 있는 Claude 모델 (쉼표로 구분). ``claude_model`` 은 항상 포함된다.
         claude_effort: Claude 응답 품질과 비용/지연의 트레이드오프 단계.
         claude_max_tokens: Claude 출력 최대 토큰.
         google_api_key: Google AI Studio(Gemini API) 키.
-        google_model: Gemini API 모델 ID (예: ``gemma-4-26b-a4b-it``, ``gemma-4-31b-it``).
+        google_model: 기본 Gemini API 모델 ID.
+        google_models: 화면에서 고를 수 있는 Gemini API 모델 (쉼표로 구분). ``google_model`` 은 항상 포함된다.
         google_max_output_tokens: 출력(추론 포함) 최대 토큰.
         google_include_thoughts: 추론 요약을 받아 화면의 "생각 과정" 에 보여줄지 여부.
         google_temperature: 샘플링 온도. ``None`` 이면 모델 기본값.
@@ -88,12 +91,14 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5-5"
+    anthropic_models: str = "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"
     claude_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     claude_max_tokens: int = 64000
 
     # Google (Gemini API)
     google_api_key: str = ""
     google_model: str = "gemma-4-26b-a4b-it"
+    google_models: str = "gemma-4-26b-a4b-it,gemma-4-31b-it"
     google_max_output_tokens: int = 8192
     google_include_thoughts: bool = True
     google_temperature: float | None = None

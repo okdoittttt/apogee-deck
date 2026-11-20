@@ -7,6 +7,7 @@ export interface QueuedMessage {
   id: string;
   text: string;
   attachments: Attachment[];
+  model: string | null; // 입력할 때 고른 모델 (나중에 보내져도 이 모델로 보낸다)
 }
 
 /** 응답이 끝나면 보낼 대기 메시지. 오류로 자동 전송이 멈추면 직접 보내기 버튼을 보여준다. */

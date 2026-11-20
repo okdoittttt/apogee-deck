@@ -8,6 +8,8 @@ interface SidebarProps {
   conversations: Conversation[];
   activeId: string | null;
   info: AppInfo | null;
+  /** 지금 고른 모델의 표시 이름 */
+  modelLabel?: string;
   onNew: () => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
@@ -15,7 +17,7 @@ interface SidebarProps {
 }
 
 export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sidebar(
-  { conversations, activeId, info, onNew, onOpen, onDelete, onClose },
+  { conversations, activeId, info, modelLabel, onNew, onOpen, onDelete, onClose },
   searchRef,
 ) {
   const [query, setQuery] = useState("");
@@ -110,7 +112,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
             aria-hidden
           />
           <span className="truncate">
-            {info ? `${info.provider} · ${info.model}` : "백엔드 연결 중…"}
+            {info ? (modelLabel ?? "사용 가능한 모델 없음") : "백엔드 연결 중…"}
           </span>
         </div>
       </div>

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Composer } from "@/components/Composer";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
+import { ModelPicker } from "@/components/ModelPicker";
 import { Sidebar } from "@/components/Sidebar";
 import {
   type QueuedMessage,
@@ -15,6 +16,7 @@ import {
   type AppInfo,
   type ChatMessage,
   type Conversation,
+  type ModelOption,
   type Step,
   type ToolStep,
   ERROR_SUFFIX,
@@ -24,12 +26,14 @@ import {
   getConversation,
   getConversationStatus,
   getInfo,
+  getModels,
   listConversations,
   streamChat,
 } from "@/lib/api";
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
 
 const SIDEBAR_KEY = "sidebar-open";
+const MODEL_KEY = "selected-model";
 const STATUS_POLL_MS = 2000;
 // 중지 직후 서버가 정리(부분 응답 저장, 생성 중 표시 해제)를 끝낼 때까지 기다리는 간격과 한도
 const IDLE_POLL_MS = 150;
@@ -59,6 +63,10 @@ export default function ChatPage() {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  // 고를 수 있는 모델과 지금 고른 모델 (다음에 보내는 메시지부터 적용)
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
   const [hello, setHello] = useState("무엇을 도와드릴까요?");
@@ -92,6 +100,37 @@ export default function ChatPage() {
     if (!message) setQueuePaused(false);
   }
 
+  /**
+   * 모델 목록을 받는다. 고른 모델이 목록에 없으면(키를 지웠거나 Ollama 를 껐음)
+   * 마지막으로 고른 모델 → 서버 기본 모델 → 첫 모델 순으로 고른다.
+   */
+  const refreshModels = useCallback(() => {
+    setModelsLoading(true);
+    getModels()
+      .then(({ models: list, default: fallback }) => {
+        setModels(list);
+        const ids = new Set(list.map((m) => m.id));
+        setSelectedModel((current) => {
+          if (current && ids.has(current)) return current;
+          let saved: string | null = null;
+          try {
+            saved = localStorage.getItem(MODEL_KEY);
+          } catch {}
+          if (saved && ids.has(saved)) return saved;
+          return fallback ?? list[0]?.id ?? null;
+        });
+      })
+      .catch(() => setModels([]))
+      .finally(() => setModelsLoading(false));
+  }, []);
+
+  function chooseModel(id: string) {
+    setSelectedModel(id);
+    try {
+      localStorage.setItem(MODEL_KEY, id);
+    } catch {}
+  }
+
   const refreshConversations = useCallback(() => {
     listConversations()
       .then(setConversations)
@@ -104,6 +143,7 @@ export default function ChatPage() {
     getInfo()
       .then(setInfo)
       .catch(() => setInfo(null));
+    refreshModels();
     setHello(greeting());
 
     const mq = window.matchMedia("(max-width: 767px)");
@@ -122,7 +162,7 @@ export default function ChatPage() {
     apply();
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
-  }, [refreshConversations]);
+  }, [refreshConversations, refreshModels]);
 
   // ⌘K / Ctrl+K: 대화 검색
   useEffect(() => {
@@ -257,7 +297,12 @@ export default function ChatPage() {
       setToast(streaming ? QUEUE_FULL_TEXT : QUEUE_PENDING_TEXT);
       return;
     }
-    const message: QueuedMessage = { id: crypto.randomUUID(), text, attachments };
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      text,
+      attachments,
+      model: selectedModel,
+    };
     setInput("");
     setAttachments([]);
     if (streaming) {
@@ -276,7 +321,7 @@ export default function ChatPage() {
   }
 
   async function runSend(message: QueuedMessage) {
-    const { text, attachments: sending } = message;
+    const { text, attachments: sending, model } = message;
     setError(null);
     setStreaming(true);
 
@@ -285,7 +330,7 @@ export default function ChatPage() {
     setMessages((prev) => [
       ...prev,
       { id: userId, role: "user", content: text, images: sending.map((a) => a.previewUrl) },
-      { id: assistantId, role: "assistant", content: "" },
+      { id: assistantId, role: "assistant", content: "", model },
     ]);
 
     setActiveAssistantId(assistantId);
@@ -326,6 +371,7 @@ export default function ChatPage() {
           conversation_id: conversationIdRef.current,
           message: text,
           images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
+          model,
         },
         {
           onMeta: ({ conversation_id }) => setActiveConversation(conversation_id),
@@ -449,6 +495,7 @@ export default function ChatPage() {
   }
 
   const isEmpty = messages.length === 0;
+  const modelLabels = Object.fromEntries(models.map((m) => [m.id, m.label]));
   const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
 
   const composer = (
@@ -462,7 +509,15 @@ export default function ChatPage() {
       onStop={() => abortRef.current?.abort()}
       streaming={streaming}
       queueFull={queued !== null}
-      modelLabel={info?.model}
+      modelPicker={
+        <ModelPicker
+          models={models}
+          value={selectedModel}
+          onChange={chooseModel}
+          onOpen={refreshModels}
+          loading={modelsLoading}
+        />
+      }
       visionEnabled={info?.vision ?? true}
       autoFocus={isEmpty}
       placeholder={
@@ -500,6 +555,7 @@ export default function ChatPage() {
           conversations={conversations}
           activeId={conversationId}
           info={info}
+          modelLabel={models.find((m) => m.id === selectedModel)?.label}
           onNew={newConversation}
           onOpen={openConversation}
           onDelete={removeConversation}
@@ -579,7 +635,11 @@ export default function ChatPage() {
           <>
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
-                <MessageList messages={messages} activeId={activeAssistantId} />
+                <MessageList
+                  messages={messages}
+                  activeId={activeAssistantId}
+                  modelLabels={modelLabels}
+                />
                 {queued && (
                   <QueuedMessageBubble
                     message={queued}

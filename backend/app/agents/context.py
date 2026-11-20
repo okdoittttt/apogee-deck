@@ -182,6 +182,63 @@ def compact_old_tool_results(
     return result
 
 
+MODEL_TAG = "app_model"
+"""AI 메시지의 ``response_metadata`` 에 응답한 모델 ID 를 적는 키 (``tag_model`` 참고)."""
+
+_REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking", "reasoning"})
+# 추론 원문과, 추론을 이어가기 위해 provider 가 메시지에 붙이는 값.
+_REASONING_KWARGS = ("reasoning_content", "__gemini_function_call_thought_signatures__")
+
+
+def tag_model(message: AIMessage, model: str) -> AIMessage:
+    """응답한 모델 ID 를 메시지에 기록한다 (``drop_foreign_reasoning`` 이 쓴다).
+
+    Args:
+        message: 모델 응답.
+        model: 모델 ID.
+
+    Returns:
+        같은 메시지 (``response_metadata`` 에 ``MODEL_TAG`` 를 추가).
+    """
+    message.response_metadata = {**message.response_metadata, MODEL_TAG: model}
+    return message
+
+
+def drop_foreign_reasoning(messages: list[BaseMessage], model: str) -> list[BaseMessage]:
+    """다른 모델이 만든 AI 메시지에서 추론 블록을 뺀 이력을 돌려준다 (모델에 보낼 입력용).
+
+    대화 도중 모델을 바꾸면 이전 답변의 추론 블록이 다른 provider 로 간다. 추론 블록은
+    만든 provider 의 서명이 붙어 있어서, 다른 모델에 보내면 요청이 거절되거나
+    (Anthropic 은 서명을 검증한다) 쓸모없는 입력이 된다. 답변 텍스트와 도구 호출은 그대로 둔다.
+    모델을 기록하기 전의 메시지도 어느 모델이 만들었는지 모르므로 추론을 뺀다.
+
+    Args:
+        messages: 대화 이력.
+        model: 지금 호출할 모델 ID.
+
+    Returns:
+        추론을 뺀 이력. 바꾼 메시지는 같은 ID 의 복사본이고, 원본은 바꾸지 않는다.
+    """
+    out: list[BaseMessage] = []
+    for m in messages:
+        if not isinstance(m, AIMessage) or m.response_metadata.get(MODEL_TAG) == model:
+            out.append(m)
+            continue
+        content = m.content
+        if isinstance(content, list):
+            content = [
+                b
+                for b in content
+                if not (isinstance(b, dict) and b.get("type") in _REASONING_BLOCK_TYPES)
+            ]
+        kwargs = {k: v for k, v in m.additional_kwargs.items() if k not in _REASONING_KWARGS}
+        if content == m.content and kwargs == m.additional_kwargs:
+            out.append(m)
+        else:
+            out.append(m.model_copy(update={"content": content or "", "additional_kwargs": kwargs}))
+    return out
+
+
 def _default_compact(message: ToolMessage, args: dict[str, Any]) -> str | None:
     """기본 규칙으로 지난 도구 결과를 줄인다. 줄일 필요가 없으면 ``None``."""
     name = message.name or "tool"

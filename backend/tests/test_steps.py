@@ -131,7 +131,7 @@ async def test_stream_reply_emits_reasoning_and_tool_events(monkeypatch):
 def capture(monkeypatch):
     saved: list[tuple[str, list | None]] = []
 
-    async def fake_save(conversation_id, content, steps=None):
+    async def fake_save(conversation_id, content, steps=None, model=None):
         saved.append((content, steps))
 
     monkeypatch.setattr(chat_router, "save_assistant_message", fake_save)
@@ -140,7 +140,7 @@ def capture(monkeypatch):
 
 
 def _patch_stream(monkeypatch, steps):
-    async def fake_stream_reply(conversation_id, text, images):
+    async def fake_stream_reply(conversation_id, text, images, **kwargs):
         for step in steps:
             if step == "boom":
                 raise RuntimeError("model crashed")

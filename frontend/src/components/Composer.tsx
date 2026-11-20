@@ -15,7 +15,8 @@ interface ComposerProps {
   streaming: boolean;
   /** 대기열이 찼는지 (응답 생성 중에는 메시지 1개까지만 대기열에 넣을 수 있다) */
   queueFull: boolean;
-  modelLabel?: string;
+  /** 입력창 오른쪽 아래에 넣을 모델 선택 드롭다운 */
+  modelPicker?: React.ReactNode;
   visionEnabled: boolean;
   autoFocus?: boolean;
   placeholder?: string;
@@ -33,7 +34,7 @@ export function Composer({
   onStop,
   streaming,
   queueFull,
-  modelLabel,
+  modelPicker,
   visionEnabled,
   autoFocus,
   placeholder = "무엇이든 물어보세요",
@@ -142,11 +143,7 @@ export function Composer({
         </div>
 
         <div className="flex items-center gap-2">
-          {modelLabel && (
-            <span className="max-w-[180px] truncate text-xs text-muted" title={modelLabel}>
-              {modelLabel}
-            </span>
-          )}
+          {modelPicker}
           {streaming && (
             <button
               type="button"

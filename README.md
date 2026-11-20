@@ -44,9 +44,27 @@ make up                     # 전체 실행 (변경된 이미지는 다시 빌�
 이 앱에는 인증이 없으므로, 다른 기기에서 접속하도록 `BIND_HOST=0.0.0.0`으로 바꿀 때는 `.env.example`의 설명을 먼저 읽으세요.
 Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처리하고 `LANGFUSE_*_KEY`를 비우세요.
 
-## LLM provider 전환
+## 모델 선택
 
-`.env`의 `LLM_PROVIDER`만 바꾸고 `make backend`를 실행하면 됩니다.
+입력창 오른쪽 아래의 드롭다운에서 모델을 고릅니다. 고른 모델은 다음에 보내는 메시지부터 쓰이고,
+브라우저에 기억됩니다. 대화 도중에 바꿔도 이력은 이어지며, 각 답변 아래에 응답한 모델이 표시됩니다.
+
+목록에는 **지금 쓸 수 있는 모델만** 나옵니다(`GET /api/models`, `app/llm/catalog.py`).
+
+| provider | 목록에 나오는 조건 | 모델 |
+|---|---|---|
+| `google` | `GOOGLE_API_KEY` 가 있을 때 | `GOOGLE_MODELS` (기본 Gemma 4 26B, 31B) |
+| `anthropic` | `ANTHROPIC_API_KEY` 가 있을 때 | `ANTHROPIC_MODELS` (기본 Opus, Sonnet, Haiku) |
+| `ollama` | Ollama 서버가 응답할 때 | 설치된 모델 전체 (`ollama list`). 꺼져 있으면 빠집니다 |
+| `fake` | `LLM_PROVIDER=fake` 일 때 | 테스트용 |
+
+- `.env`의 `LLM_PROVIDER`와 `*_MODEL`은 **처음 선택될 기본 모델**입니다. 그 모델을 쓸 수 없으면 목록의 첫 모델이 선택됩니다.
+- 모델 ID는 `"<provider>:<모델 이름>"` 형식입니다(예: `google:gemma-4-26b-a4b-it`, `ollama:qwen3.5:9b`).
+- 모델마다 provider와 컨텍스트 예산이 달라서 그래프를 모델별로 만들어 캐시합니다(`runtime.get_graph`). 대화 상태는 같은 checkpointer에 있습니다.
+- 대화 도중 모델을 바꾸면 이전 답변의 추론 블록은 새 모델에 보내지 않습니다(`agents/context.py`의 `drop_foreign_reasoning`).
+  추론 블록에는 만든 provider의 서명이 붙어 있어서, 다른 provider에 보내면 요청이 거절될 수 있기 때문입니다. 답변 텍스트와 도구 호출은 그대로 보냅니다.
+
+### provider
 
 | 값 | 설명 |
 |---|---|
@@ -359,7 +377,8 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 
 | Method | Path | 설명 |
 |---|---|---|
-| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}]}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
+| GET | `/api/models` | 고를 수 있는 모델 목록과 기본 모델 ID |
+| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}], model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
 | GET | `/api/conversations` | 대화 목록 |
 | GET | `/api/conversations/{id}` | 대화 + 메시지 + 생성 중 여부 |
 | GET | `/api/conversations/{id}/status` | 생성 중 여부 (다른 창 확인용) |

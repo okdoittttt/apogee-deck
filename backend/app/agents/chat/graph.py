@@ -28,13 +28,16 @@ from app.agents import summary
 from app.agents.chat.tools import build_tools
 from app.agents.context import (
     compact_old_tool_results,
+    drop_foreign_reasoning,
     make_context_selector,
     make_token_counter,
+    tag_model,
     today,
 )
 from app.agents.tooling import handle_tool_error
 from app.config import Settings
 from app.llm import build_chat_model, build_summary_model
+from app.llm.catalog import model_id
 
 logger = logging.getLogger(__name__)
 
@@ -78,14 +81,16 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
     select_context = make_context_selector(settings)
     count_tokens = make_token_counter(settings)
     budget = settings.history_token_budget
+    current_model = model_id(settings)
     summary_model = build_summary_model(settings) if budget is not None else None
 
     def model_view(messages: list[BaseMessage]) -> list[BaseMessage]:
-        """모델이 보는 이력: 지난 턴의 도구 결과를 줄인다 (설정으로 끌 수 있음).
+        """모델이 보는 이력: 다른 모델의 추론을 빼고, 지난 턴의 도구 결과를 줄인다(설정으로 끌 수 있음).
 
         모델 입력과 요약 판단에 같이 쓴다. 요약 판단이 원본 크기로 세면, 지난 검색 결과 때문에
         요약이 필요 이상으로 일찍 일어나기 때문이다.
         """
+        messages = drop_foreign_reasoning(messages, current_model)
         return compact_old_tool_results(messages) if settings.compact_tool_results else messages
 
     # 모델 호출을 한 단계(chain)로 감싼다. Langfuse 콜백은 이 단계의 metadata 에 있는
@@ -119,7 +124,8 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
             [system, *select_context(system, history)],
             config={"metadata": prompt.trace_metadata()},
         )
-        return {"messages": [response]}
+        # 대화 도중 모델을 바꿨을 때 이 응답의 추론을 다른 모델에 보내지 않도록 모델을 기록한다.
+        return {"messages": [tag_model(response, current_model)]}
 
     def route_start(state: ChatState) -> Literal["summarize", "agent"]:
         """요약이 필요하면 요약 노드로, 아니면 바로 agent 노드로 보낸다."""

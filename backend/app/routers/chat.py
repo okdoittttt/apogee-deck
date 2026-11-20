@@ -25,6 +25,7 @@ from app.agents.runtime import stream_reply
 from app.config import get_settings
 from app.db import SessionDep, SessionLocal
 from app.llm import describe_error, model_name
+from app.llm.catalog import available_models, default_model_id
 from app.models import Conversation, Message, MessageImage
 from app.runs import InMemoryRunRegistry, RunRegistry
 from app.schemas import (
@@ -33,6 +34,8 @@ from app.schemas import (
     ConversationOut,
     ConversationStatus,
     MessageOut,
+    ModelList,
+    ModelOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,32 @@ async def info() -> dict[str, Any]:
         "model": model_name(settings),
         "vision": settings.enable_vision,
     }
+
+
+@router.get("/models")
+async def list_models() -> ModelList:
+    """화면에서 고를 수 있는 모델 목록과 기본 모델을 돌려준다.
+
+    API 키가 있는 provider 의 모델과, 실행 중인 Ollama 에 설치된 모델이 들어간다.
+
+    Returns:
+        모델 목록과 기본 모델 ID.
+    """
+    settings = get_settings()
+    options = await available_models(settings)
+    return ModelList(
+        models=[
+            ModelOut(
+                id=o.id,
+                provider=o.provider,
+                provider_label=o.provider_label,
+                model=o.model,
+                label=o.label,
+            )
+            for o in options
+        ],
+        default=default_model_id(settings, options),
+    )
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -126,6 +155,7 @@ async def get_conversation(conversation_id: uuid.UUID, session: SessionDep) -> C
                 created_at=m.created_at,
                 image_ids=[img.id for img in m.images],
                 steps=m.steps or [],
+                model=m.model,
             )
             for m in conv.messages
         ],
@@ -230,11 +260,17 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
         ``text/event-stream`` 스트리밍 응답.
 
     Raises:
-        HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 대화가 없으면 404,
-            같은 대화의 응답이 생성 중이면 409.
+        HTTPException: 이미지 입력이 꺼져 있는데 이미지를 보내면 400, 지금 쓸 수 없는 모델이면 400,
+            대화가 없으면 404, 같은 대화의 응답이 생성 중이면 409.
     """
-    if req.images and not get_settings().enable_vision:
+    settings = get_settings()
+    if req.images and not settings.enable_vision:
         raise HTTPException(status_code=400, detail="현재 모델은 이미지 입력을 지원하지 않습니다.")
+    if req.model and req.model not in {o.id for o in await available_models(settings)}:
+        raise HTTPException(
+            status_code=400,
+            detail="선택한 모델을 지금 쓸 수 없습니다. 모델 목록을 새로고침해 주세요.",
+        )
 
     # 1) 대화 조회/생성 → 생성 중 표시 (이미 생성 중이면 저장 전에 거절)
     if req.conversation_id:
@@ -269,7 +305,7 @@ async def chat(req: ChatRequest, session: SessionDep) -> StreamingResponse:
 
     # 3) 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장, 생성 중 표시 해제
     return StreamingResponse(
-        stream_and_save(conv.id, req.message, images),
+        stream_and_save(conv.id, req.message, images, req.model),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -281,7 +317,10 @@ ERROR_SUFFIX = "\n\n_(오류로 응답이 중단되었습니다.)_"
 
 
 async def save_assistant_message(
-    conversation_id: uuid.UUID, content: str, steps: list[dict[str, Any]] | None
+    conversation_id: uuid.UUID,
+    content: str,
+    steps: list[dict[str, Any]] | None,
+    model: str | None = None,
 ) -> None:
     """Assistant 메시지를 저장한다.
 
@@ -291,16 +330,26 @@ async def save_assistant_message(
         conversation_id: 대화 ID.
         content: 저장할 답변 텍스트.
         steps: 실행 단계 (추론 과정, 도구 호출). 없으면 ``None``.
+        model: 응답한 모델 ID.
     """
     async with SessionLocal() as s:
         s.add(
-            Message(conversation_id=conversation_id, role="assistant", content=content, steps=steps)
+            Message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=content,
+                steps=steps,
+                model=model,
+            )
         )
         await s.commit()
 
 
 async def stream_and_save(
-    conversation_id: uuid.UUID, text: str, images: list[tuple[str, str]]
+    conversation_id: uuid.UUID,
+    text: str,
+    images: list[tuple[str, str]],
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     """에이전트 응답을 SSE 이벤트로 스트리밍하고, 화면에 보여준 텍스트를 저장한다.
 
@@ -321,6 +370,7 @@ async def stream_and_save(
         conversation_id: 대화 ID. 호출 전에 ``run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
         text: 사용자 메시지 텍스트.
         images: ``(mime_type, base64)`` 목록.
+        model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
 
     Yields:
         SSE 이벤트 문자열 (``meta`` → ``delta`` / ``reasoning`` / ``tool_start`` /
@@ -332,7 +382,7 @@ async def stream_and_save(
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
     try:
         yield sse("meta", {"conversation_id": run_id})
-        async for event in stream_reply(run_id, text, images):
+        async for event in stream_reply(run_id, text, images, model=model):
             recorder.apply(event)
             if not isinstance(event, Finished):
                 await run_registry.touch(run_id)
@@ -370,7 +420,7 @@ async def stream_and_save(
                     recorder.finalize("finished")
                     if event.text or recorder.steps:
                         await save_assistant_message(
-                            conversation_id, event.text, recorder.to_json()
+                            conversation_id, event.text, recorder.to_json(), event.model
                         )
                     await run_registry.release(run_id)
                 yield sse("done", {"stop_reason": event.stop_reason, "model": event.model})
@@ -381,7 +431,7 @@ async def stream_and_save(
         with anyio.CancelScope(shield=True):
             outcome = "error"
             recorder.finalize("error")
-            await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX)
+            await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX, model)
             await run_registry.release(run_id)
         message = describe_error(e) or "응답을 만드는 중 오류가 발생했습니다."
         yield sse("error", {"message": f"{message} (오류 ID: {error_id})", "error_id": error_id})
@@ -390,19 +440,23 @@ async def stream_and_save(
         with anyio.CancelScope(shield=True):
             if outcome == "interrupted":
                 recorder.finalize("interrupted")
-                await _save_partial(conversation_id, shown, recorder, INTERRUPTED_SUFFIX)
+                await _save_partial(conversation_id, shown, recorder, INTERRUPTED_SUFFIX, model)
             # 어떤 경로로 끝나든 생성 중 표시는 반드시 해제한다 (이미 해제됐으면 아무 일 없음).
             await run_registry.release(run_id)
 
 
 async def _save_partial(
-    conversation_id: uuid.UUID, shown: list[str], recorder: StepRecorder, suffix: str
+    conversation_id: uuid.UUID,
+    shown: list[str],
+    recorder: StepRecorder,
+    suffix: str,
+    model: str | None,
 ) -> None:
     """끝까지 오지 못한 응답을 표시와 함께 저장한다. 보여준 것이 없으면 저장하지 않는다."""
     if not shown and not recorder.steps:
         return
     content = "".join(shown) + suffix if shown else suffix.strip()
     try:
-        await save_assistant_message(conversation_id, content, recorder.to_json())
+        await save_assistant_message(conversation_id, content, recorder.to_json(), model)
     except Exception:
         logger.exception("failed to save partial reply for %s", conversation_id)

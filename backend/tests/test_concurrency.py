@@ -113,7 +113,7 @@ async def test_status_endpoint(registry):
 
 
 def _patch_stream(monkeypatch, steps):
-    async def fake_stream_reply(conversation_id, text, images):
+    async def fake_stream_reply(conversation_id, text, images, **kwargs):
         for step in steps:
             if step == "hang":
                 await asyncio.sleep(30)
@@ -122,7 +122,7 @@ def _patch_stream(monkeypatch, steps):
             else:
                 yield step
 
-    async def fake_save(conversation_id, content, steps=None):
+    async def fake_save(conversation_id, content, steps=None, model=None):
         await asyncio.sleep(0)
 
     monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
@@ -172,11 +172,11 @@ async def test_disconnect_during_final_save_still_releases(monkeypatch, registry
     saving = anyio.Event()
     saved: list[str] = []
 
-    async def fake_stream_reply(conversation_id, text, images):
+    async def fake_stream_reply(conversation_id, text, images, **kwargs):
         yield TextDelta("a")
         yield Finished("a", "end_turn", "fake")
 
-    async def slow_save(conversation_id, content, steps=None):
+    async def slow_save(conversation_id, content, steps=None, model=None):
         saving.set()
         await anyio.sleep(0.1)  # 저장 중에 취소가 들어온다
         saved.append(content)

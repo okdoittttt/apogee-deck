@@ -53,9 +53,11 @@ class ChatRequest(BaseModel):
         conversation_id: 이어갈 대화 ID. 없으면 새 대화를 만든다.
         message: 사용자 메시지 텍스트.
         images: 첨부 이미지 (최대 ``MAX_IMAGES_PER_MESSAGE`` 장).
+        model: 응답할 모델 ID (``GET /api/models`` 의 ``id``). 없으면 기본 모델.
     """
 
     conversation_id: uuid.UUID | None = None
+    model: str | None = Field(default=None, max_length=200)
     message: str = Field(default="", max_length=100_000)
     images: list[ImageIn] = Field(default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE)
 
@@ -122,6 +124,36 @@ class ToolStep(BaseModel):
 Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]
 
 
+class ModelOut(BaseModel):
+    """화면에서 고를 수 있는 모델.
+
+    Attributes:
+        id: 모델 ID (``"<provider>:<모델 이름>"``). 채팅 요청의 ``model`` 로 보낸다.
+        provider: provider 이름.
+        provider_label: 화면 표시용 provider 이름.
+        model: provider 안에서의 모델 이름.
+        label: 화면 표시 이름.
+    """
+
+    id: str
+    provider: str
+    provider_label: str
+    model: str
+    label: str
+
+
+class ModelList(BaseModel):
+    """``GET /api/models`` 응답.
+
+    Attributes:
+        models: 지금 쓸 수 있는 모델.
+        default: 처음 선택될 모델 ID. 쓸 수 있는 모델이 없으면 ``None``.
+    """
+
+    models: list[ModelOut]
+    default: str | None
+
+
 class MessageOut(BaseModel):
     """화면에 보여줄 메시지.
 
@@ -132,6 +164,7 @@ class MessageOut(BaseModel):
         created_at: 생성 시각.
         image_ids: 첨부 이미지 ID. 이미지는 ``GET /api/images/{id}`` 로 따로 받는다.
         steps: assistant 응답의 실행 단계 (일어난 순서).
+        model: 응답한 모델 ID. 사용자 메시지와 모델을 기록하기 전의 응답은 ``None``.
     """
 
     id: uuid.UUID
@@ -140,6 +173,7 @@ class MessageOut(BaseModel):
     created_at: datetime
     image_ids: list[uuid.UUID] = []
     steps: list[Step] = []
+    model: str | None = None
 
 
 class ConversationOut(BaseModel):

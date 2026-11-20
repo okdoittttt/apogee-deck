@@ -121,7 +121,7 @@ def _patch_stream(monkeypatch, steps):
     """stream_reply 를 steps 대로 동작하는 가짜로 바꾸고, 저장된 내용을 모은다."""
     saved: list[str] = []
 
-    async def fake_stream_reply(conversation_id, text, images):
+    async def fake_stream_reply(conversation_id, text, images, **kwargs):
         for step in steps:
             if step == "hang":
                 await asyncio.sleep(30)
@@ -130,7 +130,7 @@ def _patch_stream(monkeypatch, steps):
             else:
                 yield step
 
-    async def fake_save(conversation_id, content, steps=None):
+    async def fake_save(conversation_id, content, steps=None, model=None):
         await asyncio.sleep(0)  # 실제 DB 저장처럼 await 가 있다
         saved.append(content)
 

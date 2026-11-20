@@ -33,7 +33,7 @@ from app.agents.events import (
 )
 from app.agents.tooling import RECURSION_LIMIT
 from app.config import Settings, get_settings
-from app.llm import model_name
+from app.llm.catalog import model_id, settings_for
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,13 @@ DEFAULT_AGENT = "chat"
 _pool: AsyncConnectionPool | None = None
 _checkpointer: BaseCheckpointSaver | None = None
 _graphs: dict[str, CompiledStateGraph] = {}
+"""그래프 캐시. 기본 모델은 에이전트 이름, 다른 모델은 ``"<에이전트>@<모델 ID>"`` 가 키다."""
 
 
 async def startup() -> None:
-    """프롬프트를 검증하고, checkpointer 를 연결하고, 등록된 에이전트 그래프를 만든다.
+    """프롬프트를 검증하고, checkpointer 를 연결하고, 등록된 에이전트의 기본 모델 그래프를 만든다.
+
+    다른 모델의 그래프는 처음 요청될 때 만든다 (``get_graph``).
 
     잘못된 프롬프트(빠진 include, 변수 불일치)는 첫 요청이 아니라 이 시점에 실패시킨다.
     ``prompt_sync_on_startup`` 이 켜져 있으면 git → Langfuse 프롬프트 동기화를 백그라운드로 시작한다.
@@ -96,6 +99,37 @@ async def startup() -> None:
     await _checkpointer.setup()
     for name, spec in AGENTS.items():
         _graphs[name] = spec.build_graph(settings, _checkpointer)
+
+
+def get_graph(agent: str, model: str | None = None) -> tuple[CompiledStateGraph, str]:
+    """에이전트와 모델에 맞는 그래프를 돌려준다. 없으면 만들어서 캐시한다.
+
+    모델마다 provider, 컨텍스트 예산(요약 노드 유무)이 달라서 그래프를 따로 만든다.
+    대화 상태는 같은 checkpointer 에 있으므로 대화 도중에 모델을 바꿔도 이력이 이어진다.
+
+    Args:
+        agent: 에이전트 이름 (``AGENTS`` 의 키).
+        model: 모델 ID. ``None`` 이면 설정의 기본 모델.
+
+    Returns:
+        ``(그래프, 실제로 쓰는 모델 ID)``.
+
+    Raises:
+        RuntimeError: 런타임이 시작되지 않았거나 알 수 없는 에이전트일 때.
+        UnknownModelError: 모델 ID 형식이 잘못됐을 때.
+    """
+    settings = get_settings()
+    default = model_id(settings)
+    model = model or default
+    key = agent if model == default else f"{agent}@{model}"
+    if graph := _graphs.get(key):
+        return graph, model
+    spec = AGENTS.get(agent)
+    if spec is None or _checkpointer is None:
+        raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
+    graph = spec.build_graph(settings_for(settings, model), _checkpointer)
+    _graphs[key] = graph
+    return graph, model
 
 
 async def shutdown() -> None:
@@ -188,6 +222,7 @@ async def stream_reply(
     user_text: str,
     images: list[tuple[str, str]] | None = None,
     agent: str = DEFAULT_AGENT,
+    model: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """에이전트를 실행하고 응답과 실행 단계를 스트리밍한다.
 
@@ -205,6 +240,7 @@ async def stream_reply(
         user_text: 사용자 메시지 텍스트.
         images: ``(mime_type, base64)`` 목록.
         agent: 실행할 에이전트 이름 (``AGENTS`` 의 키).
+        model: 모델 ID (``app.llm.catalog``). ``None`` 이면 설정의 기본 모델.
 
     Yields:
         일어난 순서대로 ``TextDelta`` / ``ReasoningDelta`` / ``ToolStarted`` / ``ToolFinished``,
@@ -212,15 +248,14 @@ async def stream_reply(
 
     Raises:
         RuntimeError: 런타임이 시작되지 않았거나 알 수 없는 에이전트일 때.
+        UnknownModelError: 모델 ID 형식이 잘못됐을 때.
     """
-    graph = _graphs.get(agent)
-    if graph is None:
-        raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
+    graph, used_model = get_graph(agent, model)
     spec = AGENTS[agent]
     config = {
         "configurable": {"thread_id": conversation_id},
         "callbacks": tracing.get_callbacks(),
-        "metadata": {"langfuse_session_id": conversation_id, "agent": agent},
+        "metadata": {"langfuse_session_id": conversation_id, "agent": agent, "model": used_model},
         "run_name": agent,
         # 모델이 도구를 끝없이 부르지 않게 한 턴의 단계 수를 제한한다 (넘으면 GraphRecursionError).
         "recursion_limit": RECURSION_LIMIT,
@@ -255,7 +290,7 @@ async def stream_reply(
     state = await graph.aget_state(config)
     last = state.values["messages"][-1]
     stop = _stop_reason(last) if isinstance(last, AIMessage) else None
-    yield Finished(text="".join(shown), stop_reason=stop, model=model_name(get_settings()))
+    yield Finished(text="".join(shown), stop_reason=stop, model=used_model)
 
 
 def _tool_events(

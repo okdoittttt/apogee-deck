@@ -108,7 +108,7 @@ class Finished:
     Attributes:
         text: 화면에 보여준 전체 답변 텍스트.
         stop_reason: 공통 이름으로 맞춘 종료 사유 (``end_turn`` / ``max_tokens`` / ``refusal`` 등).
-        model: 응답한 모델 이름.
+        model: 응답한 모델 ID (``"<provider>:<모델 이름>"``).
     """
 
     text: str
