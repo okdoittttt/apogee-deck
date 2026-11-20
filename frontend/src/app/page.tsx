@@ -38,6 +38,7 @@ import {
 import type { User } from "@/lib/auth";
 import { type PendingDocument, extensionOf, formatBytes, isImageFile } from "@/lib/documents";
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
+import { isMacPlatform, shortcutLabel } from "@/lib/platform";
 
 const SIDEBAR_KEY = "sidebar-open";
 const MODEL_KEY = "selected-model";
@@ -215,6 +216,25 @@ function ChatApp({
         e.preventDefault();
         setSidebarOpen(true);
         requestAnimationFrame(() => searchRef.current?.focus());
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ⌘N / Ctrl+N: 새 대화. Chrome 등 일부 브라우저는 이 키를 페이지에 넘기지 않고 새 창을 연다.
+  // 그래서 어디서나 동작하는 ⇧⌘O / Ctrl+Shift+O 도 같이 받는다.
+  const newConversationRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    newConversationRef.current = newConversation;
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing || e.altKey || !(isMacPlatform() ? e.metaKey : e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if ((key === "n" && !e.shiftKey) || (key === "o" && e.shiftKey)) {
+        e.preventDefault();
+        newConversationRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -738,7 +758,7 @@ function ChatApp({
                 onClick={newConversation}
                 className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
                 aria-label="새 대화"
-                title="새 대화"
+                title={`새 대화 (${shortcutLabel("N")})`}
               >
                 <PlusIcon />
               </button>

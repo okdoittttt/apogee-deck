@@ -5,6 +5,7 @@ import type { AppInfo, Conversation } from "@/lib/api";
 import type { User } from "@/lib/auth";
 import { Avatar } from "./Auth";
 import { LogoIcon, PlusIcon, SearchIcon, SidebarIcon, TrashIcon } from "./icons";
+import { shortcutLabel } from "@/lib/platform";
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -73,7 +74,13 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
           <span className="flex h-5 w-5 items-center justify-center rounded-full bg-fg text-app">
             <PlusIcon className="h-3.5 w-3.5" />
           </span>
-          새 대화
+          <span className="flex-1 text-left">새 대화</span>
+          <kbd
+            className="hidden shrink-0 font-sans text-[11px] text-subtle md:block"
+            title={`${shortcutLabel("N")} 또는 ${shortcutLabel("O", { shift: true })}`}
+          >
+            {shortcutLabel("N")}
+          </kbd>
         </button>
         <label className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted focus-within:bg-hover hover:bg-hover">
           <SearchIcon className="h-[18px] w-[18px] shrink-0" />
@@ -85,7 +92,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
             placeholder="대화 검색"
             className="w-full bg-transparent text-fg placeholder:text-muted focus:outline-none"
           />
-          <kbd className="hidden shrink-0 font-sans text-[11px] text-subtle md:block">⌘K</kbd>
+          <kbd className="hidden shrink-0 font-sans text-[11px] text-subtle md:block">{shortcutLabel("K")}</kbd>
         </label>
       </div>
 
