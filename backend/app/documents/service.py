@@ -22,19 +22,20 @@ from sqlalchemy.orm import defer
 from app.core.config import Settings, get_settings
 from app.core.db import SessionLocal
 from app.core.storage import DOCUMENTS_PREFIX, PROJECTS_PREFIX, ObjectStorage, get_storage
+from app.documents import chunking
 from app.documents import elements as el
 from app.documents.formats import DocumentKind, detect, safe_filename
 from app.documents.parser import ParsedDocument, ParseError
 from app.documents.reading import AttachedDocument, estimate_tokens, max_inline_chars
 from app.documents.worker import parse_in_subprocess
-from app.llm import vision
-from app.models import Document, DocumentElement
+from app.llm import embeddings, vision
+from app.models import Document, DocumentChunk, DocumentElement
 
 logger = logging.getLogger(__name__)
 
 INTERRUPTED_ERROR = "서버가 다시 시작되어 처리가 중단되었습니다. 다시 올려 주세요."
-BUSY_STATUSES = ("processing", "analyzing")
-"""아직 처리 중인 문서 상태 (파싱 중, 그림 설명 중)."""
+BUSY_STATUSES = ("processing", "analyzing", "indexing")
+"""아직 처리 중인 문서 상태 (파싱 중, 그림 설명 중, 검색 준비 중)."""
 PROJECT_FULL_ERROR = (
     "프로젝트 용량을 넘어서 추가할 수 없습니다. 다른 문서를 지운 뒤 다시 올려 주세요."
 )
@@ -212,7 +213,8 @@ async def _ingest_project_document(
 
     1. 그림 원본을 저장소에 올리고 요소를 저장한다. 그림이 있으면 문서를 ``analyzing`` 으로 바꾼다.
     2. 그림을 vision 모델로 설명한다. 실패한 그림은 그림 속 OCR 글자로 대신한다 (문서는 실패하지 않는다).
-    3. 본문과 그림 설명의 토큰 수로 프로젝트 용량을 확인하고 ``ready`` (넘으면 ``failed``) 로 바꾼다.
+    3. 본문과 그림 설명의 토큰 수로 프로젝트 용량을 확인한다 (넘으면 ``failed``).
+    4. 요소로 검색용 청크를 만들고 임베딩해서 저장한 뒤 ``ready`` 로 바꾼다 (``index_document``).
 
     도중에 문서가 지워지면 올린 그림을 지우고 멈춘다.
     """
@@ -341,7 +343,7 @@ async def _finish_project_document(
     element_count: int,
     described: dict[uuid.UUID, str],
 ) -> None:
-    """그림 설명을 저장하고 용량을 확인해 문서를 ``ready`` (넘으면 ``failed``) 로 바꾼다."""
+    """그림 설명을 저장하고 용량을 확인한 뒤 검색 준비(``index_document``)로 넘긴다. 넘으면 ``failed``."""
     settings = get_settings()
     total = estimate_tokens(content) + sum(estimate_tokens(t) for t in described.values())
     async with SessionLocal() as session:
@@ -372,10 +374,9 @@ async def _finish_project_document(
             update(Document)
             .where(Document.id == document_id, Document.status.in_(BUSY_STATUSES))
             .values(
-                status="ready",
+                status="indexing",
                 token_count=total,
                 image_fallback_count=len(image_ids) - len(described),
-                parsed_at=datetime.now(UTC),
             )
         )
         await session.commit()
@@ -383,13 +384,158 @@ async def _finish_project_document(
         await delete_objects(image_keys)
         return
     logger.info(
-        "project document %s ready (%d elements, %d/%d images described, %d tokens)",
+        "project document %s analyzed (%d elements, %d/%d images described, %d tokens)",
         document_id,
         element_count,
         len(described),
         len(image_ids),
         total,
     )
+    await index_document(document_id)
+
+
+# --- 검색 준비: 요소 → 청크 → 임베딩 ----------------------------------------------------------------
+
+
+async def index_document(document_id: uuid.UUID) -> None:
+    """``indexing`` 상태인 프로젝트 문서의 청크를 만들어 저장하고 ``ready`` 로 바꾼다.
+
+    임베딩에 실패하면(키 없음, API 오류) 청크만 임베딩 없이 저장하고 문서는 준비됨으로 둔다.
+    빠진 임베딩은 검색할 때 다시 만든다 (``app.projects.search``). 도중에 문서가 지워지면 아무것도 남기지 않는다.
+
+    Args:
+        document_id: 문서 ID.
+    """
+    try:
+        async with SessionLocal() as session:
+            doc = (
+                await session.execute(
+                    select(Document.project_id, Document.filename, Document.content).where(
+                        Document.id == document_id, Document.status == "indexing"
+                    )
+                )
+            ).first()
+            if doc is None or doc.project_id is None:
+                return
+            chunks = await _document_chunks(session, document_id, doc.content)
+        rows = await _chunk_rows(document_id, doc.project_id, doc.filename, chunks)
+        async with SessionLocal() as session:
+            res = await session.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.status == "indexing")
+                .values(status="ready", parsed_at=datetime.now(UTC))
+            )
+            if not res.rowcount:  # 그 사이 지워졌다
+                await session.rollback()
+                return
+            session.add_all(rows)
+            await session.commit()
+    except Exception:
+        logger.exception("failed to index document %s", document_id)
+        await _mark_failed(document_id, "문서를 처리하다가 오류가 났습니다.")
+        return
+    logger.info(
+        "project document %s ready (%d chunks, %d embedded)",
+        document_id,
+        len(rows),
+        sum(1 for r in rows if r.embedding is not None),
+    )
+
+
+async def _document_chunks(
+    session: AsyncSession, document_id: uuid.UUID, content: str | None
+) -> list[chunking.Chunk]:
+    """문서의 요소로 청크를 만든다. 요소가 없는 문서(구조화 적재 전에 올린 것)는 본문으로 만든다."""
+    rows = await session.execute(
+        select(
+            DocumentElement.id,
+            DocumentElement.kind,
+            DocumentElement.content,
+            DocumentElement.page,
+            DocumentElement.heading,
+        )
+        .where(DocumentElement.document_id == document_id)
+        .order_by(DocumentElement.position)
+    )
+    sources = [chunking.SourceElement(r.id, r.kind, r.content, r.page, r.heading) for r in rows]
+    if not sources and content:
+        sources = [chunking.SourceElement(uuid.uuid4(), "text", content)]
+    settings = get_settings()
+    return chunking.make_chunks(
+        sources,
+        chunking.ChunkSizes(
+            settings.chunk_target_tokens, settings.chunk_max_tokens, settings.chunk_overlap_tokens
+        ),
+    )
+
+
+async def _chunk_rows(
+    document_id: uuid.UUID, project_id: uuid.UUID, filename: str, chunks: list[chunking.Chunk]
+) -> list[DocumentChunk]:
+    """청크를 임베딩해서 저장할 행으로 만든다. 임베딩에 실패하면 임베딩 없이 만든다."""
+    settings = get_settings()
+    vectors: list[list[float]] | None = None
+    if chunks:
+        try:
+            model = embeddings.build_embeddings(settings)
+            vectors = await model.aembed_documents(
+                [chunking.embedding_text(filename, c) for c in chunks]
+            )
+        except embeddings.EmbeddingUnavailableError as exc:
+            logger.warning("embedding skipped for document %s: %s", document_id, exc)
+        except Exception:
+            # 빠진 임베딩은 검색할 때 다시 만든다.
+            logger.warning("embedding failed for document %s", document_id, exc_info=True)
+    model_name = embeddings.model_id(settings) if vectors is not None else None
+    return [
+        DocumentChunk(
+            document_id=document_id,
+            project_id=project_id,
+            position=position,
+            kind=chunk.kind,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
+            heading=chunk.heading[:500] if chunk.heading else None,
+            content=chunk.content,
+            image_element_id=chunk.image_element_id,
+            token_count=chunk.token_count,
+            embedding=vectors[position] if vectors is not None else None,
+            embedding_model=model_name,
+        )
+        for position, chunk in enumerate(chunks)
+    ]
+
+
+async def index_missing_documents() -> int:
+    """청크가 없는 준비된 프로젝트 문서(검색 기능 전에 올린 것)의 청크를 만든다. 앱이 시작할 때 부른다.
+
+    Returns:
+        청크를 만든 문서 수.
+    """
+    async with SessionLocal() as session:
+        has_chunks = select(DocumentChunk.id).where(DocumentChunk.document_id == Document.id)
+        ids = list(
+            await session.scalars(
+                select(Document.id).where(
+                    Document.project_id.is_not(None),
+                    Document.status == "ready",
+                    ~has_chunks.exists(),
+                )
+            )
+        )
+    count = 0
+    for document_id in ids:
+        async with SessionLocal() as session:
+            res = await session.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.status == "ready")
+                .values(status="indexing")
+            )
+            await session.commit()
+        if res.rowcount:
+            await index_document(document_id)
+            count += 1
+    return count
 
 
 async def _mark_failed(document_id: uuid.UUID, error: str) -> None:

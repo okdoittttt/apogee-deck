@@ -179,12 +179,12 @@ backend/
 │   │   ├── summary.py       # 오래된 대화 요약
 │   │   └── tooling.py       # 도구 오류 처리, 반복 제한
 │   ├── tools/               # 공용 도구 (registry.py 에 등록, 에이전트가 이름으로 골라 씀)
-│   ├── projects/            # 프로젝트: 만들기·조회, 프로젝트 문서, 에이전트에게 줄 프로젝트 정보
-│   ├── documents/           # 첨부·프로젝트 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 요소, 정리
+│   ├── projects/            # 프로젝트: 만들기·조회, 프로젝트 문서, 에이전트에게 줄 프로젝트 정보, 문서 검색
+│   ├── documents/           # 첨부·프로젝트 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 요소·청크, 정리
 │   ├── web/                 # 웹 검색(Tavily), 페이지 읽기
 │   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제)
 │   ├── images.py            # 채팅 이미지: 저장소 저장, checkpoint 참조 ↔ 원본
-│   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델, 그림 설명
+│   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델, 그림 설명, 임베딩
 │   ├── prompts/             # 프롬프트 로더 + 공용 조각 (shared/language.md, formatting.md ...)
 │   ├── models.py            # SQLAlchemy 모델
 │   └── core/                # 인프라: 설정, DB, 첨부 저장소(S3 API), Langfuse, 공용 예외
@@ -384,8 +384,9 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 - 지시문과 문서 목록은 매 응답마다 system 프롬프트 끝에 붙입니다 (`chat/project`). 지시문을 고치면 다음 응답부터 적용됩니다.
   checkpoint 에는 저장하지 않습니다 (실행 설정 `configurable["project"]` 로 넘김).
 - **작은 프로젝트**: 문서 합계가 추정 2만 토큰 이하(`PROJECT_INLINE_MAX_TOKENS`, Ollama 는 1만 `OLLAMA_PROJECT_INLINE_MAX_TOKENS`)면
-  본문을 모두 system 프롬프트에 넣어 도구 없이 바로 답합니다. 넘으면 목록만 주고 `read_document` 로 읽게 합니다.
-- 모델은 `read_document` 로 프로젝트 문서를 읽습니다. 읽을 수 있는 프로젝트는 서버가 정하므로, 모델이 다른 프로젝트의 문서 ID 를 넣어도 읽지 못합니다.
+  본문을 모두 system 프롬프트에 넣어 도구 없이 바로 답합니다. 넘으면 목록만 주고 `search_project` 로 찾고 `read_document` 로 읽게 합니다.
+- 모델은 `search_project` 로 프로젝트 문서를 검색하고 `read_document` 로 읽습니다. 대상 프로젝트는 서버가 정하므로,
+  모델이 다른 프로젝트의 문서 ID 를 넣어도 읽지 못합니다.
 - **보관**: 프로젝트 문서는 30일 정리를 받지 않고 지울 때까지 둡니다. 메시지에 첨부할 수는 없습니다.
   프로젝트를 지우면 그 안의 대화·문서·이미지·checkpoint 가 모두 지워집니다 (응답 생성 중인 대화가 있으면 409).
 - **용량**: 문서 수는 제한하지 않고, 준비된 문서의 추정 토큰 수 합계로 제한합니다 (`PROJECT_MAX_TOKENS`, 기본 100만).
@@ -400,9 +401,21 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
   - 그림: 아이콘·로고·장식과 작은 그림은 버리고, 나머지(문서당 최대 50장, `VISION_MAX_IMAGES_PER_DOCUMENT`)는
     원본을 `projects/<프로젝트>/images/` 에 저장한 뒤 OpenAI vision 모델(`VISION_MODEL`, 기본 `gpt-6-luna`, 낮은 해상도)로
     **한국어 설명**을 만듭니다. 설명에 실패한 그림은 그림 속 OCR 글자로 대신하고 문서는 그대로 준비됩니다.
-  - 문서 상태는 `processing`(읽는 중) → `analyzing`(그림 분석 중) → `ready` 입니다. 그림 설명도 용량에 들어갑니다.
+  - 문서 상태는 `processing`(읽는 중) → `analyzing`(그림 분석 중) → `indexing`(검색 준비 중) → `ready` 입니다.
+    그림 설명도 용량에 들어갑니다.
   - 대화 첨부 문서는 올리는 시간이 길어지지 않도록 요소를 만들지 않고 그림도 설명하지 않습니다.
-- 큰 프로젝트에서 필요한 부분을 찾는 검색(RAG)은 다음 단계에서 붙입니다.
+- **검색 (RAG)**: 요소를 **청크**로 묶거나 나눠 OpenAI 임베딩(`EMBEDDING_MODEL`, 기본 `text-embedding-3-small`, 1536차원)과 함께
+  `document_chunks` 에 저장하고, pgvector 의 HNSW 인덱스(코사인 거리)로 찾습니다 (`app/documents/chunking.py`, `app/projects/search.py`).
+  - 청크: 같은 제목 아래의 작은 본문은 목표 500 토큰까지 묶고, 800 토큰이 넘는 본문은 문단 → 줄 → 문장 순으로 나눠 80 토큰씩 겹칩니다.
+    표는 행 단위로 나누며 조각마다 머리글을 붙이고, 그림은 설명 하나가 청크 하나입니다 (`CHUNK_*` 설정).
+  - 임베딩 입력 앞에는 "문서 이름 | 제목 경로 | 쪽" 을 붙여 맥락을 줍니다. 결과는 문서 이름·쪽·제목 경로와 함께 모델에게 주고,
+    화면에는 답변 아래 **출처 카드**로 보여줍니다 (그림 결과는 미리보기, `GET /api/projects/{id}/images/{element_id}`).
+  - 임베딩에 실패하면 청크만 저장하고 문서는 준비됩니다. 빠졌거나 다른 모델로 만든 임베딩은 검색할 때 다시 만듭니다
+    (모델을 바꿔도 자동으로 다시 임베딩). 검색 기능 전에 올린 프로젝트 문서는 앱이 시작할 때 청크를 만듭니다.
+  - OpenAI 키가 없으면 `search_project` 도구를 빼고 `read_document` 로 읽게 합니다. `EMBEDDING_PROVIDER=fake` 는 네트워크 없이 도는
+    글자 조각 해시 임베딩입니다 (테스트·개발용).
+  - Postgres 는 `postgres:17-alpine` 에 pgvector 를 빌드해 넣은 이미지를 씁니다 (`docker/postgres/Dockerfile`). 공식 pgvector 이미지는
+    Debian(glibc) 기반이라 기존 alpine(musl) 데이터 디렉터리에 붙이면 문자열 정렬 규칙이 달라질 수 있어서입니다.
 
 ## DB 마이그레이션 (Alembic)
 
@@ -513,6 +526,7 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | DELETE | `/api/projects/{id}` | 프로젝트와 그 안의 대화·문서 삭제 (생성 중인 대화가 있으면 409) |
 | POST | `/api/projects/{id}/documents` | 프로젝트 문서 올리기 (multipart `file`). 용량이 꽉 찼으면 409 |
 | DELETE | `/api/projects/{id}/documents/{doc_id}` | 프로젝트 문서 지우기 |
+| GET | `/api/projects/{id}/images/{element_id}` | 프로젝트 문서 속 그림 원본 (검색 결과 출처 카드 미리보기) |
 | GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |

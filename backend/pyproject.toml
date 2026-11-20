@@ -30,6 +30,7 @@ dependencies = [
     # Google 로그인 ID 토큰 검증 (langchain-google-genai 가 이미 쓰는 버전)
     "google-auth>=2.62.1",
     "requests>=2.34.2",
+    "pgvector>=0.5.1",
 ]
 
 [dependency-groups]
@@ -66,6 +67,8 @@ constraint-dependencies = [
     "import-linter<2.16",
     "grimp<3.19",
     "markdown-it-py<4.3.0",
+    # (2026-11-20 프로젝트 문서 검색(pgvector) 추가 시)
+    "pgvector<0.5.2",
 ]
 
 [tool.ruff]

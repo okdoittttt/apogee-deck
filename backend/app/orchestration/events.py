@@ -5,6 +5,7 @@
 """
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -68,7 +69,7 @@ class ToolFinished:
         id: 도구 호출 ID.
         output: 도구 결과 (``MAX_TOOL_OUTPUT_CHARS`` 까지).
         status: ``"done"`` 또는 ``"error"``.
-        sources: 화면에 출처로 보여줄 페이지 (``title``, ``url``, ``published_date``).
+        sources: 화면에 출처로 보여줄 웹 페이지나 프로젝트 문서 (``tool_sources`` 참고).
             웹 검색처럼 출처가 있는 도구만 채운다.
     """
 
@@ -140,20 +141,29 @@ def reasoning_text(message: BaseMessage) -> str:
 def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
     """도구 결과의 artifact 에서 화면에 보여줄 출처 목록을 꺼낸다.
 
-    출처가 있는 도구는 ``response_format="content_and_artifact"`` 로 선언하고
-    ``{"sources": [{"title": ..., "url": ..., "published_date": ...}, ...]}`` 를 artifact 로 돌려준다.
-    artifact 는 모델 입력에 들어가지 않는다.
+    출처가 있는 도구는 ``response_format="content_and_artifact"`` 로 선언하고 ``{"sources": [...]}`` 를
+    artifact 로 돌려준다. artifact 는 모델 입력에 들어가지 않는다. 출처는 두 종류다.
+
+    - 웹 페이지: ``{"title", "url", "published_date"}``. ``http``/``https`` 주소만 남긴다.
+    - 프로젝트 문서 (``"type": "document"``): ``{"title", "document_id", "project_id", "location",
+      "image_element_id"}``. ID 는 UUID 형식만 남긴다.
 
     Args:
         artifact: ``ToolMessage.artifact``.
 
     Returns:
-        ``http``/``https`` URL 을 가진 출처 목록. 없으면 빈 목록.
+        출처 목록. 없으면 빈 목록.
     """
     if not isinstance(artifact, dict):
         return []
-    sources = []
+    sources: list[dict[str, str | None]] = []
     for item in artifact.get("sources") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "document":
+            if source := _document_source(item):
+                sources.append(source)
+            continue
         url = str(item.get("url") or "")
         if not url.startswith(("http://", "https://")):
             continue
@@ -165,6 +175,29 @@ def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
             }
         )
     return sources
+
+
+def _uuid_or_none(value: Any) -> str | None:
+    try:
+        return str(uuid.UUID(str(value))) if value else None
+    except ValueError:
+        return None
+
+
+def _document_source(item: dict[str, Any]) -> dict[str, str | None] | None:
+    """프로젝트 문서 출처를 검사해서 화면에 줄 값만 남긴다. 문서·프로젝트 ID 가 없으면 ``None``."""
+    document_id = _uuid_or_none(item.get("document_id"))
+    project_id = _uuid_or_none(item.get("project_id"))
+    if document_id is None or project_id is None:
+        return None
+    return {
+        "type": "document",
+        "title": str(item.get("title") or "문서"),
+        "document_id": document_id,
+        "project_id": project_id,
+        "location": str(item.get("location") or ""),
+        "image_element_id": _uuid_or_none(item.get("image_element_id")),
+    }
 
 
 def tool_output_text(content: Any) -> str:

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
-from app.core.storage import ObjectStorage
+from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.documents import service as documents
 from app.documents.reading import AttachedDocument
 from app.models import Conversation, Document, DocumentElement, Project
@@ -223,6 +223,39 @@ async def delete_document(session: AsyncSession, project: Project, document_id: 
     await session.delete(doc)
     await session.commit()
     await documents.delete_objects(keys)
+
+
+async def read_element_image(
+    session: AsyncSession, storage: ObjectStorage, project: Project, element_id: uuid.UUID
+) -> tuple[bytes, str]:
+    """프로젝트 문서 속 그림 원본을 읽는다 (검색 결과 출처 카드에 보여줄 때).
+
+    Args:
+        session: DB 세션.
+        storage: 첨부 저장소.
+        project: 프로젝트 (``get_own`` 으로 확인한 것).
+        element_id: 그림 요소 ID.
+
+    Returns:
+        ``(그림 바이트, MIME 타입)``.
+
+    Raises:
+        ProjectError: 이 프로젝트의 그림이 아니거나 원본이 없으면 404.
+    """
+    row = (
+        await session.execute(
+            select(DocumentElement.image_key, DocumentElement.image_mime)
+            .join(Document, Document.id == DocumentElement.document_id)
+            .where(DocumentElement.id == element_id, Document.project_id == project.id)
+        )
+    ).first()
+    if row is None or not row.image_key:
+        raise ProjectError(404, "Image not found")
+    try:
+        data = await storage.get(row.image_key)
+    except ObjectNotFoundError as exc:
+        raise ProjectError(404, "Image not found") from exc
+    return data, row.image_mime or "application/octet-stream"
 
 
 @dataclass(frozen=True)

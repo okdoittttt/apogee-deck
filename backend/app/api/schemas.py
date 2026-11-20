@@ -108,6 +108,26 @@ class Source(BaseModel):
     published_date: str | None = None
 
 
+class DocumentSource(BaseModel):
+    """도구가 참고한 프로젝트 문서 위치 (``search_project`` 결과).
+
+    Attributes:
+        type: 항상 ``"document"``.
+        title: 문서 이름.
+        document_id: 문서 ID.
+        project_id: 프로젝트 ID.
+        location: 쪽과 제목 경로 (예: ``"p.3 · 1장 > 1.1"``). 없으면 빈 문자열.
+        image_element_id: 그림 결과면 그림 요소 ID (``GET /api/projects/{id}/images/{element_id}``).
+    """
+
+    type: Literal["document"]
+    title: str
+    document_id: str
+    project_id: str
+    location: str = ""
+    image_element_id: str | None = None
+
+
 class ToolStep(BaseModel):
     """실행 단계: 도구 호출 하나.
 
@@ -120,7 +140,7 @@ class ToolStep(BaseModel):
         args: 모델이 채운 인자.
         output: 도구 결과 (길이 제한됨). 끝나지 않았으면 ``None``.
         status: ``running`` / ``done`` / ``error`` / ``interrupted``.
-        sources: 도구가 참고한 페이지 (웹 검색 결과 등). 없으면 빈 목록.
+        sources: 도구가 참고한 웹 페이지나 프로젝트 문서. 없으면 빈 목록.
     """
 
     type: Literal["tool"] = "tool"
@@ -131,7 +151,7 @@ class ToolStep(BaseModel):
     args: dict[str, Any]
     output: str | None = None
     status: Literal["running", "done", "error", "interrupted"]
-    sources: list[Source] = []
+    sources: list[DocumentSource | Source] = []
 
 
 Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]
@@ -231,7 +251,7 @@ class ConversationStatus(BaseModel):
     running: bool
 
 
-DocumentStatus = Literal["processing", "analyzing", "ready", "failed"]
+DocumentStatus = Literal["processing", "analyzing", "indexing", "ready", "failed"]
 
 
 class DocumentOut(BaseModel):
@@ -243,7 +263,8 @@ class DocumentOut(BaseModel):
         kind: 내용으로 확인한 형식 (``pdf``, ``docx``, ``hwpx`` 등).
         mime_type: 원본 MIME 타입.
         size_bytes: 원본 크기.
-        status: ``processing`` (파싱 중) | ``analyzing`` (그림 설명 중, 프로젝트 문서) | ``ready`` (준비됨) |
+        status: ``processing`` (파싱 중) | ``analyzing`` (그림 설명 중, 프로젝트 문서) |
+            ``indexing`` (검색 준비 중, 프로젝트 문서) | ``ready`` (준비됨) |
             ``failed`` (실패).
         error: 실패 사유.
         page_count: 쪽 수 (쪽 구분이 없는 형식은 ``None``).

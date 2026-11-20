@@ -9,11 +9,15 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+EMBEDDING_DIMENSIONS = 1536
+"""청크 임베딩 차원 (OpenAI ``text-embedding-3-small``). 바꾸려면 마이그레이션으로 열을 바꾸고 다시 임베딩한다."""
 
 
 class User(Base):
@@ -243,7 +247,8 @@ class Document(Base):
         size_bytes: 원본 크기.
         sha256: 원본의 SHA-256 (16진수).
         storage_key: 첨부 저장소의 객체 키.
-        status: ``processing`` (파싱 중) | ``analyzing`` (프로젝트 문서의 그림 설명 중) | ``ready`` (준비됨) |
+        status: ``processing`` (파싱 중) | ``analyzing`` (프로젝트 문서의 그림 설명 중) |
+            ``indexing`` (프로젝트 문서의 검색 준비 중) | ``ready`` (준비됨) |
             ``failed`` (실패).
         error: 실패 사유 (사용자에게 보여줄 문구).
         page_count: 쪽수 (쪽 구분이 없는 형식은 ``None``).
@@ -321,3 +326,59 @@ class DocumentElement(Base):
     image_mime: Mapped[str | None] = mapped_column(String(50), nullable=True)
     image_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class DocumentChunk(Base):
+    """프로젝트 문서의 검색 단위(청크). 요소(``DocumentElement``)를 묶거나 나눠서 만든다.
+
+    작은 본문 요소는 같은 제목 아래에서 목표 크기까지 묶고, 큰 요소는 나눈다. 표와 그림은 따로 청크가 된다.
+    임베딩은 청크 앞에 문서 이름과 제목 경로를 붙인 글자로 만든다.
+
+    Attributes:
+        id: 청크 ID.
+        document_id: 속한 문서 ID.
+        project_id: 속한 프로젝트 ID (검색할 때 프로젝트로 거른다).
+        position: 문서 안의 순서 (0부터).
+        kind: ``text`` | ``table`` | ``image``.
+        page_start: 첫 쪽 번호. 쪽 구분이 없으면 ``None``.
+        page_end: 마지막 쪽 번호.
+        heading: 제목 경로. 없으면 ``None``.
+        content: 청크 본문 (그림은 설명).
+        image_element_id: 그림 청크의 그림 요소 ID (원본 그림을 보여줄 때 쓴다).
+        token_count: ``content`` 의 추정 토큰 수.
+        embedding: 임베딩. 아직 만들지 못했으면 ``None`` (검색할 때 다시 만든다).
+        embedding_model: 임베딩을 만든 모델 (``"openai:text-embedding-3-small"``).
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        # 코사인 거리로 찾는 근사 최근접 이웃 인덱스
+        Index(
+            "ix_document_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(10))
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    image_element_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_elements.id", ondelete="SET NULL"), nullable=True
+    )
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS), nullable=True
+    )
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)

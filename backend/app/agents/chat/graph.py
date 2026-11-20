@@ -52,7 +52,13 @@ SUMMARY_TIMEOUT_SECONDS = 120.0
 STREAM_NODES = frozenset({AGENT_NODE})
 """이 노드들이 생성하는 토큰만 사용자에게 스트리밍한다 (요약 노드의 토큰은 보여주지 않는다)."""
 
-TOOL_NAMES = ("get_current_time", "web_search", "fetch_url", "read_document")
+TOOL_NAMES = (
+    "get_current_time",
+    "web_search",
+    "fetch_url",
+    "read_document",
+    "search_project",
+)
 """이 에이전트가 쓰는 도구 (``app.tools`` 레지스트리의 이름). 설정상 쓸 수 없는 도구는 빠진다."""
 
 

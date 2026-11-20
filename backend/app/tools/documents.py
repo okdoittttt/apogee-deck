@@ -1,11 +1,23 @@
-"""첨부 문서 읽기 도구(``read_document``)."""
+"""문서 도구: 첨부·프로젝트 문서 읽기(``read_document``), 프로젝트 문서 검색(``search_project``)."""
+
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
 from app.core.config import Settings
+from app.core.db import SessionLocal
 from app.documents import reading
 from app.documents import service as documents
+from app.llm.embeddings import EmbeddingUnavailableError
+from app.projects import search
+
+NOT_IN_PROJECT = (
+    "This conversation is not in a project, so there are no project documents to search."
+)
+SEARCH_UNAVAILABLE = (
+    "Project search is not available right now. Read the documents with read_document instead."
+)
 
 
 def make_read_document(settings: Settings) -> BaseTool:
@@ -58,3 +70,47 @@ def make_read_document(settings: Settings) -> BaseTool:
         )
 
     return read_document
+
+
+def make_search_project(settings: Settings) -> BaseTool:
+    """프로젝트 문서 검색 도구를 만든다.
+
+    대화가 속한 프로젝트(서버가 넘긴 ``configurable["project"]``)의 문서만 찾는다. 결과의 출처(문서 이름,
+    쪽, 제목 경로, 그림)는 artifact 로 화면에 따로 준다.
+
+    Args:
+        settings: 앱 설정 (임베딩, 돌려줄 청크 수).
+
+    Returns:
+        ``search_project`` 도구.
+    """
+
+    @tool(parse_docstring=True, response_format="content_and_artifact")
+    async def search_project(query: str, config: RunnableConfig) -> tuple[str, dict[str, Any]]:
+        """Search the documents of this conversation's project for passages relevant to a query.
+
+        Use it when the user asks about the project documents and their full text is not
+        included in your instructions. It finds passages by meaning, including tables and
+        descriptions of images (charts, diagrams). Search again with different wording when
+        the results do not answer the question, and use read_document with a result's
+        document_id to read the surrounding text when a passage is cut off or you need more
+        context.
+
+        Args:
+            query: What to look for, written as a short question or the key terms, in the
+                language of the documents.
+            config: Run configuration (injected, not visible to the model).
+        """
+        project = (config.get("configurable") or {}).get("project")
+        if project is None:
+            return NOT_IN_PROJECT, {}
+        try:
+            async with SessionLocal() as session:
+                hits = await search.search(
+                    session, settings, project.id, query, settings.project_search_top_k
+                )
+        except EmbeddingUnavailableError:
+            return SEARCH_UNAVAILABLE, {}
+        return search.format_hits(query, hits), {"sources": search.sources(project.id, hits)}
+
+    return search_project

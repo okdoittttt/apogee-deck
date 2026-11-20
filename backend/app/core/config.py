@@ -110,6 +110,16 @@ class Settings(BaseSettings):
         vision_max_images_per_document: 문서 하나에서 설명할 최대 그림 수. 넘는 그림은 버린다.
         vision_concurrency: 동시에 설명할 그림 수.
         vision_timeout_seconds: 그림 하나를 설명하는 요청의 시간 제한(초).
+        embedding_provider: 프로젝트 문서 검색용 임베딩. ``openai`` (``OPENAI_API_KEY`` 필요) |
+            ``fake`` (글자 조각 해시, 테스트·키 없는 개발용).
+        embedding_model: OpenAI 임베딩 모델. 바꾸면 검색할 때 예전 모델로 만든 청크를 다시 임베딩한다.
+        embedding_dimensions: 임베딩 차원. DB 열(``document_chunks.embedding``)과 같아야 한다.
+        embedding_batch_size: 요청 한 번에 임베딩할 청크 수.
+        embedding_timeout_seconds: 임베딩 요청의 시간 제한(초).
+        chunk_target_tokens: 청크 목표 크기(추정 토큰 수). 작은 요소는 이 크기까지 묶는다.
+        chunk_max_tokens: 청크 최대 크기. 넘는 요소는 나눈다.
+        chunk_overlap_tokens: 긴 본문을 나눌 때 앞 청크 끝을 다음 청크 앞에 겹치는 분량.
+        project_search_top_k: ``search_project`` 가 돌려줄 청크 수.
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -232,6 +242,15 @@ class Settings(BaseSettings):
     vision_max_images_per_document: int = 50
     vision_concurrency: int = 3
     vision_timeout_seconds: float = 60.0
+    embedding_provider: Literal["openai", "fake"] = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    embedding_batch_size: int = 64
+    embedding_timeout_seconds: float = 60.0
+    chunk_target_tokens: int = 500
+    chunk_max_tokens: int = 800
+    chunk_overlap_tokens: int = 80
+    project_search_top_k: int = 8
 
     # --- Auth ---
     auth_required: bool = True

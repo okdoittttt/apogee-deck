@@ -65,7 +65,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if pruned := await runtime.prune_orphan_threads(conversation_ids):
         logger.info("pruned %d orphan checkpoint threads", pruned)
     cleanup = asyncio.create_task(documents.cleanup_loop())
+    # 검색 기능 전에 올린 프로젝트 문서의 청크를 만든다 (임베딩이 있어 시간이 걸리므로 뒤에서).
+    backfill = asyncio.create_task(documents.index_missing_documents())
     yield
+    backfill.cancel()
     cleanup.cancel()
     await runtime.shutdown()
 

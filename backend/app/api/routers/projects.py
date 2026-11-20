@@ -7,7 +7,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Response, UploadFile
 
 from app.api.deps import ApprovedUser, SessionDep
 from app.api.schemas import (
@@ -209,3 +209,41 @@ async def delete_project_document(
         await service.delete_document(session, project, document_id)
     except ProjectError as exc:
         raise _http_error(exc) from exc
+
+
+@router.get("/{project_id}/images/{element_id}")
+async def get_project_image(
+    project_id: uuid.UUID, element_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> Response:
+    """프로젝트 문서 속 그림 원본을 돌려준다 (검색 결과 출처 카드의 미리보기).
+
+    그림은 저장 후 바뀌지 않으므로 브라우저가 오래 캐시하도록 한다.
+
+    Args:
+        project_id: 프로젝트 ID.
+        element_id: 그림 요소 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+
+    Returns:
+        그림 바이너리 응답.
+
+    Raises:
+        HTTPException: 프로젝트나 그림이 없거나 내 것이 아니면 404, 첨부 저장소를 쓸 수 없으면 503.
+    """
+    project = await _own(session, project_id, user)
+    storage = get_storage()
+    if storage is None:
+        raise HTTPException(status_code=503, detail="첨부 저장소를 쓸 수 없습니다.")
+    try:
+        data, mime_type = await service.read_element_image(session, storage, project, element_id)
+    except ProjectError as exc:
+        raise _http_error(exc) from exc
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
