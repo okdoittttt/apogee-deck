@@ -16,8 +16,8 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         settings: 앱 설정.
 
     Returns:
-        ``ChatAnthropic`` / ``ChatGoogleGenerativeAI`` / ``ChatOllama`` / 테스트용 ``EchoChatModel``
-        중 하나.
+        ``ChatAnthropic`` / ``ChatGoogleGenerativeAI`` / ``ChatOpenAI`` / ``ChatOllama`` /
+        테스트용 ``EchoChatModel`` 중 하나.
 
     Raises:
         ValueError: 알 수 없는 provider 일 때.
@@ -50,6 +50,27 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
             include_thoughts=settings.google_include_thoughts,
             timeout=settings.google_timeout_seconds,
             max_retries=settings.google_max_retries,
+            streaming=True,
+        )
+
+    if settings.llm_provider == "openai":
+        from langchain_openai import ChatOpenAI
+
+        reasoning: dict[str, str] | None = None
+        if settings.openai_reasoning_effort is not None:
+            reasoning = {"effort": settings.openai_reasoning_effort}
+            if settings.openai_reasoning_summary:
+                # 추론 요약을 받아 화면의 "생각 과정" 에 보여준다 (원문은 제공되지 않음).
+                reasoning["summary"] = "auto"
+        return ChatOpenAI(
+            model=settings.openai_model,
+            api_key=settings.openai_api_key or None,
+            # 추론 요약과 추론 이어가기는 Responses API 에서만 된다.
+            use_responses_api=True,
+            reasoning=reasoning,
+            max_tokens=settings.openai_max_output_tokens,
+            timeout=settings.openai_timeout_seconds,
+            max_retries=settings.openai_max_retries,
             streaming=True,
         )
 
@@ -88,7 +109,8 @@ def build_summary_model(settings: Settings) -> BaseChatModel:
 
     같은 provider 와 모델을 쓰되, Ollama 는 추론(thinking)을 끄고 출력 길이를 ``SUMMARY_MAX_TOKENS`` 로 정한다.
     추론 토큰이 시간과 출력 예산을 쓰지 않게 하기 위해서다. Google 은 추론 요약을 받지 않고
-    출력 길이를 ``GOOGLE_SUMMARY_MAX_TOKENS`` 로 정한다.
+    출력 길이를 ``GOOGLE_SUMMARY_MAX_TOKENS`` 로 정한다. OpenAI 는 추론 요약을 받지 않고
+    추론 강도를 낮춘다(추론을 쓰는 모델만).
 
     Args:
         settings: 앱 설정.
@@ -110,6 +132,11 @@ def build_summary_model(settings: Settings) -> BaseChatModel:
                 "google_max_output_tokens": GOOGLE_SUMMARY_MAX_TOKENS,
             }
         )
+    elif settings.llm_provider == "openai":
+        update: dict[str, object] = {"openai_reasoning_summary": False}
+        if settings.openai_reasoning_effort is not None:
+            update["openai_reasoning_effort"] = "low"
+        settings = settings.model_copy(update=update)
     return build_chat_model(settings)
 
 
@@ -125,6 +152,7 @@ def model_name(settings: Settings) -> str:
     return {
         "anthropic": settings.claude_model,
         "google": settings.google_model,
+        "openai": settings.openai_model,
         "ollama": settings.ollama_model,
     }.get(settings.llm_provider, settings.llm_provider)
 
@@ -178,7 +206,19 @@ def describe_error(error: BaseException) -> str | None:
         rate_limits += (anthropic.RateLimitError,)
     except ImportError:
         pass
+    try:
+        import openai
 
+        # langchain-openai 는 보통 langchain-core 공통 예외로 바꿔서 던지지만, 원래 예외도 알아본다.
+        timeouts += (openai.APITimeoutError,)
+        connections += (openai.APIConnectionError,)
+        auth += (openai.AuthenticationError, openai.PermissionDeniedError)
+        rate_limits += (openai.RateLimitError,)
+    except ImportError:
+        pass
+
+    if _is_openai_out_of_credit(error):
+        return "OpenAI 크레딧이 부족합니다. OpenAI 결제 화면에서 잔액을 확인해 주세요."
     if isinstance(error, GraphRecursionError):
         return "도구를 너무 여러 번 호출해서 응답을 중단했습니다. 질문을 나눠서 다시 시도해 주세요."
     if isinstance(error, rate_limits):
@@ -199,3 +239,20 @@ def describe_error(error: BaseException) -> str | None:
     if isinstance(error, ModelNotFoundError):
         return "설정한 LLM 모델을 찾을 수 없습니다. 모델 이름을 확인해 주세요."
     return None
+
+
+def _is_openai_out_of_credit(error: BaseException) -> bool:
+    """OpenAI 가 잔액 부족(429 ``insufficient_quota``)으로 거절했는지.
+
+    OpenAI 는 분당 한도 초과와 잔액 부족을 둘 다 429 로 돌려주므로 오류 코드로 구분한다.
+    잔액 부족은 기다려도 풀리지 않아서 다른 안내가 필요하다.
+    """
+    try:
+        import openai
+    except ImportError:
+        return False
+    if not isinstance(error, openai.RateLimitError):
+        return False
+    body = error.body if isinstance(error.body, dict) else {}
+    detail = body.get("error", body)
+    return isinstance(detail, dict) and detail.get("code") == "insufficient_quota"

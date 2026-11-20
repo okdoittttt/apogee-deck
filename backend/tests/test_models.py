@@ -32,7 +32,7 @@ def test_parse_model_id_keeps_colons_in_model_name():
     assert parse_model_id("google:gemma-4-31b-it") == ("google", "gemma-4-31b-it")
 
 
-@pytest.mark.parametrize("bad", ["", "gemma", "google:", "openai:gpt"])
+@pytest.mark.parametrize("bad", ["", "gemma", "google:", "mistral:large"])
 def test_parse_model_id_rejects_bad_ids(bad):
     with pytest.raises(UnknownModelError):
         parse_model_id(bad)

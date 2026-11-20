@@ -178,7 +178,8 @@ async def prune_orphan_threads(keep: set[str]) -> int:
 
 
 # provider 별 종료 사유를 공통 이름으로 맞춘다 (프론트엔드는 이 값만 본다).
-# Anthropic: stop_reason, Ollama: done_reason("stop"/"length"), Google: finish_reason("STOP"/"MAX_TOKENS").
+# Anthropic: stop_reason, Ollama: done_reason("stop"/"length"), Google: finish_reason("STOP"/"MAX_TOKENS"),
+# OpenAI Responses API: status("completed"/"incomplete") + incomplete_details.reason.
 _STOP_REASON_MAP = {
     "stop": "end_turn",
     "length": "max_tokens",
@@ -191,6 +192,14 @@ def _stop_reason(msg: AIMessage) -> str | None:
     """응답 메타데이터에서 종료 사유를 꺼내 공통 이름으로 바꾼다."""
     meta = msg.response_metadata or {}
     raw = meta.get("stop_reason") or meta.get("done_reason") or meta.get("finish_reason")
+    if raw is None and (status := meta.get("status")):
+        details = meta.get("incomplete_details") or {}
+        if status == "completed":
+            raw = "end_turn"
+        elif details.get("reason") == "max_output_tokens":
+            raw = "max_tokens"
+        else:
+            raw = details.get("reason") or status
     return _STOP_REASON_MAP.get(raw, raw)
 
 

@@ -5,7 +5,7 @@
 
 목록에는 지금 바로 쓸 수 있는 모델만 넣는다.
 
-- Anthropic / Google: API 키가 있으면 설정의 모델 목록
+- Anthropic / Google / OpenAI: API 키가 있으면 설정의 모델 목록
 - Ollama: 서버가 응답하면 설치된 모델 (꺼져 있으면 빠진다)
 - fake: 기본 provider 가 ``fake`` 일 때만 (테스트용)
 """
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_LABELS = {
     "anthropic": "Anthropic",
     "google": "Google",
+    "openai": "OpenAI",
     "ollama": "Ollama (로컬)",
     "fake": "테스트",
 }
@@ -37,6 +38,7 @@ MODEL_LABELS = {
 _MODEL_FIELDS = {
     "anthropic": "claude_model",
     "google": "google_model",
+    "openai": "openai_model",
     "ollama": "ollama_model",
 }
 """provider → 모델 이름을 담는 설정 필드."""
@@ -55,7 +57,7 @@ class ModelOption:
     """화면에 보여줄 모델 하나.
 
     Attributes:
-        provider: ``anthropic`` | ``google`` | ``ollama`` | ``fake``.
+        provider: ``anthropic`` | ``google`` | ``openai`` | ``ollama`` | ``fake``.
         model: provider 안에서의 모델 이름.
     """
 
@@ -168,9 +170,12 @@ async def available_models(settings: Settings) -> list[ModelOption]:
         settings: 앱 설정.
 
     Returns:
-        provider 순서(Google, Anthropic, Ollama, fake)로 정렬한 모델 목록.
+        provider 순서(OpenAI, Google, Anthropic, Ollama, fake)로 정렬한 모델 목록.
     """
     options: list[ModelOption] = []
+    if settings.openai_api_key:
+        names = _with_default(_split(settings.openai_models), settings.openai_model)
+        options += [ModelOption("openai", n) for n in names]
     if settings.google_api_key:
         names = _with_default(_split(settings.google_models), settings.google_model)
         options += [ModelOption("google", n) for n in names]

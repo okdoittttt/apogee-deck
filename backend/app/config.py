@@ -8,6 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 GOOGLE_HISTORY_TOKENS = 32000
 """Google provider 의 기본 대화 이력 예산. 넘으면 앞부분을 요약한다 (``CONTEXT_MAX_TOKENS`` 로 바꿀 수 있다)."""
 
+OPENAI_HISTORY_TOKENS = 32000
+"""OpenAI provider 의 기본 대화 이력 예산. 매 턴 보내는 입력이 곧 비용이라 제한한다."""
+
 
 class Settings(BaseSettings):
     """앱 설정. 각 필드는 같은 이름의 대문자 환경 변수(또는 ``.env``)에서 읽는다.
@@ -17,6 +20,7 @@ class Settings(BaseSettings):
     Attributes:
         llm_provider: 기본 LLM provider. ``anthropic`` | ``google`` | ``ollama`` | ``fake``
             (테스트용 echo 모델). 화면에서 모델을 고르지 않았을 때 쓴다 (``app.llm.catalog`` 참고).
+            ``openai`` 도 쓸 수 있다.
         app_timezone: 프롬프트에 넣는 "오늘 날짜" 의 기준 시간대.
         enable_tools: 에이전트 도구 사용 여부. tool calling 을 지원하지 않는 모델이면 끈다.
         enable_vision: 이미지 입력 허용 여부. 모델이 vision 을 지원해야 한다.
@@ -36,6 +40,17 @@ class Settings(BaseSettings):
         google_timeout_seconds: 요청 한 번의 타임아웃(초).
         google_max_retries: 요청 시도 횟수(첫 요청 포함). 무료 티어는 한도를 넘으면 429 를
             돌려주는데, 많이 재시도하면 응답이 오래 멈춰 있고 한도만 더 쓴다.
+        openai_api_key: OpenAI API 키.
+        openai_model: 기본 OpenAI 모델 ID.
+        openai_models: 화면에서 고를 수 있는 OpenAI 모델 (쉼표로 구분). ``openai_model`` 은 항상 포함된다.
+            요금이 비싼 모델이 실수로 쓰이지 않도록 목록을 직접 정한다.
+        openai_reasoning_effort: 추론 모델의 추론 강도. ``None`` 이면 추론 설정을 보내지 않는다
+            (추론을 지원하지 않는 모델용).
+        openai_reasoning_summary: 추론 요약을 받아 화면의 "생각 과정" 에 보여줄지 여부.
+            조직 인증이 안 된 계정은 OpenAI 가 거절할 수 있다.
+        openai_max_output_tokens: 출력(추론 포함) 최대 토큰.
+        openai_timeout_seconds: 요청 한 번의 타임아웃(초).
+        openai_max_retries: 실패한 요청을 다시 시도하는 횟수 (첫 요청 제외).
         ollama_base_url: Ollama 서버 주소. macOS 에서는 호스트에서 ``ollama serve`` 를 실행하고
             컨테이너는 ``host.docker.internal`` 로 접근한다.
         ollama_model: Ollama 모델 이름.
@@ -82,7 +97,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- LLM ---
-    llm_provider: Literal["anthropic", "google", "ollama", "fake"] = "anthropic"
+    llm_provider: Literal["anthropic", "google", "openai", "ollama", "fake"] = "anthropic"
     app_timezone: str = "Asia/Seoul"
     enable_tools: bool = True
     enable_vision: bool = True
@@ -104,6 +119,16 @@ class Settings(BaseSettings):
     google_temperature: float | None = None
     google_timeout_seconds: float = 120.0
     google_max_retries: int = 2
+
+    # OpenAI
+    openai_api_key: str = ""
+    openai_model: str = "gpt-6-luna"
+    openai_models: str = "gpt-6-luna,gpt-5-mini,gpt-6.1-terra"
+    openai_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = "low"
+    openai_reasoning_summary: bool = True
+    openai_max_output_tokens: int = 8192
+    openai_timeout_seconds: float = 120.0
+    openai_max_retries: int = 2
 
     # Ollama
     ollama_base_url: str = "http://host.docker.internal:11434"
@@ -156,7 +181,8 @@ class Settings(BaseSettings):
         """모델에 보낼 대화 이력의 토큰 예산.
 
         ``context_max_tokens`` 가 있으면 그 값을 쓴다. 없으면 Ollama 는
-        ``num_ctx - num_predict - 256``, Google 은 ``GOOGLE_HISTORY_TOKENS`` 이고,
+        ``num_ctx - num_predict - 256``, Google 은 ``GOOGLE_HISTORY_TOKENS``,
+        OpenAI 는 ``OPENAI_HISTORY_TOKENS`` 이고,
         Anthropic 은 trim 하지 않는다(``None``).
         Claude 는 컨텍스트가 크고, 이력을 자르면 프롬프트 캐시와 thinking 연속성이 깨진다.
         Google 은 컨텍스트는 크지만 무료 티어의 분당 토큰 한도가 있어서 매 턴 보내는 양을 제한한다.
@@ -167,6 +193,8 @@ class Settings(BaseSettings):
             return self.ollama_num_ctx - self.ollama_num_predict - 256
         if self.llm_provider == "google":
             return GOOGLE_HISTORY_TOKENS
+        if self.llm_provider == "openai":
+            return OPENAI_HISTORY_TOKENS
         return None
 
     @property

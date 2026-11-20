@@ -130,6 +130,8 @@ def reasoning_text(message: BaseMessage) -> str:
     - Anthropic, Google: content 안의 ``{"type": "thinking", "thinking": ...}`` 블록
     - Ollama 등: ``additional_kwargs["reasoning_content"]``
     - LangChain 표준 블록: ``{"type": "reasoning", "reasoning": ...}``
+    - OpenAI Responses API: ``{"type": "reasoning", "summary": [{"type": "summary_text", ...}]}``.
+      요약이 여러 문단이면 새 문단이 시작될 때(두 번째 문단부터) 빈 줄을 넣는다.
 
     Args:
         message: AI 메시지 또는 스트리밍 조각.
@@ -146,6 +148,13 @@ def reasoning_text(message: BaseMessage) -> str:
                 parts.append(block.get("thinking") or "")
             elif block.get("type") == "reasoning":
                 parts.append(block.get("reasoning") or "")
+                for item in block.get("summary") or []:
+                    if not isinstance(item, dict) or item.get("type") != "summary_text":
+                        continue
+                    text = item.get("text") or ""
+                    if not text and (item.get("index") or 0) > 0:
+                        text = "\n\n"  # 새 요약 문단 시작
+                    parts.append(text)
     if reasoning := message.additional_kwargs.get("reasoning_content"):
         parts.append(str(reasoning))
     return "".join(parts)

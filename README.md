@@ -7,7 +7,7 @@ LangGraph 기반 LLM 에이전트 웹앱. Docker Compose로 실행합니다.
    │
    └── POST /api/chat (SSE) ──▶ backend (FastAPI)
                                    │
-                                   ├─ LangGraph 에이전트 ──▶ LLM (Anthropic | Google | Ollama | fake)
+                                   ├─ LangGraph 에이전트 ──▶ LLM (Anthropic | OpenAI | Google | Ollama | fake)
                                    │      └─ checkpointer ──▶ postgres (에이전트 상태)
                                    ├─ messages 테이블 ─────▶ postgres (UI 표시용 대화 이력)
                                    └─ 트레이스 ────────────▶ Langfuse (셀프호스팅)
@@ -53,6 +53,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 
 | provider | 목록에 나오는 조건 | 모델 |
 |---|---|---|
+| `openai` | `OPENAI_API_KEY` 가 있을 때 | `OPENAI_MODELS` (기본 gpt-6-luna, gpt-5-mini, gpt-6.1-terra) |
 | `google` | `GOOGLE_API_KEY` 가 있을 때 | `GOOGLE_MODELS` (기본 Gemma 4 26B, 31B) |
 | `anthropic` | `ANTHROPIC_API_KEY` 가 있을 때 | `ANTHROPIC_MODELS` (기본 Opus, Sonnet, Haiku) |
 | `ollama` | Ollama 서버가 응답할 때 | 설치된 모델 전체 (`ollama list`). 꺼져 있으면 빠집니다 |
@@ -69,6 +70,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 | 값 | 설명 |
 |---|---|
 | `anthropic` | Claude (`ANTHROPIC_API_KEY` 필요) |
+| `openai` | OpenAI Responses API (`OPENAI_API_KEY` 필요). 추론 요약을 "생각 과정"에 보여줌 |
 | `google` | Gemini API (`GOOGLE_API_KEY` 필요). 기본 모델은 무료 티어로 쓸 수 있는 `gemma-4-26b-a4b-it` |
 | `ollama` | 로컬 모델. **macOS에서는 Ollama를 호스트에서 직접 실행**하세요(Docker 안에서는 Metal GPU를 못 씀) |
 | `fake` | LLM 없이 받은 메시지를 그대로 돌려줌. 파이프라인과 트레이싱 검증용 |
@@ -81,6 +83,13 @@ ollama show qwen3.5:9b     # capabilities(tools/thinking/vision), 최대 context
 ollama ps                  # 실제 로드된 context 크기, 메모리, runner 확인
 ```
 tool calling을 지원하지 않는 모델이면 `ENABLE_TOOLS=false`로 설정하세요.
+
+OpenAI:
+- 선불 크레딧에서 차감되므로, 드롭다운에는 `OPENAI_MODELS`에 적은 모델만 나옵니다(비싼 모델이 실수로 쓰이지 않게).
+- 추론 강도는 `OPENAI_REASONING_EFFORT`(기본 `low`). 추론 요약은 Responses API로 받아 화면의 "생각 과정"에 보여줍니다.
+  조직 인증이 안 된 계정이라 요약이 거절되면 `OPENAI_REASONING_SUMMARY=false`로 끕니다.
+- 크레딧이 떨어지면(429 `insufficient_quota`) 분당 한도 초과와 구분해서 "크레딧이 부족합니다"로 안내합니다.
+- 대화 이력 예산 기본값은 32,000 토큰입니다. 매 턴 보내는 입력이 곧 비용이라서, 넘으면 앞부분을 요약합니다.
 
 Google(Gemini API) 예시:
 ```bash
