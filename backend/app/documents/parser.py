@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from app.documents.formats import DocumentKind
-from app.documents.ocr_merge import merge_page
+from app.documents.ocr_merge import merge_page, ocr_only_lines
 
 OCR_LANGUAGE = "korean"
 """PaddleOCR 언어. 한국어 모델은 영문·숫자도 읽는다."""
@@ -35,6 +35,10 @@ FULL_PAGE_OCR_MIN_AREA = 50_000
 
 MIN_TEXT_LAYER_CHARS = 20
 """OCR 한 쪽에서 텍스트 레이어와 합칠 최소 글자 수(공백 제외). 이보다 적으면 스캔본으로 보고 OCR 결과만 쓴다."""
+
+MIN_LAYER_COVERAGE = 0.8
+"""합친 결과가 텍스트 레이어 글자의 이 비율보다 적게 담으면 OCR 이 본문을 못 읽은 것으로 본다.
+(시험: 정상 슬라이드 PDF 0.92 이상, 한국어 글꼴을 OCR 하지 못한 PDF 0.40~0.53)"""
 
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~<>])")
 """xberg 가 Markdown 출력에 넣는 이스케이프 (``4\\.`` → ``4.``). 표 칸 안의 ``\\|`` 는 표가 깨지므로 남긴다."""
@@ -221,13 +225,18 @@ def _combine_ocr(text_layer: str, ocr_text: str) -> str:
     """OCR 한 쪽의 본문을 정한다.
 
     텍스트 레이어가 충분하면 합치고, 아니면(스캔본) OCR 결과를 쓴다. OCR 이 아무것도 못 읽었으면
-    텍스트 레이어를 쓴다.
+    텍스트 레이어를 쓴다. 합친 결과가 텍스트 레이어를 너무 적게 담으면(OCR 이 본문 글자를 못 읽은 경우,
+    예: 글꼴을 그리지 못한 PDF) 텍스트 레이어를 그대로 쓰고 OCR 에만 있는 줄(그림 속 글자)을 뒤에 붙인다.
     """
     if not ocr_text.strip():
         return text_layer
-    if sum(not c.isspace() for c in text_layer) < MIN_TEXT_LAYER_CHARS:
+    layer_chars = sum(not c.isspace() for c in text_layer)
+    if layer_chars < MIN_TEXT_LAYER_CHARS:
         return ocr_text
-    merged, _ = merge_page(text_layer, ocr_text)
+    merged, stats = merge_page(text_layer, ocr_text)
+    if stats.matched_chars < layer_chars * MIN_LAYER_COVERAGE:
+        extra = ocr_only_lines(text_layer, ocr_text)
+        return "\n".join([text_layer.strip(), *extra]) if extra else text_layer
     return merged
 
 

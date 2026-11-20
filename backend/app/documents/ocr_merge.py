@@ -203,3 +203,24 @@ def merge_page(text_layer: str, ocr_text: str) -> tuple[str, MergeStats]:
             prev_raw_end = raw_end
         lines.append("".join(parts).strip())
     return "\n".join(lines), MergeStats(matched, total)
+
+
+def ocr_only_lines(text_layer: str, ocr_text: str) -> list[str]:
+    """텍스트 레이어에 없는 OCR 줄 (그림 속 글자 등).
+
+    공백을 빼고 모양만 다른 문자를 같은 문자로 본 뒤, 텍스트 레이어에 그대로 들어 있지 않은 줄만 고른다.
+
+    Args:
+        text_layer: 쪽의 텍스트 레이어.
+        ocr_text: 같은 쪽의 OCR 결과.
+
+    Returns:
+        OCR 에만 있는 줄 (OCR 순서).
+    """
+    layer = _SPACES.sub("", _canonical(text_layer))
+    lines = []
+    for line in ocr_text.splitlines():
+        key = _SPACES.sub("", _canonical(line))
+        if key and key not in layer:
+            lines.append(line.strip())
+    return lines

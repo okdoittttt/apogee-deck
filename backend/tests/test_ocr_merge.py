@@ -71,3 +71,24 @@ def test_combine_ocr_chooses_source():
     layer = "텍스트 레이어에 있는 충분히 긴 본문 문장입니다."
     assert _combine_ocr(layer, "   ") == layer  # OCR 이 못 읽었으면 텍스트 레이어
     assert _combine_ocr(layer, "텍스트레이어에 있는 충분히 긴본문 문장입니다.") == layer
+
+
+def test_combine_ocr_keeps_text_layer_when_ocr_missed_it():
+    # OCR 이 한국어 본문을 못 읽고 숫자와 그림 속 글자만 읽은 쪽 (글꼴을 그리지 못한 PDF)
+    layer = "2024년 사업 보고서\n올해 매출은 서울을 중심으로 늘었다.\n서울 110 120"
+    ocr = "2024\n110\n120\n지역별 매출 차트"
+    combined = _combine_ocr(layer, ocr)
+    assert combined.startswith(layer)
+    assert combined.endswith("지역별 매출 차트")  # 그림 속 글자는 뒤에 붙는다
+    assert combined.count("110") == 1  # 텍스트 레이어에 있는 줄은 다시 붙이지 않는다
+
+
+def test_combine_ocr_still_merges_when_ocr_covers_text_layer():
+    # 정상적인 쪽: OCR 이 본문을 읽었으면 지금처럼 OCR 줄 순서 + 텍스트 레이어 글자로 합친다
+    layer = "판단 인터페이스의 정형화\n식 (1) — T: 추론 온도"
+    ocr = "판단 인터페이스의정형화\nexp(zi/T)\n식(1)-T:추론 온도"
+    assert _combine_ocr(layer, ocr).splitlines() == [
+        "판단 인터페이스의 정형화",
+        "exp(zi/T)",
+        "식 (1) — T: 추론 온도",
+    ]
