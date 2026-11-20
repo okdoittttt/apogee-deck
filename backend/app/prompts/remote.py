@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from app.config import get_settings
+from app.core.config import get_settings
 from app.prompts.loader import compile_for_langfuse, list_prompts, load_template
 
 logger = logging.getLogger(__name__)

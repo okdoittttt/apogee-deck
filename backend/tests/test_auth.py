@@ -11,12 +11,13 @@ import pytest
 from fastapi import HTTPException
 
 from app import main
-from app.auth import deps, google
+from app.api import deps
+from app.api.routers import auth as auth_router
+from app.auth import google
 from app.auth.tokens import hash_token, new_token
 from app.auth.users import is_admin
-from app.config import Settings
+from app.core.config import Settings
 from app.main import app
-from app.routers import auth as auth_router
 
 SETTINGS = Settings(
     google_oauth_client_id="client-id",

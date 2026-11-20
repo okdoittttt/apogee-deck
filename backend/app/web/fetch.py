@@ -17,8 +17,8 @@ import anyio
 import httpx
 import trafilatura
 
-from app.agents.tooling import ToolError
-from app.config import Settings
+from app.core.config import Settings
+from app.core.errors import ToolError
 from app.web import safe_http, tavily
 from app.web.safe_http import BlockedAddressError, ResponseTooLargeError
 from app.web.text import age_label, external_note, untag

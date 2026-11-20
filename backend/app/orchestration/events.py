@@ -10,33 +10,10 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage
 
+from app.tools import ToolLabel
+
 MAX_TOOL_OUTPUT_CHARS = 2000
 """저장·표시할 도구 결과의 최대 길이. 넘치면 잘라서 표시한다."""
-
-
-@dataclass(frozen=True)
-class ToolLabel:
-    """도구 실행 상태를 화면에 보여줄 문구.
-
-    Attributes:
-        running: 실행 중 문구 (예: ``"시간을 확인하는 중"``).
-        done: 완료 문구 (예: ``"시간 확인함"``).
-    """
-
-    running: str
-    done: str
-
-
-def default_label(tool_name: str) -> ToolLabel:
-    """문구가 정의되지 않은 도구의 기본 문구.
-
-    Args:
-        tool_name: 도구 이름.
-
-    Returns:
-        ``"도구 실행 중: <이름>"`` / ``"도구 실행함: <이름>"``.
-    """
-    return ToolLabel(running=f"도구 실행 중: {tool_name}", done=f"도구 실행함: {tool_name}")
 
 
 # --- 이벤트 (runtime.stream_reply 가 순서대로 내보낸다) ---------------------------------------------
@@ -220,7 +197,7 @@ class StepRecorder:
     """응답 하나의 실행 단계(추론 과정, 도구 호출)를 일어난 순서대로 모은다.
 
     연속된 추론 조각은 하나의 추론 단계로 합친다. 저장 형식은 JSON 으로 바꿀 수 있는
-    딕셔너리 목록이며, ``app.schemas.ReasoningStep`` / ``ToolStep`` 과 같은 모양이다.
+    딕셔너리 목록이며, ``app.api.schemas.ReasoningStep`` / ``ToolStep`` 과 같은 모양이다.
 
     Attributes:
         steps: 실행 단계 목록.

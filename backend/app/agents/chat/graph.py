@@ -24,9 +24,13 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from app import prompts
-from app.agents import summary
-from app.agents.chat.tools import build_tools
-from app.agents.context import (
+from app.core.config import Settings
+from app.core.storage import get_storage
+from app.images import resolve_images
+from app.llm import build_chat_model, build_summary_model
+from app.llm.catalog import model_id
+from app.orchestration import summary
+from app.orchestration.context import (
     compact_old_tool_results,
     drop_foreign_reasoning,
     make_context_selector,
@@ -34,12 +38,8 @@ from app.agents.context import (
     tag_model,
     today,
 )
-from app.agents.tooling import handle_tool_error
-from app.config import Settings
-from app.images import resolve_images
-from app.llm import build_chat_model, build_summary_model
-from app.llm.catalog import model_id
-from app.storage import get_storage
+from app.orchestration.tooling import handle_tool_error
+from app.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,9 @@ SUMMARY_TIMEOUT_SECONDS = 120.0
 
 STREAM_NODES = frozenset({AGENT_NODE})
 """이 노드들이 생성하는 토큰만 사용자에게 스트리밍한다 (요약 노드의 토큰은 보여주지 않는다)."""
+
+TOOL_NAMES = ("get_current_time", "web_search", "fetch_url", "read_document")
+"""이 에이전트가 쓰는 도구 (``app.tools`` 레지스트리의 이름). 설정상 쓸 수 없는 도구는 빠진다."""
 
 
 class ChatState(MessagesState):
@@ -75,7 +78,7 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
     Returns:
         컴파일된 그래프. ``enable_tools`` 가 꺼져 있으면 ``agent → END`` 만 있다.
     """
-    tools = build_tools(settings) if settings.enable_tools else []
+    tools = build_tools(settings, TOOL_NAMES) if settings.enable_tools else []
     model = build_chat_model(settings)
     if tools:
         model = model.bind_tools(tools)

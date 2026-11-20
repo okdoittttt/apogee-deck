@@ -11,14 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from app.agents import runtime
-from app.config import get_settings
-from app.db import SessionLocal, run_migrations
+from app.agents import AGENTS, DEFAULT_AGENT
+from app.api.routers import admin, approvals, auth, chat
+from app.api.routers import documents as documents_router
+from app.core.config import get_settings
+from app.core.db import SessionLocal, run_migrations
+from app.core.storage import get_storage
 from app.documents import service as documents
 from app.models import Conversation
-from app.routers import admin, approvals, auth, chat
-from app.routers import documents as documents_router
-from app.storage import get_storage
+from app.orchestration import runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await prepare_storage()
     if interrupted := await documents.mark_interrupted():
         logger.info("marked %d interrupted document parses as failed", interrupted)
-    await runtime.startup()
+    await runtime.startup(AGENTS, DEFAULT_AGENT)
     async with SessionLocal() as session:
         conversation_ids = {str(i) for i in await session.scalars(select(Conversation.id))}
     if pruned := await runtime.prune_orphan_threads(conversation_ids):

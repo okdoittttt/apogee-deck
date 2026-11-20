@@ -1,5 +1,6 @@
-"""요청별 현재 사용자를 정하는 FastAPI 의존성.
+"""FastAPI 의존성: DB 세션과 요청별 현재 사용자.
 
+- ``SessionDep``: 요청 하나 동안 쓰는 DB 세션.
 - ``CurrentUser``: 로그인한 사용자 (상태는 따지지 않는다). 로그인하지 않았으면 401.
 - ``ApprovedUser``: 승인된 사용자. 승인 대기·거절·정지면 403 (``detail.code`` 로 상태를 알려준다).
 - ``AdminUser``: 관리자. 아니면 403.
@@ -10,12 +11,15 @@
 from typing import Annotated
 
 from fastapi import Cookie, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.sessions import SESSION_COOKIE, user_for_token
 from app.auth.users import get_or_create_local_user, is_admin
-from app.config import get_settings
-from app.db import SessionDep
+from app.core.config import get_settings
+from app.core.db import get_session
 from app.models import User
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 STATUS_MESSAGES = {
     "pending": "관리자의 승인을 기다리고 있습니다.",

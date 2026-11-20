@@ -15,7 +15,7 @@ from botocore.client import BaseClient
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from app.config import Settings, get_settings
+from app.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 

@@ -9,12 +9,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import images
-from app.agents import chat, runtime
+from app.agents import chat
 from app.agents.chat import graph as chat_graph
-from app.agents.runtime import TextDelta
-from app.config import Settings
+from app.core.config import Settings
+from app.core.storage import ObjectNotFoundError
 from app.models import MessageImage
-from app.storage import ObjectNotFoundError
+from app.orchestration import runtime
+from app.orchestration.runtime import TextDelta
 
 PNG = b"\x89PNG fake image bytes"
 
@@ -168,7 +169,8 @@ async def test_checkpoint_keeps_reference_and_model_gets_original(monkeypatch):
 
 
 async def test_get_image_reads_from_storage(monkeypatch):
-    from app.routers import chat as chat_router
+    from app.api.routers import chat as chat_router
+    from app.conversations import service as conversations
 
     storage = FakeStorage()
     row = SimpleNamespace(storage_key="images/abc", mime_type="image/png")
@@ -178,7 +180,7 @@ async def test_get_image_reads_from_storage(monkeypatch):
         async def scalar(self, stmt):
             return row
 
-    monkeypatch.setattr(chat_router, "get_storage", lambda: storage)
+    monkeypatch.setattr(conversations, "get_storage", lambda: storage)
     res = await chat_router.get_image(uuid.uuid4(), Session(), SimpleNamespace(id=uuid.uuid4()))
     assert res.body == PNG and res.media_type == "image/png"
 

@@ -3,9 +3,10 @@
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.runtime import Finished, TextDelta
-from app.config import Settings
+from app.agents import chat
+from app.core.config import Settings
+from app.orchestration import runtime
+from app.orchestration.runtime import Finished, TextDelta
 
 
 async def _run(conversation_id: str, text: str, images=None) -> tuple[str, Finished]:

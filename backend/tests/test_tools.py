@@ -5,13 +5,15 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
-from app.agents import chat, runtime
+from app.agents import chat
 from app.agents.chat import graph as chat_graph
-from app.agents.runtime import Finished, ToolFinished, ToolStarted
-from app.agents.tooling import INTERNAL_TOOL_ERROR, ToolError, handle_tool_error
-from app.config import Settings
+from app.core.config import Settings
+from app.core.errors import ToolError
 from app.llm import describe_error
 from app.llm.fake import FAKE_TOOL, EchoChatModel, _Plan
+from app.orchestration import runtime
+from app.orchestration.runtime import Finished, ToolFinished, ToolStarted
+from app.orchestration.tooling import INTERNAL_TOOL_ERROR, handle_tool_error
 
 
 def test_tool_error_message_is_passed_through():
@@ -27,7 +29,7 @@ def test_unexpected_tool_error_is_hidden_and_logged(caplog):
 
 
 def _use_tools(monkeypatch, tools):
-    monkeypatch.setattr(chat_graph, "build_tools", lambda settings: tools)
+    monkeypatch.setattr(chat_graph, "build_tools", lambda settings, names: tools)
     graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
     monkeypatch.setitem(runtime._graphs, "chat", graph)
     return graph

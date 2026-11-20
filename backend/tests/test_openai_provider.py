@@ -6,11 +6,11 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_openai import ChatOpenAI
 
-from app.agents.events import reasoning_text
-from app.agents.runtime import _stop_reason
-from app.config import OPENAI_HISTORY_TOKENS, Settings
+from app.core.config import OPENAI_HISTORY_TOKENS, Settings
 from app.llm import build_chat_model, build_summary_model, describe_error, model_name
 from app.llm.catalog import available_models
+from app.orchestration.events import reasoning_text
+from app.orchestration.runtime import _stop_reason
 
 SETTINGS = Settings(llm_provider="openai", openai_api_key="sk-test")
 

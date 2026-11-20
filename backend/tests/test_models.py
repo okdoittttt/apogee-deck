@@ -8,10 +8,10 @@ from fastapi import HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import runtime
-from app.agents.context import MODEL_TAG, drop_foreign_reasoning, tag_model
-from app.agents.events import Finished
-from app.config import Settings
+from app.api.routers import chat as chat_router
+from app.api.schemas import ChatRequest
+from app.conversations import service as conversations
+from app.core.config import Settings
 from app.llm import catalog
 from app.llm.catalog import (
     ModelOption,
@@ -22,8 +22,9 @@ from app.llm.catalog import (
     parse_model_id,
     settings_for,
 )
-from app.routers import chat as chat_router
-from app.schemas import ChatRequest
+from app.orchestration import runtime
+from app.orchestration.context import MODEL_TAG, drop_foreign_reasoning, tag_model
+from app.orchestration.events import Finished
 
 USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
 
@@ -119,7 +120,7 @@ async def test_models_endpoint(ollama, monkeypatch):
 
 async def test_chat_rejects_unavailable_model(ollama, monkeypatch):
     ollama([])
-    monkeypatch.setattr(chat_router, "get_settings", lambda: Settings(llm_provider="ollama"))
+    monkeypatch.setattr(conversations, "get_settings", lambda: Settings(llm_provider="ollama"))
     with pytest.raises(HTTPException) as exc:
         await chat_router.chat(ChatRequest(message="hi", model="ollama:qwen3.5:9b"), None, USER)
     assert exc.value.status_code == 400
@@ -130,7 +131,6 @@ async def test_chat_rejects_unavailable_model(ollama, monkeypatch):
 
 async def test_stream_reply_uses_selected_model(monkeypatch):
     monkeypatch.setattr(runtime, "_checkpointer", InMemorySaver())
-    monkeypatch.setattr(runtime, "_graphs", {})
     monkeypatch.setattr(runtime, "get_settings", lambda: Settings(llm_provider="anthropic"))
 
     events = [e async for e in runtime.stream_reply("m1", "안녕", model="fake:fake")]

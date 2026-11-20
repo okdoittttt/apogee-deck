@@ -15,14 +15,14 @@ from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
-from app.config import Settings, get_settings
-from app.db import SessionLocal
+from app.core.config import Settings, get_settings
+from app.core.db import SessionLocal
+from app.core.storage import DOCUMENTS_PREFIX, ObjectStorage, get_storage
 from app.documents.formats import DocumentKind, detect, safe_filename
 from app.documents.parser import ParseError
 from app.documents.reading import AttachedDocument, estimate_tokens, max_inline_chars
 from app.documents.worker import parse_in_subprocess
 from app.models import Document
-from app.storage import DOCUMENTS_PREFIX, ObjectStorage, get_storage
 
 logger = logging.getLogger(__name__)
 

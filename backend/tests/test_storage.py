@@ -6,9 +6,10 @@ import pytest
 from botocore.response import StreamingBody
 from botocore.stub import ANY, Stubber
 
-from app import main, storage
-from app.config import Settings
-from app.storage import LIFECYCLE_RULE_ID, ObjectNotFoundError, ObjectStorage, make_client
+from app import main
+from app.core import storage
+from app.core.config import Settings
+from app.core.storage import LIFECYCLE_RULE_ID, ObjectNotFoundError, ObjectStorage, make_client
 
 SETTINGS = Settings(
     s3_endpoint_url="http://minio:9000",

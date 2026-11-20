@@ -7,11 +7,12 @@ import httpx
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.chat.tools import build_tools
-from app.agents.runtime import Finished, ToolFinished
-from app.config import Settings
+from app.agents import chat
+from app.core.config import Settings
 from app.llm.fake import EchoChatModel, _Plan
+from app.orchestration import runtime
+from app.orchestration.runtime import Finished, ToolFinished
+from app.tools import build_tools
 from app.web import fetch
 from app.web.fetch import FetchError, Page
 
@@ -216,9 +217,9 @@ def test_artifact_contains_the_page_as_source():
 
 
 def test_fetch_url_tool_works_without_tavily_key():
-    assert "fetch_url" in [t.name for t in build_tools(NO_KEY)]
+    assert "fetch_url" in [t.name for t in build_tools(NO_KEY, chat.TOOL_NAMES)]
     disabled = NO_KEY.model_copy(update={"enable_fetch_url": False})
-    assert "fetch_url" not in [t.name for t in build_tools(disabled)]
+    assert "fetch_url" not in [t.name for t in build_tools(disabled, chat.TOOL_NAMES)]
 
 
 async def test_fetch_url_result_reaches_model_and_screen(monkeypatch):

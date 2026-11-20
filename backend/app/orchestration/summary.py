@@ -17,7 +17,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from app import prompts
-from app.agents.context import TokenCounter
+from app.orchestration.context import TokenCounter
 
 logger = logging.getLogger(__name__)
 

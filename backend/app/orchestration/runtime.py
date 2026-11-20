@@ -1,7 +1,7 @@
-"""에이전트 레지스트리, checkpointer 생명주기, 스트리밍 실행.
+"""에이전트 실행 엔진: 에이전트 등록, checkpointer 생명주기, 스트리밍 실행.
 
-라우터는 이 모듈의 ``stream_reply`` 만 사용한다. 새 에이전트는 ``app/agents/<이름>/`` 에
-``build_graph`` / ``STREAM_NODES`` 를 만들고 아래 ``AGENTS`` 에 등록하면 된다.
+어떤 에이전트가 있는지는 모른다. 앱이 시작할 때 ``startup`` 에 에이전트 목록(``app.agents.AGENTS``)을
+넘겨 등록한다. 대화 서비스는 이 모듈의 ``stream_reply`` 로 에이전트를 실행한다.
 """
 
 import logging
@@ -16,28 +16,27 @@ from langgraph.graph.state import CompiledStateGraph
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from app import prompts, tracing
-from app.agents import chat
-from app.agents.events import (
+from app import prompts
+from app.core import tracing
+from app.core.config import Settings, get_settings
+from app.llm.catalog import model_id, settings_for
+from app.orchestration.events import (
     AgentEvent,
     Finished,
     ReasoningDelta,
     TextDelta,
     ToolFinished,
-    ToolLabel,
     ToolStarted,
-    default_label,
     reasoning_text,
     tool_output_text,
     tool_sources,
 )
-from app.agents.tooling import RECURSION_LIMIT
-from app.config import Settings, get_settings
-from app.llm.catalog import model_id, settings_for
+from app.orchestration.tooling import RECURSION_LIMIT
+from app.tools import ToolLabel, default_label
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AGENTS", "AgentEvent", "AgentSpec", "Finished", "TextDelta", "stream_reply"]
+__all__ = ["AgentEvent", "AgentSpec", "Finished", "TextDelta", "register", "stream_reply"]
 
 
 @dataclass(frozen=True)
@@ -55,29 +54,52 @@ class AgentSpec:
     tool_labels: Mapping[str, ToolLabel] = field(default_factory=dict)
 
 
-AGENTS: dict[str, AgentSpec] = {
-    "chat": AgentSpec(chat.build_graph, chat.STREAM_NODES, chat.TOOL_LABELS),
-}
-DEFAULT_AGENT = "chat"
-
+_agents: dict[str, AgentSpec] = {}
+"""등록된 에이전트 (``register``)."""
+_default_agent: str | None = None
 _pool: AsyncConnectionPool | None = None
 _checkpointer: BaseCheckpointSaver | None = None
 _graphs: dict[str, CompiledStateGraph] = {}
 """그래프 캐시. 기본 모델은 에이전트 이름, 다른 모델은 ``"<에이전트>@<모델 ID>"`` 가 키다."""
 
 
-async def startup() -> None:
-    """프롬프트를 검증하고, checkpointer 를 연결하고, 등록된 에이전트의 기본 모델 그래프를 만든다.
+def register(agents: Mapping[str, AgentSpec], default: str) -> None:
+    """실행할 수 있는 에이전트를 등록한다. 이미 만든 그래프 캐시는 비운다.
+
+    Args:
+        agents: 에이전트 이름 → 정의.
+        default: 에이전트를 지정하지 않은 실행에 쓸 에이전트 이름.
+
+    Raises:
+        ValueError: ``default`` 가 ``agents`` 에 없을 때.
+    """
+    global _default_agent
+    if default not in agents:
+        raise ValueError(f"default agent is not registered: {default}")
+    _agents.clear()
+    _agents.update(agents)
+    _default_agent = default
+    _graphs.clear()
+
+
+async def startup(agents: Mapping[str, AgentSpec], default: str) -> None:
+    """에이전트를 등록하고, 프롬프트를 검증하고, checkpointer 를 연결하고, 기본 모델 그래프를 만든다.
 
     다른 모델의 그래프는 처음 요청될 때 만든다 (``get_graph``).
 
     잘못된 프롬프트(빠진 include, 변수 불일치)는 첫 요청이 아니라 이 시점에 실패시킨다.
     ``prompt_sync_on_startup`` 이 켜져 있으면 git → Langfuse 프롬프트 동기화를 백그라운드로 시작한다.
 
+    Args:
+        agents: 등록할 에이전트 이름 → 정의.
+        default: 에이전트를 지정하지 않은 실행에 쓸 에이전트 이름.
+
     Raises:
         PromptError: 프롬프트 검증에 실패했을 때.
+        ValueError: ``default`` 가 ``agents`` 에 없을 때.
     """
     global _pool, _checkpointer
+    register(agents, default)
     settings = get_settings()
     logger.info("prompts ok: %s", prompts.validate_all())
     if settings.prompt_sync_on_startup and settings.tracing_enabled:
@@ -97,7 +119,7 @@ async def startup() -> None:
     _checkpointer = AsyncPostgresSaver(_pool)
     # checkpoint 테이블은 LangGraph 가 자체 마이그레이션으로 관리한다 (Alembic 관리 대상 아님).
     await _checkpointer.setup()
-    for name, spec in AGENTS.items():
+    for name, spec in _agents.items():
         _graphs[name] = spec.build_graph(settings, _checkpointer)
 
 
@@ -108,7 +130,7 @@ def get_graph(agent: str, model: str | None = None) -> tuple[CompiledStateGraph,
     대화 상태는 같은 checkpointer 에 있으므로 대화 도중에 모델을 바꿔도 이력이 이어진다.
 
     Args:
-        agent: 에이전트 이름 (``AGENTS`` 의 키).
+        agent: 등록된 에이전트 이름.
         model: 모델 ID. ``None`` 이면 설정의 기본 모델.
 
     Returns:
@@ -124,7 +146,7 @@ def get_graph(agent: str, model: str | None = None) -> tuple[CompiledStateGraph,
     key = agent if model == default else f"{agent}@{model}"
     if graph := _graphs.get(key):
         return graph, model
-    spec = AGENTS.get(agent)
+    spec = _agents.get(agent)
     if spec is None or _checkpointer is None:
         raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
     graph = spec.build_graph(settings_for(settings, model), _checkpointer)
@@ -230,7 +252,7 @@ async def stream_reply(
     conversation_id: str,
     user_text: str,
     images: list[dict[str, Any]] | None = None,
-    agent: str = DEFAULT_AGENT,
+    agent: str | None = None,
     model: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """에이전트를 실행하고 응답과 실행 단계를 스트리밍한다.
@@ -248,7 +270,7 @@ async def stream_reply(
         conversation_id: 대화 ID (= checkpointer ``thread_id``, Langfuse session ID).
         user_text: 사용자 메시지 텍스트.
         images: 이미지 참조 블록 (``app.images.image_ref_block``).
-        agent: 실행할 에이전트 이름 (``AGENTS`` 의 키).
+        agent: 실행할 에이전트 이름. ``None`` 이면 등록할 때 정한 기본 에이전트.
         model: 모델 ID (``app.llm.catalog``). ``None`` 이면 설정의 기본 모델.
 
     Yields:
@@ -259,8 +281,11 @@ async def stream_reply(
         RuntimeError: 런타임이 시작되지 않았거나 알 수 없는 에이전트일 때.
         UnknownModelError: 모델 ID 형식이 잘못됐을 때.
     """
+    agent = agent or _default_agent
+    if agent is None:
+        raise RuntimeError("no agent registered")
     graph, used_model = get_graph(agent, model)
-    spec = AGENTS[agent]
+    spec = _agents[agent]
     config = {
         "configurable": {"thread_id": conversation_id},
         "callbacks": tracing.get_callbacks(),

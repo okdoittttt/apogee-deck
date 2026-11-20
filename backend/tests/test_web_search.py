@@ -7,13 +7,14 @@ import httpx
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.chat.tools import build_tools
-from app.agents.events import tool_sources
-from app.agents.runtime import Finished, ToolFinished, ToolStarted
-from app.agents.tooling import handle_tool_error
-from app.config import Settings
+from app.agents import chat
+from app.core.config import Settings
 from app.llm.fake import EchoChatModel, _Plan
+from app.orchestration import runtime
+from app.orchestration.events import tool_sources
+from app.orchestration.runtime import Finished, ToolFinished, ToolStarted
+from app.orchestration.tooling import handle_tool_error
+from app.tools import build_tools
 from app.web import search
 from app.web.search import MAX_CONTENT_CHARS, SearchRequest, SearchResult, WebSearchError
 
@@ -237,8 +238,8 @@ async def test_timeout_becomes_model_readable_message():
 
 
 def test_web_search_tool_requires_api_key():
-    assert "web_search" not in [t.name for t in build_tools(Settings())]
-    assert "web_search" in [t.name for t in build_tools(SETTINGS)]
+    assert "web_search" not in [t.name for t in build_tools(Settings(), chat.TOOL_NAMES)]
+    assert "web_search" in [t.name for t in build_tools(SETTINGS, chat.TOOL_NAMES)]
 
 
 def _graph_calling_web_search(monkeypatch, fake_search):

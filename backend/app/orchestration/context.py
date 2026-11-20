@@ -16,7 +16,8 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 
-from app.config import Settings
+from app.core.config import Settings
+from app.llm.tokens import ASCII_CHARS_PER_TOKEN, NON_ASCII_CHARS_PER_TOKEN
 
 TokenCounter = Callable[[Iterable[BaseMessage]], int]
 """메시지 목록 → 추정 토큰 수."""
@@ -63,12 +64,6 @@ def close_dangling_tool_calls(messages: list[BaseMessage]) -> list[BaseMessage]:
                 if call["id"] not in answered
             )
     return result
-
-
-# ASCII 가 아닌 글자(한글 등)는 ASCII 보다 토큰을 훨씬 많이 쓴다. qwen3.5 로 실측하면
-# 한국어 문장은 글자당 약 0.61 토큰이었다(ASCII 는 글자당 약 0.25). 넘치지 않도록 조금 크게 잡는다.
-NON_ASCII_CHARS_PER_TOKEN = 1.5
-ASCII_CHARS_PER_TOKEN = 4.0
 
 
 def _text_of(message: BaseMessage) -> str:

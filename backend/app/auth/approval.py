@@ -17,7 +17,7 @@ from app.auth.mail import APP_NAME, send_mail
 from app.auth.sessions import delete_user_sessions
 from app.auth.tokens import hash_token, new_token
 from app.auth.users import is_admin
-from app.config import Settings
+from app.core.config import Settings
 from app.models import ApprovalToken, User
 
 logger = logging.getLogger(__name__)

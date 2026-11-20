@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
+from app.core.config import Settings
 from app.models import Conversation, Document, User
 
 logger = logging.getLogger(__name__)

@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.routers import approvals as approvals_router
 from app.auth import approval, mail
 from app.auth.tokens import hash_token
-from app.config import Settings
+from app.core.config import Settings
 from app.main import _RedactApprovalTokens
 from app.models import ApprovalToken
-from app.routers import approvals as approvals_router
 
 SETTINGS = Settings(
     admin_emails="owner@gmail.com",

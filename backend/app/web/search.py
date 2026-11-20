@@ -14,8 +14,8 @@ from typing import Any, Literal
 
 import httpx
 
-from app.agents.tooling import ToolError
-from app.config import Settings
+from app.core.config import Settings
+from app.core.errors import ToolError
 from app.web import tavily
 from app.web.text import age_label, external_note, truncate, untag
 

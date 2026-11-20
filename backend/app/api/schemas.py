@@ -8,6 +8,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.auth.users import is_admin
+from app.core.config import Settings
+from app.models import Document, User
+
 MAX_IMAGES_PER_MESSAGE = 4
 MAX_DOCUMENTS_PER_MESSAGE_LIMIT = 20
 """요청 형식 검사용 상한. 실제 개수 제한은 설정(``MAX_DOCUMENTS_PER_MESSAGE``)으로 검사한다."""
@@ -258,3 +262,74 @@ class DocumentOut(BaseModel):
 
 MessageOut.model_rebuild()
 ConversationDetail.model_rebuild()
+
+
+class UserOut(BaseModel):
+    """화면에 보여줄 사용자 정보.
+
+    Attributes:
+        id: 사용자 ID.
+        email: 이메일.
+        name: 표시 이름.
+        picture: 프로필 사진 주소.
+        status: ``pending`` | ``approved`` | ``rejected`` | ``suspended``.
+        is_admin: 관리자인지.
+        request_reason: 가입 신청 사유 (적었으면).
+    """
+
+    id: str
+    email: str
+    name: str
+    picture: str | None
+    status: str
+    is_admin: bool
+    request_reason: str | None = None
+
+
+# --- DB 행 → 응답 ---------------------------------------------------------------------------------
+
+
+def user_out(user: User, settings: Settings) -> UserOut:
+    """사용자를 응답 형식으로 바꾼다.
+
+    Args:
+        user: 사용자.
+        settings: 앱 설정.
+
+    Returns:
+        화면용 사용자 정보.
+    """
+    return UserOut(
+        id=str(user.id),
+        email=user.email,
+        name=user.name,
+        picture=user.picture,
+        status=user.status,
+        is_admin=is_admin(user, settings),
+        request_reason=user.request_reason,
+    )
+
+
+def document_out(doc: Document, char_count: int | None) -> DocumentOut:
+    """DB 의 문서를 응답 형식으로 바꾼다 (본문 제외).
+
+    Args:
+        doc: 문서.
+        char_count: 본문 글자 수.
+
+    Returns:
+        응답용 문서 정보.
+    """
+    return DocumentOut(
+        id=doc.id,
+        filename=doc.filename,
+        kind=doc.kind,
+        mime_type=doc.mime_type,
+        size_bytes=doc.size_bytes,
+        status=doc.status,
+        error=doc.error,
+        page_count=doc.page_count,
+        char_count=char_count,
+        created_at=doc.created_at,
+        parsed_at=doc.parsed_at,
+    )

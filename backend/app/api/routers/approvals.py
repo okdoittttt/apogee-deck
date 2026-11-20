@@ -13,9 +13,9 @@ from html import escape
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app.api.deps import SessionDep
 from app.auth.approval import ApprovalError, decide_by_token, resolve_token
-from app.config import get_settings
-from app.db import SessionDep
+from app.core.config import get_settings
 
 router = APIRouter(prefix="/api/auth/approvals")
 

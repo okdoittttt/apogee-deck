@@ -6,12 +6,11 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
+from app.api.deps import AdminUser, SessionDep
+from app.api.schemas import UserOut, user_out
 from app.auth.approval import ApprovalError, Decision, decide
-from app.auth.deps import AdminUser
-from app.config import get_settings
-from app.db import SessionDep
+from app.core.config import get_settings
 from app.models import User
-from app.routers.auth import UserOut, user_out
 
 router = APIRouter(prefix="/api/admin")
 

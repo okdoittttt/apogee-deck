@@ -6,7 +6,7 @@ LangChain chat model 만 사용한다.
 
 from langchain_core.language_models import BaseChatModel
 
-from app.config import Settings
+from app.core.config import Settings
 
 
 def build_chat_model(settings: Settings) -> BaseChatModel:

@@ -14,10 +14,8 @@ from langchain_core.messages import AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.events import Finished, ReasoningDelta, TextDelta, ToolFinished, ToolStarted
-from app.agents.runtime import _stop_reason
-from app.config import GOOGLE_HISTORY_TOKENS, Settings
+from app.agents import chat
+from app.core.config import GOOGLE_HISTORY_TOKENS, Settings
 from app.llm import (
     GOOGLE_SUMMARY_MAX_TOKENS,
     build_chat_model,
@@ -25,6 +23,9 @@ from app.llm import (
     describe_error,
     model_name,
 )
+from app.orchestration import runtime
+from app.orchestration.events import Finished, ReasoningDelta, TextDelta, ToolFinished, ToolStarted
+from app.orchestration.runtime import _stop_reason
 
 SETTINGS = Settings(llm_provider="google", google_api_key="test-key", enable_fetch_url=False)
 

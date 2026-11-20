@@ -4,6 +4,8 @@ import logging
 
 from langgraph.prebuilt.tool_node import ToolInvocationError
 
+from app.core.errors import ToolError
+
 logger = logging.getLogger(__name__)
 
 RECURSION_LIMIT = 16
@@ -14,14 +16,6 @@ INTERNAL_TOOL_ERROR = (
     "The tool failed because of an internal error. Do not retry it; answer without it."
 )
 """예상하지 못한 도구 예외 대신 모델에게 주는 결과. 모델이 읽는 내용이라 영어로 쓴다."""
-
-
-class ToolError(Exception):
-    """모델에게 그대로 보여줘도 되는 도구 오류.
-
-    메시지는 모델이 읽고 다음 행동(검색어 바꾸기, 도구 없이 답하기 등)을 정할 수 있도록
-    짧은 영어로 쓴다. 내부 주소, 키, 예외 원문 같은 자세한 내용은 넣지 않고 로그에만 남긴다.
-    """
 
 
 def handle_tool_error(error: Exception) -> str:

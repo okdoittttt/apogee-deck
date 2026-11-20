@@ -13,7 +13,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, fun
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db import Base
+from app.core.db import Base
 
 
 class User(Base):
@@ -135,7 +135,7 @@ class Message(Base):
         role: ``"user"`` 또는 ``"assistant"``.
         content: 메시지 텍스트. assistant 는 화면에 스트리밍된 텍스트 그대로 저장한다.
         steps: assistant 응답의 실행 단계(추론 과정, 도구 호출)를 일어난 순서대로 담은 JSON.
-            형식은 ``app.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
+            형식은 ``app.api.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
             없는 응답은 ``None``.
         model: 응답한 모델 ID (``"<provider>:<모델 이름>"``). 사용자 메시지는 ``None``.
         created_at: 생성 시각.

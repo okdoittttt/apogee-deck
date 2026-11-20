@@ -13,7 +13,7 @@ from email.utils import formataddr
 
 import anyio
 
-from app.config import Settings
+from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
 

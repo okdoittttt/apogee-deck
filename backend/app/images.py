@@ -16,8 +16,8 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
+from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.models import MessageImage
-from app.storage import ObjectNotFoundError, ObjectStorage
 
 logger = logging.getLogger(__name__)
 

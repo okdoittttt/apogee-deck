@@ -7,8 +7,14 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.events import (
+from app.agents import chat
+from app.api.routers import chat as chat_router
+from app.api.schemas import MessageOut
+from app.conversations import runs, turns
+from app.conversations.runs import InMemoryRunRegistry
+from app.core.config import Settings
+from app.orchestration import runtime
+from app.orchestration.events import (
     MAX_TOOL_OUTPUT_CHARS,
     Finished,
     ReasoningDelta,
@@ -20,10 +26,6 @@ from app.agents.events import (
     reasoning_text,
     tool_output_text,
 )
-from app.config import Settings
-from app.routers import chat as chat_router
-from app.runs import InMemoryRunRegistry
-from app.schemas import MessageOut
 
 # --- 추론 텍스트 꺼내기 (provider 별 형식) ------------------------------------------------------
 
@@ -134,8 +136,8 @@ def capture(monkeypatch):
     async def fake_save(conversation_id, content, steps=None, model=None):
         saved.append((content, steps))
 
-    monkeypatch.setattr(chat_router, "save_assistant_message", fake_save)
-    monkeypatch.setattr(chat_router, "run_registry", InMemoryRunRegistry(60))
+    monkeypatch.setattr(turns, "save_assistant_message", fake_save)
+    monkeypatch.setattr(runs, "run_registry", InMemoryRunRegistry(60))
     return saved
 
 
@@ -146,7 +148,7 @@ def _patch_stream(monkeypatch, steps):
                 raise RuntimeError("model crashed")
             yield step
 
-    monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
+    monkeypatch.setattr(turns, "stream_reply", fake_stream_reply)
 
 
 def _events(raw):
@@ -167,7 +169,9 @@ async def test_sse_events_and_saved_steps(monkeypatch, capture):
             Finished("10시입니다", "end_turn", "fake"),
         ],
     )
-    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
     assert [e for e, _ in events] == [
         "meta",
         "reasoning",
@@ -190,10 +194,10 @@ async def test_sse_events_and_saved_steps(monkeypatch, capture):
 
 async def test_error_during_tool_saves_steps_with_error(monkeypatch, capture):
     _patch_stream(monkeypatch, [ToolStarted("c1", "t", {}, LABEL), "boom"])
-    [e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])]
+    [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
     content, steps = capture[0]
     # 답변 텍스트가 없어도 실행 단계가 있으면 저장한다
-    assert content == chat_router.ERROR_SUFFIX.strip()
+    assert content == turns.ERROR_SUFFIX.strip()
     assert steps[0]["status"] == "error"
 
 
@@ -208,7 +212,9 @@ async def test_tool_sources_are_sent_and_saved(monkeypatch, capture):
             Finished("답", "end_turn", "fake"),
         ],
     )
-    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
     tool_end = next(data for name, data in events if name == "tool_end")
     assert tool_end["sources"] == sources
     _, steps = capture[0]

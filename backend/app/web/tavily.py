@@ -5,8 +5,8 @@ from typing import Any
 
 import httpx
 
-from app.agents.tooling import ToolError
-from app.config import Settings
+from app.core.config import Settings
+from app.core.errors import ToolError
 
 logger = logging.getLogger(__name__)
 

@@ -64,7 +64,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 - `.env`의 `LLM_PROVIDER`와 `*_MODEL`은 **처음 선택될 기본 모델**입니다. 그 모델을 쓸 수 없으면 목록의 첫 모델이 선택됩니다.
 - 모델 ID는 `"<provider>:<모델 이름>"` 형식입니다(예: `google:gemma-4-26b-a4b-it`, `ollama:qwen3.5:9b`).
 - 모델마다 provider와 컨텍스트 예산이 달라서 그래프를 모델별로 만들어 캐시합니다(`runtime.get_graph`). 대화 상태는 같은 checkpointer에 있습니다.
-- 대화 도중 모델을 바꾸면 이전 답변의 추론 블록은 새 모델에 보내지 않습니다(`agents/context.py`의 `drop_foreign_reasoning`).
+- 대화 도중 모델을 바꾸면 이전 답변의 추론 블록은 새 모델에 보내지 않습니다(`orchestration/context.py`의 `drop_foreign_reasoning`).
   추론 블록에는 만든 provider의 서명이 붙어 있어서, 다른 provider에 보내면 요청이 거절될 수 있기 때문입니다. 답변 텍스트와 도구 호출은 그대로 보냅니다.
 
 ### provider
@@ -127,13 +127,13 @@ make backend
 
 Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라냅니다**. 그래서 `agent` 노드가 호출 전에
 `trim_messages`로 최근 대화만 예산 안에 맞춥니다. 토큰 수는 글자 수로 추정하는데, 한국어는 영어보다 글자당 토큰이 2배 이상 많아서
-한글 등 ASCII가 아닌 글자는 1.5자당 1토큰으로 따로 셉니다(`agents/context.py`의 `make_token_counter`). checkpointer에 저장된 원본 이력은 그대로 남고,
+한글 등 ASCII가 아닌 글자는 1.5자당 1토큰으로 따로 셉니다(`orchestration/context.py`의 `make_token_counter`). checkpointer에 저장된 원본 이력은 그대로 남고,
 모델에 실제로 들어간 입력은 Langfuse에서 확인할 수 있습니다. (Anthropic은 컨텍스트가 크고 이력을
 자르면 캐시가 깨지므로 기본적으로 자르지 않습니다.)
 
 #### 지난 도구 결과 줄이기
 도구 결과(웹 검색 한 번에 수천 토큰)는 상태에 남아 이후 모든 턴에 다시 입력됩니다. 그래서 모델에 보낼 때
-**마지막 사용자 메시지보다 앞에 있는 도구 결과는 줄여서** 보냅니다(`agents/context.py`의 `compact_old_tool_results`).
+**마지막 사용자 메시지보다 앞에 있는 도구 결과는 줄여서** 보냅니다(`orchestration/context.py`의 `compact_old_tool_results`).
 이번 턴의 결과와 저장된 원본은 그대로입니다.
 
 - 출처가 있는 결과(웹 검색): 호출 인자와 `[번호] 제목 - URL (발행일)` 목록만 남깁니다. 자세한 내용이 다시 필요하면 모델이 다시 검색합니다.
@@ -152,36 +152,49 @@ Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라�
 - `agent` 노드는 요약을 system 프롬프트 끝에 붙이고(`chat/conversation_summary`), 요약 이후의 메시지만 보냅니다.
 - 요약은 같은 모델로 하되 추론을 끄고 출력은 1024 토큰으로 제한합니다(`chat/summary`). 요약 토큰은 화면에 나가지 않습니다.
 - 요약이 실패하거나 120초를 넘기면 경고 로그만 남기고 기존 방식(잘라내기)으로 답합니다.
-- 비율 같은 값은 `agents/summary.py`의 상수입니다. 요약이 일어나는 것을 직접 보려면 `CONTEXT_MAX_TOKENS=2000`처럼 작게 잡으세요.
+- 비율 같은 값은 `orchestration/summary.py`의 상수입니다. 요약이 일어나는 것을 직접 보려면 `CONTEXT_MAX_TOKENS=2000`처럼 작게 잡으세요.
 
 ## 구조
 
 ```
 backend/
 ├── app/
-│   ├── main.py              # 앱, CORS, lifespan (DB 초기화 + 에이전트 런타임 시작/종료)
-│   ├── config.py            # 환경 변수 기반 설정
-│   ├── db.py / models.py    # SQLAlchemy (UI용 conversations, messages, message_images)
-│   ├── schemas.py
-│   ├── tracing.py           # Langfuse CallbackHandler
-│   ├── storage.py           # 첨부 파일 저장소 (S3 API, 앱 전용 MinIO)
-│   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제), 요청별 현재 사용자
-│   ├── routers/auth.py      # /api/auth (Google 로그인·콜백, 로그아웃, 내 정보)
+│   ├── main.py              # 앱, CORS, lifespan (DB 초기화 + 에이전트 등록·런타임 시작/종료)
+│   ├── api/                 # HTTP 계층: 인증, 입력 검증, 응답 형식, SSE 변환만
+│   │   ├── deps.py          # DB 세션, 요청별 현재 사용자 (FastAPI 의존성)
+│   │   ├── schemas.py       # 요청/응답 스키마
+│   │   └── routers/         # auth, approvals, admin, documents, chat(/api/chat SSE, 대화, 이미지)
+│   ├── conversations/       # 대화 도메인
+│   │   ├── service.py       # 대화 조회·삭제, 새 턴 준비(검증 + 사용자 메시지 저장)
+│   │   ├── turns.py         # 한 턴의 응답 실행: 이벤트 내보내기 + 답변 저장
+│   │   └── runs.py          # 대화별 "생성 중" 상태
+│   ├── agents/              # 에이전트 정의와 등록 목록(AGENTS)
+│   │   └── chat/            # 기본 채팅 에이전트
+│   │       ├── graph.py     # LangGraph: agent ⇄ tools, 쓸 도구 이름(TOOL_NAMES)
+│   │       └── prompts/     # system.md, summary.md ...
+│   ├── orchestration/       # 에이전트 실행 엔진 (어떤 에이전트가 있는지 모름)
+│   │   ├── runtime.py       # 에이전트 등록, checkpointer, 스트리밍 실행
+│   │   ├── events.py        # 화면으로 보내는 이벤트, 실행 단계 기록
+│   │   ├── context.py       # 대화 이력 trim, 프롬프트 동적 변수(오늘 날짜)
+│   │   ├── summary.py       # 오래된 대화 요약
+│   │   └── tooling.py       # 도구 오류 처리, 반복 제한
+│   ├── tools/               # 공용 도구 (registry.py 에 등록, 에이전트가 이름으로 골라 씀)
 │   ├── documents/           # 첨부 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
-│   ├── routers/documents.py # /api/documents (올리기, 상태, 원본 받기, 지우기)
-│   ├── routers/chat.py      # /api/chat (SSE), /api/conversations, /api/images
+│   ├── web/                 # 웹 검색(Tavily), 페이지 읽기
+│   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제)
+│   ├── images.py            # 채팅 이미지: 저장소 저장, checkpoint 참조 ↔ 원본
 │   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델
-│   ├── prompts/             # 프롬프트 로더 + 공용 조각
-│   │   ├── loader.py
-│   │   └── shared/          # language.md, formatting.md ...
-│   └── agents/
-│       ├── runtime.py       # 에이전트 레지스트리, checkpointer, 스트리밍 실행
-│       ├── context.py       # 공용: 대화 이력 trim, 프롬프트 동적 변수(오늘 날짜)
-│       └── chat/            # 기본 채팅 에이전트
-│           ├── graph.py     # LangGraph: agent ⇄ tools
-│           ├── tools.py
-│           └── prompts/system.md
+│   ├── prompts/             # 프롬프트 로더 + 공용 조각 (shared/language.md, formatting.md ...)
+│   ├── models.py            # SQLAlchemy 모델
+│   └── core/                # 인프라: 설정, DB, 첨부 저장소(S3 API), Langfuse, 공용 예외
 └── tests/                   # make test
+```
+
+**계층 규칙:** 위 계층은 아래 계층을 import 할 수 있지만 반대는 안 됩니다.
+
+```
+main → api → conversations → agents → orchestration → tools
+     → documents · web · auth · images → llm · prompts → models → core
 ```
 
 **대화 이력 저장 방식 (A안)**
@@ -281,7 +294,7 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | 생성 중인 대화 삭제 | 409로 거절 |
 | 응답 중 / 대기 메시지가 있을 때 다른 대화로 이동 | 막음 |
 
-- 서버는 대화별 "생성 중" 상태를 `app/runs.py`에서 관리합니다. 지금은 메모리에 두고(백엔드 1개 기준),
+- 서버는 대화별 "생성 중" 상태를 `app/conversations/runs.py`에서 관리합니다. 지금은 메모리에 두고(백엔드 1개 기준),
   여러 프로세스로 늘리면 같은 인터페이스로 Redis 구현을 만들어 바꿉니다.
 - 다른 창의 대화는 지금 폴링(`GET /api/conversations/{id}/status`)으로 확인합니다.
 - 다른 창에서 서로 **다른 대화**를 동시에 진행하는 것은 제한하지 않습니다.
@@ -383,8 +396,9 @@ make backend                                      # 재시작하면 자동 적�
 
 ## 에이전트 / 도구 추가하기
 
-**도구:** `app/agents/chat/tools.py`에 함수를 추가하고 `build_tools`가 돌려주게 하면 그래프에 자동으로 연결됩니다.
-API 키처럼 설정이 필요한 도구는 `build_tools` 안에서 설정을 보고 만듭니다(키가 없으면 넣지 않음).
+**도구:** `app/tools/<주제>.py`에 도구를 만들고 `app/tools/registry.py`의 `TOOLS`에 등록한 뒤,
+쓸 에이전트의 `TOOL_NAMES`(예: `app/agents/chat/graph.py`)에 이름을 넣으면 그래프에 연결됩니다.
+API 키처럼 설정이 필요한 도구는 등록할 때 만드는 함수가 설정을 보고 `None`을 돌려주면 빠집니다(키가 없으면 넣지 않음).
 
 ```python
 @tool(parse_docstring=True)
@@ -396,16 +410,18 @@ def search_docs(query: str) -> str:
     """
     ...
 
-def build_tools(settings: Settings) -> list[BaseTool]:
-    tools = [get_current_time, search_docs]
-    ...
+# app/tools/registry.py
+TOOLS["search_docs"] = ToolSpec(
+    lambda settings: search_docs, ToolLabel(running="문서를 검색하는 중", done="문서 검색함")
+)
 
-TOOL_LABELS["search_docs"] = ToolLabel(running="문서를 검색하는 중", done="문서 검색함")
+# app/agents/chat/graph.py
+TOOL_NAMES = ("get_current_time", ..., "search_docs")
 ```
 
 - 도구의 docstring(영어)은 모델에게 도구 설명으로 전달됩니다. 언제 쓰고 언제 쓰지 말아야 하는지까지 적으세요.
 - 도구 안에서 예외가 나도 응답 전체가 실패하지 않습니다. `ToolNode`가 예외를 오류 결과로 바꾸고 화면에는 "실패"로 표시합니다.
-  모델에게 알려줄 문구가 있으면 `app.agents.tooling.ToolError("짧은 영어 문구")`를 던지세요. 그 외 예외는 원문을 로그에만 남기고 일반 문구를 줍니다.
+  모델에게 알려줄 문구가 있으면 `app.core.errors.ToolError("짧은 영어 문구")`를 던지세요. 그 외 예외는 원문을 로그에만 남기고 일반 문구를 줍니다.
 - 한 턴에 그래프 단계는 16번까지입니다(`tooling.RECURSION_LIMIT`, 도구 호출 약 7번). 넘으면 사용자에게 안내 문구를 보여줍니다.
 
 ### 웹 검색 (Tavily)
@@ -433,8 +449,8 @@ TOOL_LABELS["search_docs"] = ToolLabel(running="문서를 검색하는 중", don
   본문 전체는 페이지당 수만 자라 컨텍스트를 금방 채웁니다.
 
 **에이전트:**
-1. `app/agents/<이름>/`에 `graph.py`(`build_graph`, `STREAM_NODES`)와 `prompts/*.md`를 만듭니다.
-2. `app/agents/runtime.py`의 `AGENTS`에 등록합니다.
+1. `app/agents/<이름>/`에 `graph.py`(`build_graph`, `STREAM_NODES`, `TOOL_NAMES`)와 `prompts/*.md`를 만듭니다.
+2. `app/agents/__init__.py`의 `AGENTS`에 등록합니다. 앱이 시작할 때 실행 엔진(`orchestration/runtime.py`)에 등록됩니다.
 3. 프롬프트 네임스페이스(`<이름>/...`)는 폴더 이름으로 자동 인식됩니다.
 
 ## 테스트

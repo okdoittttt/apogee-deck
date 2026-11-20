@@ -8,39 +8,17 @@ from fastapi import APIRouter, Cookie, HTTPException, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from app.api.deps import CurrentUser, SessionDep
+from app.api.schemas import UserOut, user_out
 from app.auth import google
 from app.auth.approval import MAX_REASON_CHARS, ApprovalError, request_access
-from app.auth.deps import CurrentUser
 from app.auth.sessions import SESSION_COOKIE, create_session, delete_session, user_for_token
-from app.auth.users import get_or_create_local_user, is_admin, upsert_google_user
-from app.config import Settings, get_settings
-from app.db import SessionDep
+from app.auth.users import get_or_create_local_user, upsert_google_user
+from app.core.config import get_settings
 from app.models import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth")
-
-
-class UserOut(BaseModel):
-    """화면에 보여줄 사용자 정보.
-
-    Attributes:
-        id: 사용자 ID.
-        email: 이메일.
-        name: 표시 이름.
-        picture: 프로필 사진 주소.
-        status: ``pending`` | ``approved`` | ``rejected`` | ``suspended``.
-        is_admin: 관리자인지.
-        request_reason: 가입 신청 사유 (적었으면).
-    """
-
-    id: str
-    email: str
-    name: str
-    picture: str | None
-    status: str
-    is_admin: bool
-    request_reason: str | None = None
 
 
 class Me(BaseModel):
@@ -55,27 +33,6 @@ class Me(BaseModel):
     auth_required: bool
     google_login_enabled: bool
     user: UserOut | None
-
-
-def user_out(user: User, settings: Settings) -> UserOut:
-    """사용자를 응답 형식으로 바꾼다.
-
-    Args:
-        user: 사용자.
-        settings: 앱 설정.
-
-    Returns:
-        화면용 사용자 정보.
-    """
-    return UserOut(
-        id=str(user.id),
-        email=user.email,
-        name=user.name,
-        picture=user.picture,
-        status=user.status,
-        is_admin=is_admin(user, settings),
-        request_reason=user.request_reason,
-    )
 
 
 def _set_cookie(response: Response, name: str, value: str, max_age: int, path: str = "/") -> None:

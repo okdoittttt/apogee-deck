@@ -8,10 +8,11 @@ import anyio
 import pytest
 from fastapi import HTTPException
 
-from app.agents.runtime import Finished, TextDelta
-from app.routers import chat as chat_router
-from app.runs import InMemoryRunRegistry
-from app.schemas import ChatRequest
+from app.api.routers import chat as chat_router
+from app.api.schemas import ChatRequest
+from app.conversations import runs, service, turns
+from app.conversations.runs import InMemoryRunRegistry
+from app.orchestration.runtime import Finished, TextDelta
 
 # --- 실행 상태 기록 -----------------------------------------------------------------------------
 
@@ -70,7 +71,7 @@ class FakeSession:
 @pytest.fixture
 def registry(monkeypatch):
     reg = InMemoryRunRegistry(stale_after_seconds=60)
-    monkeypatch.setattr(chat_router, "run_registry", reg)
+    monkeypatch.setattr(runs, "run_registry", reg)
     return reg
 
 
@@ -83,7 +84,7 @@ async def test_chat_rejects_busy_conversation_without_saving(registry):
         await chat_router.chat(ChatRequest(conversation_id=cid, message="끼어들기"), session, USER)
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_router.BUSY_DETAIL
+    assert exc.value.detail == service.BUSY_DETAIL
     assert session.added == [] and session.commits == 0
 
 
@@ -128,8 +129,8 @@ def _patch_stream(monkeypatch, steps):
     async def fake_save(conversation_id, content, steps=None, model=None):
         await asyncio.sleep(0)
 
-    monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
-    monkeypatch.setattr(chat_router, "save_assistant_message", fake_save)
+    monkeypatch.setattr(turns, "stream_reply", fake_stream_reply)
+    monkeypatch.setattr(turns, "save_assistant_message", fake_save)
 
 
 @pytest.mark.parametrize(
@@ -143,8 +144,8 @@ async def test_released_before_terminal_event(monkeypatch, registry, steps, term
     _patch_stream(monkeypatch, steps)
     cid = uuid.uuid4()
     await registry.try_acquire(str(cid))
-    async for event in chat_router.stream_and_save(cid, "hi", []):
-        if event.startswith(f"event: {terminal}"):
+    async for event in turns.run_turn(cid, "hi", []):
+        if event.event == terminal:
             # 화면이 이 이벤트를 받자마자 대기 메시지를 보내도 거절되지 않아야 한다
             assert not await registry.is_running(str(cid))
     assert not await registry.is_running(str(cid))
@@ -157,7 +158,7 @@ async def test_released_when_client_disconnects(monkeypatch, registry):
     received: list[str] = []
 
     async def consume():
-        async for event in chat_router.stream_and_save(cid, "hi", []):
+        async for event in turns.run_turn(cid, "hi", []):
             received.append(event)
 
     async with anyio.create_task_group() as tg:
@@ -184,13 +185,13 @@ async def test_disconnect_during_final_save_still_releases(monkeypatch, registry
         await anyio.sleep(0.1)  # 저장 중에 취소가 들어온다
         saved.append(content)
 
-    monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
-    monkeypatch.setattr(chat_router, "save_assistant_message", slow_save)
+    monkeypatch.setattr(turns, "stream_reply", fake_stream_reply)
+    monkeypatch.setattr(turns, "save_assistant_message", slow_save)
     cid = uuid.uuid4()
     await registry.try_acquire(str(cid))
 
     async def consume():
-        async for _ in chat_router.stream_and_save(cid, "hi", []):
+        async for _ in turns.run_turn(cid, "hi", []):
             pass
 
     async with anyio.create_task_group() as tg:

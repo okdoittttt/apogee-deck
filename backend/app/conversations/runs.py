@@ -11,6 +11,8 @@
 import time
 from typing import Protocol
 
+from app.core.config import get_settings
+
 
 class RunRegistry(Protocol):
     """대화별 실행 상태 저장소의 인터페이스."""
@@ -95,3 +97,7 @@ class InMemoryRunRegistry:
             생성 중이면 ``True``.
         """
         return self._alive(conversation_id)
+
+
+run_registry: RunRegistry = InMemoryRunRegistry(get_settings().run_stale_seconds)
+"""앱 전체가 함께 쓰는 실행 상태 저장소. 대화 서비스(``service``, ``turns``)가 쓴다."""

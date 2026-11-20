@@ -155,7 +155,7 @@ export async function deleteConversation(id: string): Promise<void> {
   if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
 }
 
-// 응답이 끝까지 오지 못했을 때 붙이는 표시. 백엔드(routers/chat.py)가 저장하는 문구와 같다.
+// 응답이 끝까지 오지 못했을 때 붙이는 표시. 백엔드(app/conversations/turns.py)가 저장하는 문구와 같다.
 export const INTERRUPTED_SUFFIX = "\n\n_(응답이 중단되었습니다.)_";
 export const ERROR_SUFFIX = "\n\n_(오류로 응답이 중단되었습니다.)_";
 export const NO_REPLY_TEXT = "_(응답 없음)_";

@@ -6,7 +6,7 @@
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from app.config import get_settings
+from app.core.config import get_settings
 
 
 def get_callbacks() -> list[BaseCallbackHandler]:

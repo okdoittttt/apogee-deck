@@ -12,13 +12,13 @@ from fastapi import HTTPException
 from pdf_fixture import text_pdf
 from starlette.datastructures import Headers, UploadFile
 
-from app.config import Settings
+from app.api.routers import documents as documents_router
+from app.core.config import Settings
 from app.documents import formats, service
 from app.documents.formats import DocumentKind, UnsupportedDocumentError, detect, safe_filename
 from app.documents.parser import ParseError, hwpml_to_text, parse
 from app.documents.worker import ParseTimeoutError, parse_in_subprocess
 from app.models import Document
-from app.routers import documents as documents_router
 
 
 def make_zip(files: dict[str, bytes], compress: bool = True) -> bytes:

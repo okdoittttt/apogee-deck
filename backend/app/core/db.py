@@ -7,23 +7,21 @@
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Annotated
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from fastapi import Depends
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from app.config import get_settings
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 # Alembic 도입 전(create_all) 스키마와 같은 리비전. 기존 DB 를 Alembic 관리로 편입할 때 쓴다.
 BASELINE_REVISION = "0001"
 
@@ -40,9 +38,6 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     """
     async with SessionLocal() as session:
         yield session
-
-
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 def _alembic_config(connection: Connection) -> AlembicConfig:

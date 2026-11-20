@@ -8,44 +8,18 @@ from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import func, select
 
-from app.auth.deps import ApprovedUser
-from app.config import get_settings
-from app.db import SessionDep
+from app.api.deps import ApprovedUser, SessionDep
+from app.api.schemas import DocumentOut, document_out
+from app.core.config import get_settings
+from app.core.storage import ObjectNotFoundError, get_storage
 from app.documents import service
 from app.documents.formats import UnsupportedDocumentError
 from app.models import Document, User
-from app.schemas import DocumentOut
-from app.storage import ObjectNotFoundError, get_storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/documents")
 
 STORAGE_UNAVAILABLE = "첨부 저장소를 쓸 수 없어 문서를 올릴 수 없습니다."
-
-
-def document_out(doc: Document, char_count: int | None) -> DocumentOut:
-    """DB 의 문서를 응답 형식으로 바꾼다 (본문 제외).
-
-    Args:
-        doc: 문서.
-        char_count: 본문 글자 수.
-
-    Returns:
-        응답용 문서 정보.
-    """
-    return DocumentOut(
-        id=doc.id,
-        filename=doc.filename,
-        kind=doc.kind,
-        mime_type=doc.mime_type,
-        size_bytes=doc.size_bytes,
-        status=doc.status,
-        error=doc.error,
-        page_count=doc.page_count,
-        char_count=char_count,
-        created_at=doc.created_at,
-        parsed_at=doc.parsed_at,
-    )
 
 
 async def _load(

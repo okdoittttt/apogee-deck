@@ -11,16 +11,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app import prompts
-from app.agents.context import (
+from app.api.routers import chat as chat_router
+from app.conversations import turns
+from app.core.config import Settings
+from app.llm import build_chat_model, describe_error
+from app.orchestration.context import (
     INTERRUPTED_TOOL_RESULT,
     close_dangling_tool_calls,
     make_context_selector,
 )
-from app.agents.runtime import Finished, TextDelta
-from app.config import Settings
-from app.llm import build_chat_model, describe_error
+from app.orchestration.runtime import Finished, TextDelta
 from app.prompts import remote
-from app.routers import chat as chat_router
 
 # --- A. 결과 없이 끊긴 도구 호출 ------------------------------------------------------------------
 
@@ -134,8 +135,8 @@ def _patch_stream(monkeypatch, steps):
         await asyncio.sleep(0)  # 실제 DB 저장처럼 await 가 있다
         saved.append(content)
 
-    monkeypatch.setattr(chat_router, "stream_reply", fake_stream_reply)
-    monkeypatch.setattr(chat_router, "save_assistant_message", fake_save)
+    monkeypatch.setattr(turns, "stream_reply", fake_stream_reply)
+    monkeypatch.setattr(turns, "save_assistant_message", fake_save)
     return saved
 
 
@@ -144,22 +145,28 @@ async def test_finished_reply_is_saved_once(monkeypatch):
         monkeypatch,
         [TextDelta("안녕"), TextDelta("하세요"), Finished("안녕하세요", "end_turn", "fake")],
     )
-    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
     assert [e for e, _ in events] == ["meta", "delta", "delta", "done"]
     assert saved == ["안녕하세요"]
 
 
 async def test_error_after_partial_text_saves_with_error_mark(monkeypatch):
     saved = _patch_stream(monkeypatch, [TextDelta("부분 응답"), "boom"])
-    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
     assert events[-1][0] == "error"
-    assert saved == ["부분 응답" + chat_router.ERROR_SUFFIX]
+    assert saved == ["부분 응답" + turns.ERROR_SUFFIX]
 
 
 async def test_error_event_hides_exception_details(monkeypatch, caplog):
     _patch_stream(monkeypatch, ["boom"])
     with caplog.at_level("ERROR"):
-        events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+        events = _events(
+            [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+        )
     event, data = events[-1]
     assert event == "error"
     # 예외 타입과 원문은 화면에 보내지 않는다.
@@ -191,7 +198,7 @@ def test_describe_error_maps_actionable_errors(error, expected):
 
 async def test_error_without_text_saves_nothing(monkeypatch):
     saved = _patch_stream(monkeypatch, ["boom"])
-    [e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])]
+    [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
     assert saved == []
 
 
@@ -201,7 +208,7 @@ async def test_client_disconnect_saves_partial_text(monkeypatch):
     received: list[str] = []
 
     async def consume():
-        async for event in chat_router.stream_and_save(uuid.uuid4(), "hi", []):
+        async for event in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", [])):
             received.append(event)
 
     async with anyio.create_task_group() as tg:
@@ -210,11 +217,13 @@ async def test_client_disconnect_saves_partial_text(monkeypatch):
             await anyio.sleep(0.01)
         tg.cancel_scope.cancel()  # 사용자가 중지 → 요청 취소
 
-    assert saved == ["여기까지 보임" + chat_router.INTERRUPTED_SUFFIX]
+    assert saved == ["여기까지 보임" + turns.INTERRUPTED_SUFFIX]
 
 
 async def test_empty_reply_saves_nothing(monkeypatch):
     saved = _patch_stream(monkeypatch, [Finished("", "end_turn", "fake")])
-    events = _events([e async for e in chat_router.stream_and_save(uuid.uuid4(), "hi", [])])
+    events = _events(
+        [e async for e in chat_router.sse_stream(turns.run_turn(uuid.uuid4(), "hi", []))]
+    )
     assert [e for e, _ in events] == ["meta", "done"]
     assert saved == []

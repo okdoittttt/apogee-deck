@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 
-from app.agents.context import ASCII_CHARS_PER_TOKEN, NON_ASCII_CHARS_PER_TOKEN
+from app.llm.tokens import ASCII_CHARS_PER_TOKEN, NON_ASCII_CHARS_PER_TOKEN
 from app.web.text import untag
 
 DOCUMENT_TAG = "document_content"

@@ -1,44 +1,16 @@
-"""채팅 에이전트가 사용할 도구.
+"""웹 도구: 검색(``web_search``)과 페이지 읽기(``fetch_url``).
 
-여기에 ``@tool`` 함수를 추가하고 ``build_tools`` 가 돌려주게 하면 그래프에 자동으로 연결된다.
-설정이 필요한 도구(API 키 등)는 ``build_tools`` 안에서 설정을 보고 만든다.
-화면에 보여줄 실행 상태 문구는 ``TOOL_LABELS`` 에 넣는다 (없으면 기본 문구).
-
-도구의 docstring 은 LLM 에게 도구 설명으로 전달되므로 **영어로** 쓴다.
-``parse_docstring=True`` 를 쓰면 Google Style 의 ``Args`` 설명이 인자 스키마의
-설명으로 들어가 모델이 인자를 더 정확히 채운다.
+실제 검색·읽기는 ``app.web`` 이 하고, 여기서는 모델이 부를 수 있는 도구 모양으로 감싼다.
 """
 
 from datetime import datetime
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.events import ToolLabel
-from app.config import Settings
-from app.documents import reading
-from app.documents import service as documents
+from app.core.config import Settings
 from app.web import fetch, search
-
-
-@tool(parse_docstring=True)
-def get_current_time(timezone: str = "Asia/Seoul") -> str:
-    """Return the current date and time in the given timezone.
-
-    Args:
-        timezone: IANA timezone name, for example 'Asia/Seoul' or 'America/New_York'.
-
-    Returns:
-        The current date and time, such as '2026-11-19 15:21:00 KST (Thursday)',
-        or an error message if the timezone is unknown.
-    """
-    try:
-        now = datetime.now(ZoneInfo(timezone))
-    except (ZoneInfoNotFoundError, ValueError):
-        return f"Unknown timezone: {timezone}"
-    return now.strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
 
 
 def make_web_search(settings: Settings) -> BaseTool:
@@ -132,76 +104,3 @@ def make_fetch_url(settings: Settings) -> BaseTool:
         return text, fetch.page_artifact(page)
 
     return fetch_url
-
-
-def make_read_document(settings: Settings) -> BaseTool:
-    """첨부 문서 읽기 도구를 만든다.
-
-    지금 대화(``thread_id``)에 붙은 문서만 읽는다. 모델이 다른 대화의 문서 ID 를 넣어도 찾을 수
-    없다고 답한다.
-
-    Args:
-        settings: 앱 설정 (한 번에 보여줄 글자 수).
-
-    Returns:
-        ``read_document`` 도구.
-    """
-
-    @tool(parse_docstring=True)
-    async def read_document(document_id: str, config: RunnableConfig, offset: int = 0) -> str:
-        """Read the text of a document the user attached to this conversation.
-
-        Use it when the user asks about an attached document. The document ids are listed
-        in the user's message. Long documents are returned in parts; the result tells you
-        the offset to continue from. Read further parts when the answer may be in them.
-
-        Args:
-            document_id: The document_id from the attachment list in the user's message.
-            config: Run configuration (injected, not visible to the model).
-            offset: Character position to start from, for reading the next part of a long
-                document (use the value given in the previous result). 0 for the beginning.
-        """
-        conversation_id = str((config.get("configurable") or {}).get("thread_id", ""))
-        found = await documents.read_chunk(
-            document_id, conversation_id, max(offset, 0), settings.document_read_max_chars
-        )
-        if found is None:
-            return (
-                f"No readable attached document with id {document_id!r} in this conversation. "
-                "Use a document_id from the attachment list."
-            )
-        doc, chunk, total = found
-        return reading.format_chunk(
-            doc, chunk, max(offset, 0), total, settings.document_read_max_chars
-        )
-
-    return read_document
-
-
-def build_tools(settings: Settings) -> list[BaseTool]:
-    """설정에 따라 채팅 에이전트가 쓸 도구 목록을 만든다.
-
-    키가 필요한 도구(웹 검색)는 키가 있을 때만 넣는다. 키 없이 clone 한 경우에도 앱은 그대로
-    동작하고, 해당 도구만 모델에게 보이지 않는다. 페이지 읽기는 키 없이도 동작한다.
-
-    Args:
-        settings: 앱 설정.
-
-    Returns:
-        그래프에 연결할 도구 목록.
-    """
-    tools: list[BaseTool] = [get_current_time]
-    if settings.tavily_api_key:
-        tools.append(make_web_search(settings))
-    if settings.enable_fetch_url:
-        tools.append(make_fetch_url(settings))
-    tools.append(make_read_document(settings))
-    return tools
-
-
-TOOL_LABELS: dict[str, ToolLabel] = {
-    "get_current_time": ToolLabel(running="시간을 확인하는 중", done="시간 확인함"),
-    "web_search": ToolLabel(running="웹 검색 중", done="웹 검색함"),
-    "fetch_url": ToolLabel(running="페이지 읽는 중", done="페이지 읽음"),
-    "read_document": ToolLabel(running="문서 읽는 중", done="문서 읽음"),
-}
