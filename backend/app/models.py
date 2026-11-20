@@ -243,11 +243,14 @@ class Document(Base):
         size_bytes: 원본 크기.
         sha256: 원본의 SHA-256 (16진수).
         storage_key: 첨부 저장소의 객체 키.
-        status: ``processing`` (파싱 중) | ``ready`` (준비됨) | ``failed`` (실패).
+        status: ``processing`` (파싱 중) | ``analyzing`` (프로젝트 문서의 그림 설명 중) | ``ready`` (준비됨) |
+            ``failed`` (실패).
         error: 실패 사유 (사용자에게 보여줄 문구).
         page_count: 쪽수 (쪽 구분이 없는 형식은 ``None``).
         content: 파싱한 본문 (Markdown). 준비되기 전에는 ``None``.
-        token_count: 본문의 추정 토큰 수 (프로젝트 용량 계산에 쓴다). 준비되기 전에는 ``None``.
+        token_count: 본문과 그림 설명의 추정 토큰 수 (프로젝트 용량 계산에 쓴다). 준비되기 전에는 ``None``.
+        image_count: 설명할 그림 수 (프로젝트 문서만).
+        image_fallback_count: 설명을 만들지 못해 OCR 글자로 대신한 그림 수 (프로젝트 문서만).
         created_at: 올린 시각.
         parsed_at: 파싱이 끝난 시각 (성공·실패 모두).
     """
@@ -278,7 +281,43 @@ class Document(Base):
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_fallback_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentElement(Base):
+    """프로젝트 문서의 요소 하나 (본문·표·그림). 검색(RAG)용 청크를 이 요소들로 만든다.
+
+    Attributes:
+        id: 요소 ID.
+        document_id: 속한 문서 ID.
+        position: 문서 안의 순서 (0부터).
+        kind: ``text`` (본문) | ``table`` (Markdown 표) | ``image`` (그림).
+        page: 쪽(슬라이드·시트) 번호. 쪽 구분이 없으면 ``None``.
+        heading: 제목 경로 (예: ``"1장 > 1.1 결과"``). 없으면 ``None``.
+        content: 본문, 표 Markdown, 그림 설명 (설명을 만들지 못했으면 그림 속 OCR 글자).
+        image_key: 그림 원본의 객체 키 (그림 요소만).
+        image_mime: 그림 원본의 MIME 타입 (그림 요소만).
+        image_status: 그림 요소의 설명 상태. ``pending`` (설명 전) | ``described`` | ``fallback`` (OCR 글자로 대신).
+        token_count: ``content`` 의 추정 토큰 수.
+    """
+
+    __tablename__ = "document_elements"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(10))
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    image_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    image_mime: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    image_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)

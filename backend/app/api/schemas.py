@@ -231,7 +231,7 @@ class ConversationStatus(BaseModel):
     running: bool
 
 
-DocumentStatus = Literal["processing", "ready", "failed"]
+DocumentStatus = Literal["processing", "analyzing", "ready", "failed"]
 
 
 class DocumentOut(BaseModel):
@@ -243,11 +243,14 @@ class DocumentOut(BaseModel):
         kind: 내용으로 확인한 형식 (``pdf``, ``docx``, ``hwpx`` 등).
         mime_type: 원본 MIME 타입.
         size_bytes: 원본 크기.
-        status: ``processing`` (파싱 중) | ``ready`` (준비됨) | ``failed`` (실패).
+        status: ``processing`` (파싱 중) | ``analyzing`` (그림 설명 중, 프로젝트 문서) | ``ready`` (준비됨) |
+            ``failed`` (실패).
         error: 실패 사유.
         page_count: 쪽 수 (쪽 구분이 없는 형식은 ``None``).
         char_count: 파싱한 본문의 글자 수 (준비되기 전에는 ``None``).
-        token_count: 본문의 추정 토큰 수 (프로젝트 문서만, 준비되기 전에는 ``None``).
+        token_count: 본문과 그림 설명의 추정 토큰 수 (프로젝트 문서만, 준비되기 전에는 ``None``).
+        image_count: 설명할 그림 수 (프로젝트 문서만).
+        image_fallback_count: 설명을 만들지 못해 OCR 글자로 대신한 그림 수 (프로젝트 문서만).
         created_at: 올린 시각.
         parsed_at: 파싱이 끝난 시각.
     """
@@ -262,6 +265,8 @@ class DocumentOut(BaseModel):
     page_count: int | None = None
     char_count: int | None = None
     token_count: int | None = None
+    image_count: int | None = None
+    image_fallback_count: int | None = None
     created_at: datetime
     parsed_at: datetime | None = None
 
@@ -413,6 +418,8 @@ def document_out(doc: Document, char_count: int | None) -> DocumentOut:
         page_count=doc.page_count,
         char_count=char_count,
         token_count=doc.token_count if doc.project_id is not None else None,
+        image_count=doc.image_count,
+        image_fallback_count=doc.image_fallback_count,
         created_at=doc.created_at,
         parsed_at=doc.parsed_at,
     )

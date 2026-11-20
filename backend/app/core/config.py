@@ -106,6 +106,10 @@ class Settings(BaseSettings):
             (도구로 읽지 않고 바로 답한다). 넘으면 목록만 주고 ``read_document`` 로 읽게 한다.
         ollama_project_inline_max_tokens: Ollama 모델일 때의 ``project_inline_max_tokens``.
             로컬 모델은 컨텍스트가 작아서 따로 둔다.
+        vision_model: 프로젝트 문서의 그림을 설명할 OpenAI 모델 (``OPENAI_API_KEY`` 필요).
+        vision_max_images_per_document: 문서 하나에서 설명할 최대 그림 수. 넘는 그림은 버린다.
+        vision_concurrency: 동시에 설명할 그림 수.
+        vision_timeout_seconds: 그림 하나를 설명하는 요청의 시간 제한(초).
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -224,6 +228,10 @@ class Settings(BaseSettings):
     project_max_tokens: int = 1_000_000
     project_inline_max_tokens: int = 20_000
     ollama_project_inline_max_tokens: int = 10_000
+    vision_model: str = "gpt-6-luna"
+    vision_max_images_per_document: int = 50
+    vision_concurrency: int = 3
+    vision_timeout_seconds: float = 60.0
 
     # --- Auth ---
     auth_required: bool = True

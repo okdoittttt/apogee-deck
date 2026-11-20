@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.storage import ObjectStorage
 from app.documents import service as documents
 from app.documents.reading import AttachedDocument
-from app.models import Conversation, Document, Project
+from app.models import Conversation, Document, DocumentElement, Project
 
 
 class ProjectError(Exception):
@@ -206,7 +206,7 @@ async def add_document(
 
 
 async def delete_document(session: AsyncSession, project: Project, document_id: uuid.UUID) -> None:
-    """프로젝트 문서를 지운다 (DB 기록과 원본).
+    """프로젝트 문서를 지운다 (DB 기록과 원본, 그림 원본).
 
     Args:
         session: DB 세션. 이 함수가 commit 한다.
@@ -219,10 +219,10 @@ async def delete_document(session: AsyncSession, project: Project, document_id: 
     doc = await session.get(Document, document_id, options=[defer(Document.content)])
     if doc is None or doc.project_id != project.id:
         raise ProjectError(404, "Document not found")
-    key = doc.storage_key
+    keys = [doc.storage_key, *await documents.element_image_keys(session, Document.id == doc.id)]
     await session.delete(doc)
     await session.commit()
-    await documents.delete_objects([key])
+    await documents.delete_objects(keys)
 
 
 @dataclass(frozen=True)
@@ -300,7 +300,10 @@ async def load_context(
     ]
     if with_content:
         columns.append(Document.content)
-    rows = await session.execute(select(*columns).where(ready).order_by(Document.created_at))
+    rows = (
+        await session.execute(select(*columns).where(ready).order_by(Document.created_at))
+    ).all()
+    descriptions = await _image_descriptions(session, [r.id for r in rows]) if with_content else {}
     docs = [
         AttachedDocument(
             id=str(r.id),
@@ -308,9 +311,11 @@ async def load_context(
             kind=r.kind,
             page_count=r.page_count,
             char_count=r.chars or 0,
-            content=r.content if with_content else None,
+            content=_with_descriptions(r.content, descriptions.get(r.id, []))
+            if with_content
+            else None,
         )
-        for r in rows.all()
+        for r in rows
     ]
     return ProjectContext(
         id=project.id,
@@ -319,3 +324,38 @@ async def load_context(
         documents=docs,
         total_tokens=total,
     )
+
+
+async def _image_descriptions(
+    session: AsyncSession, document_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[str]]:
+    """문서별 그림 설명 (설명을 만든 그림만, 문서 순서). 본문에는 그림 속 글자만 있어서 따로 붙인다."""
+    if not document_ids:
+        return {}
+    rows = await session.execute(
+        select(
+            DocumentElement.document_id,
+            DocumentElement.page,
+            DocumentElement.heading,
+            DocumentElement.content,
+        )
+        .where(
+            DocumentElement.document_id.in_(document_ids),
+            DocumentElement.image_status == "described",
+        )
+        .order_by(DocumentElement.document_id, DocumentElement.position)
+    )
+    found: dict[uuid.UUID, list[str]] = {}
+    for r in rows.all():
+        where = ", ".join(x for x in (f"p.{r.page}" if r.page else "", r.heading or "") if x)
+        found.setdefault(r.document_id, []).append(
+            f"[그림{f' ({where})' if where else ''}] {r.content}"
+        )
+    return found
+
+
+def _with_descriptions(content: str | None, descriptions: list[str]) -> str | None:
+    """본문 뒤에 그림 설명을 붙인다."""
+    if content is None or not descriptions:
+        return content
+    return f"{content.rstrip()}\n\n## 그림 설명\n\n" + "\n\n".join(descriptions)

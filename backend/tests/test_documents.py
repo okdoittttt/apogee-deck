@@ -187,6 +187,20 @@ async def test_subprocess_passes_arguments():
         target=subprocess_targets.echo_size,
     )
     assert (result.content, result.page_count) == ("pdf:f.pdf:3", 7)
+    assert result.elements is None
+
+
+async def test_subprocess_passes_structured_flag():
+    result = await parse_in_subprocess(
+        b"abc",
+        DocumentKind.PDF,
+        "f.pdf",
+        max_pages=7,
+        timeout=60,
+        structured=True,
+        target=subprocess_targets.echo_size,
+    )
+    assert result.elements == ["structured"]
 
 
 async def test_subprocess_reports_parse_error():

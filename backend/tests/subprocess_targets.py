@@ -12,6 +12,8 @@ def crash(conn, *args):
     os._exit(3)
 
 
-def echo_size(conn, data, kind, filename, max_pages):
-    conn.send(("ok", f"{kind}:{filename}:{len(data)}", max_pages))
+def echo_size(conn, data, kind, filename, max_pages, structured=False):
+    conn.send(
+        ("ok", f"{kind}:{filename}:{len(data)}", max_pages, ["structured"] if structured else None)
+    )
     conn.close()

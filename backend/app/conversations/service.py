@@ -264,6 +264,7 @@ async def delete_project(session: AsyncSession, project_id: uuid.UUID, user_id: 
         conversation_ids
     )
     document_keys = list(await session.scalars(select(Document.storage_key).where(in_project)))
+    document_keys += await documents.element_image_keys(session, Document.project_id == project_id)
     image_keys = list(
         await session.scalars(
             select(MessageImage.storage_key)

@@ -16,13 +16,19 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
   출력은 Markdown 이다 (표가 Markdown 표로 남는다).
 - HWPML(XML 로 된 .hwp): xberg 는 일반 XML 로 처리해서 태그 이름이 섞이므로 직접 본문만 뽑는다.
 - TXT, MD, CSV: 그대로 쓴다.
+
+``structured=True`` (프로젝트 문서)면 본문과 함께 요소 목록(본문·표·그림, ``app.documents.elements``)도
+돌려준다. 그림 원본은 이때만 받아 온다 (WebP, 긴 변 ``IMAGE_MAX_SIDE`` 이하).
 """
 
 import asyncio
+import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Any
 
+from app.documents import elements as el
 from app.documents.formats import DocumentKind
 from app.documents.ocr_merge import merge_page, ocr_only_lines
 
@@ -43,6 +49,16 @@ MIN_LAYER_COVERAGE = 0.8
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~<>])")
 """xberg 가 Markdown 출력에 넣는 이스케이프 (``4\\.`` → ``4.``). 표 칸 안의 ``\\|`` 는 표가 깨지므로 남긴다."""
 
+IMAGE_MAX_SIDE = 1600
+"""구조화 적재 때 받아 오는 그림의 긴 변 상한(픽셀). vision 모델은 낮은 해상도로 보므로 충분하다."""
+
+IMAGE_MIME_TYPES = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "webp": "image/webp",
+}
+
 PAGE_COUNT_KINDS = {DocumentKind.PDF, DocumentKind.PPTX}
 """쪽(슬라이드) 수를 기록하는 형식. 나머지는 쪽 구분이 없거나(DOCX, 한글) 의미가 다르다(XLSX 시트)."""
 
@@ -58,13 +74,17 @@ class ParsedDocument:
     Attributes:
         content: 본문 (Markdown). PDF 는 ``<!-- PAGE n -->`` 쪽 표시가 들어간다.
         page_count: 쪽 수. 쪽 구분이 없는 형식은 ``None``.
+        elements: 요소 목록 (``structured=True`` 로 파싱했을 때만).
     """
 
     content: str
     page_count: int | None
+    elements: list[el.Element] | None = None
 
 
-def parse(data: bytes, kind: DocumentKind, filename: str, max_pages: int) -> ParsedDocument:
+def parse(
+    data: bytes, kind: DocumentKind, filename: str, max_pages: int, structured: bool = False
+) -> ParsedDocument:
     """문서를 파싱한다.
 
     Args:
@@ -72,9 +92,10 @@ def parse(data: bytes, kind: DocumentKind, filename: str, max_pages: int) -> Par
         kind: 내용으로 확인한 형식 (``app.documents.formats.detect``).
         filename: 파일 이름. 파서가 형식을 고를 때 참고한다.
         max_pages: 최대 쪽 수. 넘으면 OCR 전에 멈춘다.
+        structured: 요소 목록(본문·표·그림)도 만들지. 본문은 같다.
 
     Returns:
-        본문과 쪽 수.
+        본문과 쪽 수 (``structured`` 면 요소 목록도).
 
     Raises:
         ParseError: 읽을 수 없는 문서이거나, 쪽 수가 너무 많거나, 글자를 찾지 못했을 때.
@@ -85,9 +106,12 @@ def parse(data: bytes, kind: DocumentKind, filename: str, max_pages: int) -> Par
     elif kind is DocumentKind.HWPML:
         result = ParsedDocument(hwpml_to_text(data), None)
     else:
-        result = asyncio.run(_parse_with_xberg(data, kind, filename, max_pages))
+        result = asyncio.run(_parse_with_xberg(data, kind, filename, max_pages, structured))
     if not result.content.strip():
         raise ParseError("문서에서 글자를 찾지 못했습니다.")
+    if structured and not result.elements:
+        # 구조를 얻지 못한 형식(텍스트 등)은 본문 전체를 요소 하나로 둔다.
+        result = replace(result, elements=[el.Element("text", result.content)])
     return result
 
 
@@ -132,8 +156,28 @@ def hwpml_to_text(data: bytes) -> str:
 # --- xberg ---------------------------------------------------------------------------------------
 
 
+def _image_data(img: Any) -> el.ImageData | None:
+    """Xberg 그림을 요소용 원본으로 바꾼다. vision 모델이 받지 않는 형식이면 ``None``."""
+    mime = IMAGE_MIME_TYPES.get(str(img.format or "").lower())
+    if mime is None or not img.data:
+        return None
+    ocr = getattr(img.ocr_result, "content", None) if img.ocr_result else None
+    return el.ImageData(bytes(img.data), mime, img.width or 0, img.height or 0, (ocr or "").strip())
+
+
+def _image_kind(img: Any) -> str | None:
+    return str(img.image_kind).lower() if img.image_kind is not None else None
+
+
+def _structured_images(structured: bool) -> dict[str, Any]:
+    """구조화 적재 때 그림 원본을 받아 오는 설정 (분류, WebP, 크기 상한)."""
+    if not structured:
+        return {}
+    return {"classify": True, "output_format": "webp", "max_image_dimension": IMAGE_MAX_SIDE}
+
+
 async def _parse_with_xberg(
-    data: bytes, kind: DocumentKind, filename: str, max_pages: int
+    data: bytes, kind: DocumentKind, filename: str, max_pages: int, structured: bool = False
 ) -> ParsedDocument:
     import xberg  # 무거운 네이티브 모듈이라 파싱 프로세스에서만 불러온다
 
@@ -164,13 +208,19 @@ async def _parse_with_xberg(
                 ocr=ocr,
                 ocr_embedded_images=True,
                 # 그림 자리에 그림 링크 없이 OCR 글자만 넣는다
-                images=xberg.ImageExtractionConfig(extract_images=True, ocr_text_only=True),
+                images=xberg.ImageExtractionConfig(
+                    extract_images=True, ocr_text_only=True, **_structured_images(structured)
+                ),
                 pages=xberg.PageConfig(extract_pages=True),
+                include_document_structure=structured,
             )
         )
         pages = len(doc.pages or [])
         content = _MARKDOWN_ESCAPE.sub(r"\1", doc.content or "")
-        return ParsedDocument(content, pages if kind in PAGE_COUNT_KINDS else None)
+        result = ParsedDocument(content, pages if kind in PAGE_COUNT_KINDS else None)
+        if structured:
+            result = replace(result, elements=_office_elements(doc))
+        return result
 
     # 1차: OCR 없이 쪽별 텍스트 레이어와 큰 그림이 있는 쪽을 찾는다 (빠르다).
     scan = await run(
@@ -178,7 +228,10 @@ async def _parse_with_xberg(
             output_format="plain",
             disable_ocr=True,
             images=xberg.ImageExtractionConfig(
-                extract_images=True, run_ocr_on_images=False, inject_placeholders=False
+                extract_images=True,
+                run_ocr_on_images=False,
+                inject_placeholders=False,
+                **_structured_images(structured),
             ),
             pages=xberg.PageConfig(extract_pages=True),
         )
@@ -212,13 +265,50 @@ async def _parse_with_xberg(
             p.page_number: p.content or "" for p in doc.pages or [] if p.page_number in ocr_pages
         }
 
-    bodies = []
+    page_bodies: dict[int, str] = {}
     for number in sorted(text_pages):
         body = text_pages[number]
         if number in ocr_texts:
             body = _combine_ocr(body, ocr_texts[number])
-        bodies.append(f"<!-- PAGE {number} -->\n\n{body.strip()}")
-    return ParsedDocument("\n\n".join(bodies), page_count)
+        page_bodies[number] = body.strip()
+    content = "\n\n".join(f"<!-- PAGE {n} -->\n\n{b}" for n, b in page_bodies.items())
+    result = ParsedDocument(content, page_count)
+    if structured:
+        result = replace(result, elements=_pdf_elements(scan, page_bodies))
+    return result
+
+
+def _office_elements(doc: Any) -> list[el.Element]:
+    """Office·한글 문서의 구조 트리로 요소 목록을 만든다. 구조가 없으면 빈 목록."""
+    structure = getattr(doc, "document", None)
+    if structure is None or not structure.nodes:
+        return []
+    nodes = []
+    for node in structure.nodes:
+        content = json.loads(str(node.content))
+        content["page"] = node.page
+        nodes.append(content)
+    images = {}
+    for img in doc.images or []:
+        if (image := _image_data(img)) is not None:
+            images[img.image_index] = (image, _image_kind(img))
+    notes = {p.page_number: p.speaker_notes for p in doc.pages or [] if p.speaker_notes}
+    return el.from_structure(nodes, images, notes)
+
+
+def _pdf_elements(scan: Any, page_bodies: dict[int, str]) -> list[el.Element]:
+    """PDF 의 쪽별 본문, 표 추출 결과, 그림으로 요소 목록을 만든다."""
+    tables = [
+        el.PdfTable(p.page_number, [[str(c or "") for c in row] for row in t.cells or []])
+        for p in sorted(scan.pages or [], key=lambda p: p.page_number)
+        for t in p.tables or []
+    ]
+    images = [
+        (img.page_number, image, _image_kind(img))
+        for img in scan.images or []
+        if img.page_number and (image := _image_data(img)) is not None
+    ]
+    return el.from_pdf(page_bodies, tables, images)
 
 
 def _combine_ocr(text_layer: str, ocr_text: str) -> str:

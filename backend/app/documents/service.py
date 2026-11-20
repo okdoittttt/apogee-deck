@@ -13,6 +13,7 @@ import logging
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,15 +22,19 @@ from sqlalchemy.orm import defer
 from app.core.config import Settings, get_settings
 from app.core.db import SessionLocal
 from app.core.storage import DOCUMENTS_PREFIX, PROJECTS_PREFIX, ObjectStorage, get_storage
+from app.documents import elements as el
 from app.documents.formats import DocumentKind, detect, safe_filename
-from app.documents.parser import ParseError
+from app.documents.parser import ParsedDocument, ParseError
 from app.documents.reading import AttachedDocument, estimate_tokens, max_inline_chars
 from app.documents.worker import parse_in_subprocess
-from app.models import Document
+from app.llm import vision
+from app.models import Document, DocumentElement
 
 logger = logging.getLogger(__name__)
 
 INTERRUPTED_ERROR = "서버가 다시 시작되어 처리가 중단되었습니다. 다시 올려 주세요."
+BUSY_STATUSES = ("processing", "analyzing")
+"""아직 처리 중인 문서 상태 (파싱 중, 그림 설명 중)."""
 PROJECT_FULL_ERROR = (
     "프로젝트 용량을 넘어서 추가할 수 없습니다. 다른 문서를 지운 뒤 다시 올려 주세요."
 )
@@ -134,6 +139,10 @@ def _slots(settings: Settings) -> asyncio.Semaphore:
 
 async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filename: str) -> None:
     settings = get_settings()
+    async with SessionLocal() as session:
+        project_id = await session.scalar(
+            select(Document.project_id).where(Document.id == document_id)
+        )
     values: dict = {"parsed_at": datetime.now(UTC)}
     try:
         async with _slots(settings):
@@ -143,6 +152,8 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
                 filename,
                 max_pages=settings.document_max_pages,
                 timeout=settings.document_parse_timeout_seconds,
+                # 프로젝트 문서는 검색용으로 요소(본문·표·그림)까지 만든다.
+                structured=project_id is not None,
             )
     except ParseError as exc:
         values |= {"status": "failed", "error": str(exc)[:500]}
@@ -151,32 +162,23 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
         logger.exception("document %s parse task failed", document_id)
         values |= {"status": "failed", "error": "문서를 처리하다가 오류가 났습니다."}
     else:
+        logger.info(
+            "document %s parsed (%s pages, %d chars, %s elements)",
+            document_id,
+            result.page_count,
+            len(result.content),
+            len(result.elements) if result.elements is not None else "no",
+        )
+        if project_id is not None:
+            await _ingest_project_document(document_id, project_id, filename, result)
+            return
         values |= {
             "status": "ready",
             "content": result.content,
             "page_count": result.page_count,
             "token_count": estimate_tokens(result.content),
-            "parsed_at": datetime.now(UTC),
         }
-        logger.info(
-            "document %s parsed (%s pages, %d chars)",
-            document_id,
-            result.page_count,
-            len(result.content),
-        )
     async with SessionLocal() as session:
-        if values["status"] == "ready":
-            project_id = await session.scalar(
-                select(Document.project_id).where(Document.id == document_id)
-            )
-            if project_id is not None:
-                used = await project_usage(session, project_id, exclude=document_id)
-                if used + values["token_count"] > settings.project_max_tokens:
-                    values = {
-                        "status": "failed",
-                        "error": PROJECT_FULL_ERROR,
-                        "parsed_at": values["parsed_at"],
-                    }
         # 파싱하는 동안 문서가 지워졌으면 아무것도 갱신되지 않는다.
         await session.execute(
             update(Document)
@@ -184,6 +186,238 @@ async def _parse_and_save(document_id: uuid.UUID, data: bytes, kind: str, filena
             .values(**values)
         )
         await session.commit()
+
+
+# --- 프로젝트 문서 적재: 요소 저장 → 그림 설명 → 용량 확인 ------------------------------------------
+
+
+def element_image_key(project_id: uuid.UUID, document_id: uuid.UUID, position: int) -> str:
+    """프로젝트 문서 그림 원본의 객체 키 (보관 기간 규칙을 받지 않는 ``projects/`` 아래).
+
+    Args:
+        project_id: 프로젝트 ID.
+        document_id: 문서 ID.
+        position: 문서 안의 요소 순서.
+
+    Returns:
+        ``"projects/<프로젝트>/images/<문서>/<순서>"``.
+    """
+    return f"{PROJECTS_PREFIX}{project_id}/images/{document_id}/{position}"
+
+
+async def _ingest_project_document(
+    document_id: uuid.UUID, project_id: uuid.UUID, filename: str, result: ParsedDocument
+) -> None:
+    """파싱한 프로젝트 문서를 적재한다.
+
+    1. 그림 원본을 저장소에 올리고 요소를 저장한다. 그림이 있으면 문서를 ``analyzing`` 으로 바꾼다.
+    2. 그림을 vision 모델로 설명한다. 실패한 그림은 그림 속 OCR 글자로 대신한다 (문서는 실패하지 않는다).
+    3. 본문과 그림 설명의 토큰 수로 프로젝트 용량을 확인하고 ``ready`` (넘으면 ``failed``) 로 바꾼다.
+
+    도중에 문서가 지워지면 올린 그림을 지우고 멈춘다.
+    """
+    settings = get_settings()
+    storage = get_storage()
+    elements = el.limit_images(result.elements or [], settings.vision_max_images_per_document)
+    if storage is None:  # 프로젝트 문서는 저장소가 있어야 올릴 수 있지만, 그 사이 끊겼을 수 있다
+        elements = [e for e in elements if e.kind != "image"]
+    # ORM 객체는 commit 뒤에 만료되므로, 뒤에서 쓸 값(ID, 객체 키)은 따로 들고 있는다.
+    plan: list[tuple[uuid.UUID, el.Element, str | None]] = []
+    try:
+        for position, element in enumerate(elements):
+            key = None
+            if element.image is not None and storage is not None:
+                key = element_image_key(project_id, document_id, position)
+                await storage.put(key, element.image.data, element.image.mime_type)
+            plan.append((uuid.uuid4(), element, key))
+        rows = [
+            DocumentElement(
+                id=element_id,
+                document_id=document_id,
+                position=position,
+                kind=element.kind,
+                page=element.page,
+                heading=element.heading[:500] if element.heading else None,
+                content=element.content,
+                image_key=key,
+                image_mime=element.image.mime_type if key and element.image else None,
+                image_status="pending" if key else None,
+                token_count=estimate_tokens(element.content),
+            )
+            for position, (element_id, element, key) in enumerate(plan)
+        ]
+        images = [(element_id, element) for element_id, element, key in plan if key]
+        async with SessionLocal() as session:
+            res = await session.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.status == "processing")
+                .values(
+                    status="analyzing" if images else "processing",
+                    content=result.content,
+                    page_count=result.page_count,
+                    image_count=len(images),
+                )
+            )
+            if not res.rowcount:  # 파싱하는 동안 지워졌다
+                await session.rollback()
+                await delete_objects([k for _, _, k in plan if k])
+                return
+            session.add_all(rows)
+            await session.commit()
+    except Exception:
+        logger.exception("failed to store elements of document %s", document_id)
+        await delete_objects([k for _, _, k in plan if k])
+        await _mark_failed(document_id, "문서를 처리하다가 오류가 났습니다.")
+        return
+
+    described = await _describe_images(filename, images)
+    await _finish_project_document(
+        document_id,
+        project_id,
+        result.content,
+        [element_id for element_id, _ in images],
+        [k for _, _, k in plan if k],
+        len(plan),
+        described,
+    )
+
+
+async def _describe_images(
+    filename: str, images: list[tuple[uuid.UUID, el.Element]]
+) -> dict[uuid.UUID, str]:
+    """그림들을 vision 모델로 설명한다. 실패한 그림은 결과에 없다.
+
+    Args:
+        filename: 문서 이름 (설명의 맥락).
+        images: ``(요소 ID, 그림 요소)`` 목록.
+
+    Returns:
+        요소 ID → 설명.
+    """
+    if not images:
+        return {}
+    settings = get_settings()
+    try:
+        model = vision.build_vision_model(settings)
+    except vision.VisionUnavailableError as exc:
+        logger.warning("image descriptions skipped: %s", exc)
+        return {}
+    slots = asyncio.Semaphore(max(1, settings.vision_concurrency))
+
+    async def describe(element_id: uuid.UUID, element: el.Element) -> tuple[uuid.UUID, str]:
+        assert element.image is not None
+        context = "\n".join(
+            line
+            for line in (
+                f"Document: {filename}",
+                f"Section: {element.heading}" if element.heading else "",
+                f"Page: {element.page}" if element.page else "",
+                f"Text read from the image by OCR: {element.image.ocr_text}"
+                if element.image.ocr_text
+                else "",
+            )
+            if line
+        )
+        async with slots:
+            try:
+                text = await vision.describe_image(
+                    model, element.image.data, element.image.mime_type, context
+                )
+            except Exception:
+                logger.warning("failed to describe image %s", element_id, exc_info=True)
+                text = ""
+        return element_id, text
+
+    results = await asyncio.gather(*(describe(i, e) for i, e in images))
+    return {element_id: text for element_id, text in results if text}
+
+
+async def _finish_project_document(
+    document_id: uuid.UUID,
+    project_id: uuid.UUID,
+    content: str,
+    image_ids: list[uuid.UUID],
+    image_keys: list[str],
+    element_count: int,
+    described: dict[uuid.UUID, str],
+) -> None:
+    """그림 설명을 저장하고 용량을 확인해 문서를 ``ready`` (넘으면 ``failed``) 로 바꾼다."""
+    settings = get_settings()
+    total = estimate_tokens(content) + sum(estimate_tokens(t) for t in described.values())
+    async with SessionLocal() as session:
+        used = await project_usage(session, project_id, exclude=document_id)
+        if used + total > settings.project_max_tokens:
+            await session.execute(
+                delete(DocumentElement).where(DocumentElement.document_id == document_id)
+            )
+            await session.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.status.in_(BUSY_STATUSES))
+                .values(status="failed", error=PROJECT_FULL_ERROR, parsed_at=datetime.now(UTC))
+            )
+            await session.commit()
+            await delete_objects(image_keys)
+            return
+        for element_id in image_ids:
+            text = described.get(element_id)
+            values: dict[str, Any] = (
+                {"content": text, "image_status": "described", "token_count": estimate_tokens(text)}
+                if text
+                else {"image_status": "fallback"}
+            )
+            await session.execute(
+                update(DocumentElement).where(DocumentElement.id == element_id).values(**values)
+            )
+        res = await session.execute(
+            update(Document)
+            .where(Document.id == document_id, Document.status.in_(BUSY_STATUSES))
+            .values(
+                status="ready",
+                token_count=total,
+                image_fallback_count=len(image_ids) - len(described),
+                parsed_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+    if not res.rowcount:  # 설명하는 동안 지워졌다 (요소는 함께 지워졌고 그림 원본만 남았다)
+        await delete_objects(image_keys)
+        return
+    logger.info(
+        "project document %s ready (%d elements, %d/%d images described, %d tokens)",
+        document_id,
+        element_count,
+        len(described),
+        len(image_ids),
+        total,
+    )
+
+
+async def _mark_failed(document_id: uuid.UUID, error: str) -> None:
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Document)
+            .where(Document.id == document_id, Document.status.in_(BUSY_STATUSES))
+            .values(status="failed", error=error, parsed_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+
+async def element_image_keys(session: AsyncSession, document_filter: Any) -> list[str]:
+    """조건에 맞는 문서들의 그림 원본 객체 키. 문서를 지우기 전에 원본을 함께 지우려고 쓴다.
+
+    Args:
+        session: DB 세션.
+        document_filter: ``Document`` 에 대한 조건 (예: ``Document.project_id == pid``).
+
+    Returns:
+        객체 키 목록.
+    """
+    rows = await session.scalars(
+        select(DocumentElement.image_key)
+        .join(Document, Document.id == DocumentElement.document_id)
+        .where(document_filter, DocumentElement.image_key.is_not(None))
+    )
+    return [k for k in rows if k]
 
 
 async def project_usage(
@@ -216,7 +450,7 @@ async def mark_interrupted() -> int:
     async with SessionLocal() as session:
         res = await session.execute(
             update(Document)
-            .where(Document.status == "processing")
+            .where(Document.status.in_(BUSY_STATUSES))
             .values(status="failed", error=INTERRUPTED_ERROR, parsed_at=datetime.now(UTC))
         )
         await session.commit()
@@ -351,7 +585,7 @@ async def check_attachable(
             raise AttachError(404, "첨부한 문서를 찾을 수 없습니다. 다시 올려 주세요.")
         if row.conversation_id is not None:
             raise AttachError(409, f"이미 보낸 문서입니다: {row.filename}")
-        if row.status == "processing":
+        if row.status in BUSY_STATUSES:
             raise AttachError(409, f"아직 문서를 읽는 중입니다: {row.filename}")
         if row.status != "ready":
             raise AttachError(400, f"읽지 못한 문서는 보낼 수 없습니다: {row.filename}")
