@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AuthGate } from "@/components/Auth";
 import { Composer } from "@/components/Composer";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
@@ -43,6 +43,9 @@ import { isMacPlatform, shortcutLabel } from "@/lib/platform";
 const SIDEBAR_KEY = "sidebar-open";
 const MODEL_KEY = "selected-model";
 const STATUS_POLL_MS = 2000;
+// 보낸 메시지를 맨 위로 올릴 때 위쪽 여백, 목록 아래 여백 (메시지 목록의 pt-2, pb-6 과 같다)
+const PIN_GAP_PX = 8;
+const PIN_BOTTOM_PX = 24;
 const DOCUMENT_POLL_MS = 1000;
 // 중지 직후 서버가 정리(부분 응답 저장, 생성 중 표시 해제)를 끝낼 때까지 기다리는 간격과 한도
 const IDLE_POLL_MS = 150;
@@ -110,6 +113,8 @@ function ChatApp({
   // 지금 응답을 받고 있는 assistant 메시지 (진행 표시를 이 메시지에만 보인다)
   const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
   const closeToast = useCallback(() => setToast(null), []);
+  // 이 창에서 마지막으로 보낸 사용자 메시지. 이 메시지를 화면 맨 위에 두고 응답을 그 아래에 채운다.
+  const [pinnedId, setPinnedId] = useState<string | null>(null);
 
   // 응답이 끝난 뒤 대기 메시지를 자동 전송할 때 최신 값을 읽기 위한 ref.
   // (state 를 그대로 읽으면 이전 렌더의 값이라, 새 대화의 ID 가 없는 것으로 보여 대화가 하나 더 생긴다)
@@ -117,7 +122,10 @@ function ChatApp({
   const queuedRef = useRef<QueuedMessage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  // 메시지 목록의 스크롤 영역과 그 높이 (보낸 메시지를 맨 위로 올릴 빈 공간을 계산한다)
+  const [scrollBox, setScrollBox] = useState<HTMLDivElement | null>(null);
+  const [scrollBoxHeight, setScrollBoxHeight] = useState(0);
+  const pinnedTurnRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   function setActiveConversation(id: string | null) {
@@ -241,13 +249,32 @@ function ChatApp({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // 대화를 열 때는 즉시 맨 아래로, 응답 스트리밍 중에는 부드럽게 따라간다.
+  // 스크롤 영역 높이를 따라간다 (창 크기나 입력창 높이가 바뀌면 달라진다).
+  useLayoutEffect(() => {
+    if (!scrollBox) return;
+    setScrollBoxHeight(scrollBox.clientHeight);
+    const observer = new ResizeObserver(() => setScrollBoxHeight(scrollBox.clientHeight));
+    observer.observe(scrollBox);
+    return () => observer.disconnect();
+  }, [scrollBox]);
+
+  // 대화를 열면 즉시 맨 아래로 간다. 메시지를 보내면 그 메시지를 화면 맨 위로 올리고,
+  // 응답은 그 아래에 채운다 (응답이 길어져도 따라 내려가지 않는다).
   const jumpToBottomRef = useRef(false);
+  const scrollToPinnedRef = useRef(false);
   useEffect(() => {
-    const behavior = jumpToBottomRef.current ? "auto" : "smooth";
-    jumpToBottomRef.current = false;
-    bottomRef.current?.scrollIntoView({ behavior, block: "end" });
-  }, [messages, queued, remoteRunning]);
+    if (!scrollBox) return;
+    if (jumpToBottomRef.current) {
+      jumpToBottomRef.current = false;
+      scrollBox.scrollTo({ top: scrollBox.scrollHeight });
+      return;
+    }
+    const turn = pinnedTurnRef.current;
+    if (!scrollToPinnedRef.current || !turn || scrollBoxHeight === 0) return;
+    scrollToPinnedRef.current = false;
+    const offset = turn.getBoundingClientRect().top - scrollBox.getBoundingClientRect().top;
+    scrollBox.scrollTo({ top: scrollBox.scrollTop + offset - PIN_GAP_PX, behavior: "smooth" });
+  }, [scrollBox, scrollBoxHeight, messages, pinnedId]);
 
   // 다른 창의 응답이 끝날 때까지 주기적으로 확인하고, 끝나면 대화를 다시 불러온다.
   useEffect(() => {
@@ -375,6 +402,7 @@ function ChatApp({
     try {
       const conv = await getConversation(id);
       jumpToBottomRef.current = true;
+      setPinnedId(null);
       setActiveConversation(conv.id);
       setMessages(conv.messages);
       setRemoteRunning(conv.running);
@@ -390,6 +418,7 @@ function ChatApp({
     if (navigationBlocked()) return;
     setActiveConversation(null);
     setRemoteRunning(false);
+    setPinnedId(null);
     setMessages([]);
     setAttachments([]);
     discardDocuments();
@@ -477,6 +506,8 @@ function ChatApp({
     ]);
 
     setActiveAssistantId(assistantId);
+    setPinnedId(userId);
+    scrollToPinnedRef.current = true;
 
     const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) =>
       setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
@@ -652,6 +683,10 @@ function ChatApp({
   }
 
   const isEmpty = messages.length === 0;
+  // 마지막으로 보낸 메시지 앞(earlier)과 그 메시지부터(pinned). 보낸 메시지가 없으면 모두 earlier.
+  const pinIndex = pinnedId ? messages.findIndex((m) => m.id === pinnedId) : -1;
+  const earlier = pinIndex < 0 ? messages : messages.slice(0, pinIndex);
+  const pinned = pinIndex < 0 ? [] : messages.slice(pinIndex);
   const modelLabels = Object.fromEntries(models.map((m) => [m.id, m.label]));
   const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
 
@@ -797,23 +832,40 @@ function ChatApp({
         ) : (
           /* 대화 화면: 메시지 목록 + 하단 고정 입력창 */
           <>
-            <div className="flex-1 overflow-y-auto">
+            <div ref={setScrollBox} className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
-                <MessageList
-                  messages={messages}
-                  activeId={activeAssistantId}
-                  modelLabels={modelLabels}
-                />
-                {queued && (
-                  <QueuedMessageBubble
-                    message={queued}
-                    paused={queuePaused}
-                    onSendNow={sendQueuedNow}
-                    onRemove={() => setQueued(null)}
+                {earlier.length > 0 && (
+                  <MessageList
+                    messages={earlier}
+                    activeId={activeAssistantId}
+                    modelLabels={modelLabels}
                   />
                 )}
-                {remoteRunning && <RemoteRunningNotice />}
-                <div ref={bottomRef} />
+                {/* 마지막으로 보낸 메시지부터: 최소 화면 높이만큼 차지해서 그 메시지를 맨 위로 올릴 수 있게 한다 */}
+                <div
+                  ref={pinnedTurnRef}
+                  className={earlier.length > 0 && pinned.length > 0 ? "mt-7" : undefined}
+                  style={
+                    pinned.length > 0
+                      ? { minHeight: Math.max(0, scrollBoxHeight - PIN_GAP_PX - PIN_BOTTOM_PX) }
+                      : undefined
+                  }
+                >
+                  <MessageList
+                    messages={pinned}
+                    activeId={activeAssistantId}
+                    modelLabels={modelLabels}
+                  />
+                  {queued && (
+                    <QueuedMessageBubble
+                      message={queued}
+                      paused={queuePaused}
+                      onSendNow={sendQueuedNow}
+                      onRemove={() => setQueued(null)}
+                    />
+                  )}
+                  {remoteRunning && <RemoteRunningNotice />}
+                </div>
               </div>
             </div>
             <div className="mx-auto w-full max-w-3xl px-4 pb-4">
