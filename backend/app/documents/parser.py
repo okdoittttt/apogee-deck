@@ -6,7 +6,11 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
 
 형식별 처리:
 
-- PDF: 텍스트만 있는 쪽은 텍스트 레이어를 그대로 쓰고, 글자가 없는 쪽(스캔본)은 쪽 전체 OCR 결과를 쓴다.
+- PDF: 텍스트 레이어는 pypdfium2 로 쪽별로 뽑는다 (``_pdf_text_layers``). xberg 기본 추출은 "칸 이름 | 값"
+  이 나란한 표 같은 배치를 여러 단으로 보고 단별로 읽어서, 회의록의 서로 다른 회의 내용이 섞일 만큼 줄
+  순서가 틀어졌다. pdfium 은 PDF 에 그린 순서를 따라서 사람이 읽는 순서와 맞았다. 그림·표 목록과 OCR 은
+  xberg 를 그대로 쓴다.
+  텍스트만 있는 쪽은 텍스트 레이어를 그대로 쓰고, 글자가 없는 쪽(스캔본)은 쪽 전체 OCR 결과를 쓴다.
   텍스트와 큰 그림이 섞인 쪽은 쪽 전체를 OCR 한 뒤(``force_ocr_pages``) 텍스트 레이어와 합친다
   (``app.documents.ocr_merge``): 줄 순서와 그림 속 글자는 OCR 에서, 글자와 띄어쓰기는 텍스트 레이어에서
   가져온다. xberg 기본 동작은 섞인 쪽의 그림 글자를 문서 맨 끝에 붙여서 위치가 틀어지고, OCR 결과만 쓰면
@@ -23,6 +27,7 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
 
 import asyncio
 import json
+import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
@@ -31,6 +36,8 @@ from typing import Any
 from app.documents import elements as el
 from app.documents.formats import DocumentKind
 from app.documents.ocr_merge import merge_page, ocr_only_lines
+
+logger = logging.getLogger(__name__)
 
 OCR_LANGUAGE = "korean"
 """PaddleOCR 언어. 한국어 모델은 영문·숫자도 읽는다."""
@@ -153,6 +160,45 @@ def hwpml_to_text(data: bytes) -> str:
     return "\n\n".join(paragraphs)
 
 
+# --- PDF 텍스트 레이어 (pypdfium2) -----------------------------------------------------------------
+
+# pdfium 이 텍스트에 넣는 제어 문자: 줄 끝 하이픈(\x02), 글꼴에 없는 글자 자리(\x00, \ufffe 등)
+_PDFIUM_JUNK = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def _pdf_text_layers(data: bytes) -> dict[int, str] | None:
+    """PDF 의 쪽별 텍스트 레이어를 pdfium 으로 뽑는다 (PDF 에 그린 순서대로).
+
+    Args:
+        data: PDF 바이트.
+
+    Returns:
+        쪽 번호(1부터) → 텍스트. PDF 를 열지 못하면 ``None`` (호출하는 쪽이 xberg 결과를 쓴다).
+    """
+    import pypdfium2 as pdfium  # 파싱 프로세스에서만 불러온다
+
+    try:
+        pdf = pdfium.PdfDocument(data)
+    except pdfium.PdfiumError as exc:
+        logger.info("pdfium could not open the PDF, using xberg text: %s", exc)
+        return None
+    try:
+        layers: dict[int, str] = {}
+        for index in range(len(pdf)):
+            page = pdf[index]
+            textpage = page.get_textpage()
+            try:
+                text = textpage.get_text_bounded()
+            finally:
+                textpage.close()
+                page.close()
+            text = _PDFIUM_JUNK.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+            layers[index + 1] = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+        return layers
+    finally:
+        pdf.close()
+
+
 # --- xberg ---------------------------------------------------------------------------------------
 
 
@@ -237,6 +283,10 @@ async def _parse_with_xberg(
         )
     )
     text_pages = {p.page_number: p.content or "" for p in scan.pages or []}
+    # 줄 순서는 pdfium 의 텍스트 레이어를 쓴다. 읽지 못하거나 쪽 수가 다르면 xberg 결과를 그대로 쓴다.
+    layers = _pdf_text_layers(data)
+    if layers is not None and layers.keys() == text_pages.keys():
+        text_pages = layers
     page_count = len(text_pages)
     if page_count > max_pages:
         raise ParseError(f"쪽 수가 너무 많습니다 ({page_count}쪽, 최대 {max_pages}쪽).")

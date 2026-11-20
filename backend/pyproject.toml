@@ -31,6 +31,7 @@ dependencies = [
     "google-auth>=2.62.1",
     "requests>=2.34.2",
     "pgvector>=0.5.1",
+    "pypdfium2>=5.14.0",
 ]
 
 [dependency-groups]
@@ -69,6 +70,8 @@ constraint-dependencies = [
     "markdown-it-py<4.3.0",
     # (2026-11-20 프로젝트 문서 검색(pgvector) 추가 시)
     "pgvector<0.5.2",
+    # (2026-11-20 PDF 텍스트 레이어를 pypdfium2 로 뽑을 때. 5.15.x 는 11-09 출시)
+    "pypdfium2<5.15.0",
 ]
 
 [tool.ruff]

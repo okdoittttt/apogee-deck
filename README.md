@@ -361,6 +361,9 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 - **형식**: PDF, DOCX, XLSX, PPTX, HWP, HWPX, TXT, MD, CSV. 확장자가 아니라 파일 내용으로 형식을 확인하고, 압축 폭탄을 막습니다.
 - **파싱**: [xberg](https://github.com/kreuzberg-dev/kreuzberg)(Kreuzberg 후속, MIT) + PaddleOCR 한국어 모델.
   - PDF: 텍스트 레이어를 쓰고, 글자가 없는 쪽(스캔본)과 큰 그림이 섞인 쪽은 쪽 전체를 OCR 합니다.
+    텍스트 레이어는 [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)(Apache-2.0/BSD)로 뽑습니다. xberg 기본 추출은
+    "칸 이름 | 값" 이 나란한 표 같은 배치를 여러 단으로 읽어서 줄 순서가 뒤섞였기 때문입니다(회의록의 회의 내용이 섞임).
+    그림·표 목록과 OCR 은 xberg 를 그대로 씁니다.
   - Office·한글: 문서 안 그림을 OCR 해서 제자리에 넣습니다. 표는 Markdown 표로 남습니다.
   - XML 로 된 `.hwp`(국가법령정보센터 등의 HWPML)는 앱이 본문만 직접 뽑습니다.
 - **실행**: 문서마다 새 프로세스에서 시간 제한(`DOCUMENT_PARSE_TIMEOUT_SECONDS`, 기본 3분)을 걸고 파싱합니다.

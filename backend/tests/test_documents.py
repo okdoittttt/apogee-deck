@@ -9,12 +9,13 @@ from types import SimpleNamespace
 import pytest
 import subprocess_targets
 from fastapi import HTTPException
-from pdf_fixture import text_pdf
+from pdf_fixture import MEETING_LAYOUT, layout_pdf, text_pdf
 from starlette.datastructures import Headers, UploadFile
 
 from app.api.routers import documents as documents_router
 from app.core.config import Settings
 from app.documents import formats, service
+from app.documents import parser as parser_module
 from app.documents.formats import DocumentKind, UnsupportedDocumentError, detect, safe_filename
 from app.documents.parser import ParseError, hwpml_to_text, parse
 from app.documents.worker import ParseTimeoutError, parse_in_subprocess
@@ -158,6 +159,42 @@ def test_parse_text_pdf_with_page_markers():
     assert result.page_count == 2
     assert "<!-- PAGE 1 -->" in result.content and "Hello page one" in result.content
     assert result.content.index("Hello page one") < result.content.index("Second page")
+
+
+def test_pdf_side_by_side_layout_keeps_reading_order():
+    # 회의록처럼 "칸 이름 | 값" 이 나란한 배치. xberg 기본 추출은 이를 여러 단으로 읽어서
+    # 첫 회의의 장소·안건이 결정 문장 뒤로 밀렸다. 그린 순서(읽는 순서)를 지켜야 한다.
+    content = parse(layout_pdf(MEETING_LAYOUT), DocumentKind.PDF, "m.pdf", 10).content
+    expected = [
+        "Meeting 1 notes",
+        "Date",
+        "Nov 3 10AM",
+        "Room",
+        "A",
+        "People",
+        "Kim, Lee",
+        "Topic",
+        "Launch date",
+        "Decision: launch moves",
+        "Meeting 2 notes",
+        "Nov 10 10AM",
+        "Easy pay",
+        "Decision: easy pay",
+    ]
+    positions = []
+    start = 0
+    for text in expected:
+        start = content.index(text, start)
+        positions.append(start)
+    assert positions == sorted(positions)
+    # 같은 줄의 칸 이름과 값은 붙어 있다
+    assert "Date Nov 3 10AM Room A" in " ".join(content.split())
+
+
+def test_pdf_text_layers_fall_back_when_pdfium_cannot_open():
+    assert parser_module._pdf_text_layers(b"%PDF-1.4 garbage") is None
+    layers = parser_module._pdf_text_layers(text_pdf(["Hello page one", "Second page"]))
+    assert layers == {1: "Hello page one", 2: "Second page"}
 
 
 def test_parse_pdf_page_limit_and_broken_pdf():
