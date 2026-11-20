@@ -219,6 +219,7 @@ def test_sources_are_deduplicated_and_validated_for_the_screen():
     )
     assert [s.get("type") for s in shown] == ["document", "document", None]
     assert shown[0]["image_element_id"] == str(hit.image_element_id)
+    assert shown[0]["chunk_id"] == str(hit.chunk_id)  # 문서 보기 패널에서 근거 위치를 강조한다
     # 저장한 단계를 다시 읽을 때 두 종류 모두 스키마를 통과한다
     step = ToolStep(
         id="t",
@@ -234,6 +235,7 @@ def test_sources_are_deduplicated_and_validated_for_the_screen():
         "DocumentSource",
         "Source",
     ]
+    assert step.sources[0].chunk_id == str(hit.chunk_id)
 
 
 PROJECT = ProjectContext(id=uuid.uuid4(), name="보고서", instructions="", documents=[])

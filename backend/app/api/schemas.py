@@ -118,6 +118,7 @@ class DocumentSource(BaseModel):
         project_id: 프로젝트 ID.
         location: 쪽과 제목 경로 (예: ``"p.3 · 1장 > 1.1"``). 없으면 빈 문자열.
         image_element_id: 그림 결과면 그림 요소 ID (``GET /api/projects/{id}/images/{element_id}``).
+        chunk_id: 검색 결과 청크 ID (문서 보기 패널에서 근거 위치를 강조할 때). 예전 출처는 ``None``.
     """
 
     type: Literal["document"]
@@ -126,6 +127,7 @@ class DocumentSource(BaseModel):
     project_id: str
     location: str = ""
     image_element_id: str | None = None
+    chunk_id: str | None = None
 
 
 class ToolStep(BaseModel):
@@ -294,6 +296,66 @@ class DocumentOut(BaseModel):
 
 ProjectName = Annotated[str, Field(min_length=1, max_length=100, pattern=r"\S")]
 ProjectInstructions = Annotated[str, Field(max_length=20_000)]
+
+
+class DocumentBlock(BaseModel):
+    """문서 보기 패널의 블록 하나 (저장한 요소 하나).
+
+    Attributes:
+        id: 요소 ID.
+        kind: ``text`` | ``table`` | ``image``.
+        page: 쪽 번호. 없으면 ``None``.
+        heading: 제목 경로. 없으면 ``None``.
+        content: 본문, 표 Markdown, 그림 설명 또는 그림 속 OCR 글자.
+        described: 그림이면 설명을 만들었는지 (아니면 ``content`` 는 그림 속 OCR 글자다).
+        image_url: 그림 원본 주소 (API 기준 경로). 그림이 아니면 ``None``.
+    """
+
+    id: uuid.UUID
+    kind: str
+    page: int | None = None
+    heading: str | None = None
+    content: str
+    described: bool = False
+    image_url: str | None = None
+
+
+class DocumentHighlight(BaseModel):
+    """문서 보기 패널에서 강조할 근거 위치 (검색 결과 청크 하나).
+
+    Attributes:
+        block_ids: 강조할 블록(요소) ID.
+        text: 블록 안에서 한 번 더 표시할 청크 본문. 본문 청크가 아니면 ``None``.
+        page: 청크의 첫 쪽 번호.
+    """
+
+    block_ids: list[uuid.UUID]
+    text: str | None = None
+    page: int | None = None
+
+
+class DocumentView(BaseModel):
+    """프로젝트 문서의 추출 내용 (문서 보기 패널).
+
+    모델이 읽은 본문(요소 기반)과 같은 규칙으로 만든다. PDF 는 표 내용이 본문에 이미 있어서 표 블록을 뺀다.
+
+    Attributes:
+        id: 문서 ID.
+        filename: 파일 이름.
+        kind: 문서 형식.
+        status: 문서 상태. ``ready`` 가 아니면 블록이 비어 있을 수 있다.
+        page_count: 쪽 수.
+        blocks: 문서 순서대로의 블록.
+        highlight: ``chunk_id`` 를 주면 강조할 위치. 찾지 못하면 ``None``.
+    """
+
+    id: uuid.UUID
+    filename: str
+    kind: str
+    status: DocumentStatus
+    page_count: int | None = None
+    blocks: list[DocumentBlock]
+    highlight: DocumentHighlight | None = None
 
 
 class ProjectIn(BaseModel):

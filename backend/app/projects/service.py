@@ -4,6 +4,7 @@ HTTP 를 모른다. 사용자에게 보여줄 실패는 ``ProjectError`` (상태
 대화 기록(checkpoint)도 지워야 해서 대화 서비스(``app.conversations.service.delete_project``)가 맡는다.
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -14,7 +15,9 @@ from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.storage import ObjectNotFoundError, ObjectStorage
+from app.documents import elements as el
 from app.documents import service as documents
+from app.documents.formats import DocumentKind
 from app.documents.reading import AttachedDocument
 from app.models import Conversation, Document, DocumentChunk, DocumentElement, Project
 
@@ -310,6 +313,166 @@ async def read_element_image(
     except ObjectNotFoundError as exc:
         raise ProjectError(404, "Image not found") from exc
     return data, row.image_mime or "application/octet-stream"
+
+
+@dataclass(frozen=True)
+class ViewBlock:
+    """문서 보기 패널의 블록 하나 (저장한 요소 하나).
+
+    Attributes:
+        id: 요소 ID.
+        kind: ``text`` | ``table`` | ``image``.
+        page: 쪽 번호.
+        heading: 제목 경로.
+        content: 본문, 표 Markdown, 그림 설명 또는 그림 속 OCR 글자.
+        described: 그림 설명을 만들었는지.
+        has_image: 그림 원본이 저장돼 있는지.
+    """
+
+    id: uuid.UUID
+    kind: str
+    page: int | None
+    heading: str | None
+    content: str
+    described: bool
+    has_image: bool
+
+
+@dataclass(frozen=True)
+class ViewHighlight:
+    """문서 보기 패널에서 강조할 근거 위치.
+
+    Attributes:
+        block_ids: 강조할 블록 ID. 찾지 못하면 빈 목록 (그때는 ``page`` 로 스크롤한다).
+        text: 블록 안에서 한 번 더 표시할 청크 본문 (긴 본문을 나눈 조각일 때만).
+        page: 청크의 첫 쪽 번호.
+    """
+
+    block_ids: list[uuid.UUID]
+    text: str | None
+    page: int | None
+
+
+@dataclass(frozen=True)
+class DocumentViewData:
+    """프로젝트 문서의 추출 내용.
+
+    Attributes:
+        document: 문서.
+        blocks: 문서 순서대로의 블록.
+        highlight: 강조할 위치. 청크를 주지 않았거나 이 문서의 청크가 아니면 ``None``.
+    """
+
+    document: Document
+    blocks: list[ViewBlock]
+    highlight: ViewHighlight | None
+
+
+async def document_view(
+    session: AsyncSession,
+    project: Project,
+    document_id: uuid.UUID,
+    chunk_id: uuid.UUID | None = None,
+) -> DocumentViewData:
+    """프로젝트 문서의 추출 내용을 블록으로 돌려준다 (문서 보기 패널).
+
+    문서 본문(``elements.compose_content``)과 같은 규칙으로 블록을 고른다. 그래서 패널에 보이는 내용이
+    모델이 읽은 내용과 같다. PDF 는 표 내용이 본문에 이미 있어서 표 블록을 뺀다.
+
+    Args:
+        session: DB 세션.
+        project: 프로젝트 (``get_own`` 으로 확인한 것).
+        document_id: 문서 ID.
+        chunk_id: 강조할 검색 결과 청크 ID. 없으면 강조하지 않는다.
+
+    Returns:
+        문서, 블록, 강조할 위치.
+
+    Raises:
+        ProjectError: 이 프로젝트의 문서가 아니면 404.
+    """
+    doc = await session.scalar(
+        select(Document)
+        .options(defer(Document.content))
+        .where(Document.id == document_id, Document.project_id == project.id)
+    )
+    if doc is None:
+        raise ProjectError(404, "Document not found")
+    skip_tables = doc.kind == DocumentKind.PDF
+    rows = await session.execute(
+        select(
+            DocumentElement.id,
+            DocumentElement.kind,
+            DocumentElement.page,
+            DocumentElement.heading,
+            DocumentElement.content,
+            DocumentElement.image_key,
+            DocumentElement.image_status,
+        )
+        .where(DocumentElement.document_id == doc.id)
+        .order_by(DocumentElement.position)
+    )
+    blocks = [
+        ViewBlock(
+            r.id,
+            r.kind,
+            r.page,
+            r.heading,
+            r.content.strip(),
+            r.image_status == "described",
+            bool(r.image_key),
+        )
+        for r in rows
+        if el.is_shown(r.kind, r.content, skip_tables)
+    ]
+    highlight = None
+    if chunk_id is not None:
+        chunk = await session.scalar(
+            select(DocumentChunk).where(
+                DocumentChunk.id == chunk_id, DocumentChunk.document_id == doc.id
+            )
+        )
+        if chunk is not None:
+            highlight = _highlight(chunk, blocks)
+    return DocumentViewData(doc, blocks, highlight)
+
+
+def _squash(text: str) -> str:
+    """띄어쓰기·줄바꿈을 뺀 글자 (청크를 만들 때 공백이 바뀌어도 같은 내용으로 본다)."""
+    return re.sub(r"\s+", "", text)
+
+
+def _highlight(chunk: DocumentChunk, blocks: list[ViewBlock]) -> ViewHighlight:
+    """청크가 가리키는 블록을 찾는다.
+
+    청크에 요소 ID 가 있으면 그것을 쓰고, 없으면(열을 추가하기 전에 만든 청크) 같은 쪽 범위에서
+    내용이 겹치는 블록을 찾는다. PDF 표 청크처럼 보이지 않는 요소를 가리키면 블록 없이 쪽만 준다.
+    """
+    shown = {b.id: b for b in blocks}
+    if chunk.element_ids:
+        ids = [i for i in chunk.element_ids if i in shown]
+    elif chunk.image_element_id is not None:
+        ids = [chunk.image_element_id] if chunk.image_element_id in shown else []
+    else:
+        target = _squash(chunk.content)
+        pages = (chunk.page_start, chunk.page_end or chunk.page_start)
+        ids = [
+            b.id
+            for b in blocks
+            if b.kind == chunk.kind
+            and (pages[0] is None or (b.page is not None and pages[0] <= b.page <= pages[1]))
+            and (body := _squash(b.content))
+            and (body in target or target in body)
+        ]
+    text = None
+    # 긴 본문을 나눈 조각이면 블록 안의 그 부분을 한 번 더 표시한다.
+    if (
+        chunk.kind == "text"
+        and len(ids) == 1
+        and _squash(shown[ids[0]].content) != _squash(chunk.content)
+    ):
+        text = chunk.content
+    return ViewHighlight(ids, text, chunk.page_start)
 
 
 @dataclass(frozen=True)

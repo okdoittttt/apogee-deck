@@ -329,6 +329,20 @@ class ContentPart:
     described: bool = False
 
 
+def is_shown(kind: str, content: str, skip_tables: bool) -> bool:
+    """요소를 문서 본문과 문서 보기에 넣을지. 둘이 같은 내용을 보이도록 같은 규칙을 쓴다.
+
+    Args:
+        kind: 요소 종류.
+        content: 요소 내용 (그림은 설명 또는 OCR 글자).
+        skip_tables: 표를 뺄지 (PDF 는 표 내용이 본문에 이미 있다).
+
+    Returns:
+        넣을 요소면 ``True``. 내용이 빈 요소와 (``skip_tables`` 면) 표는 뺀다.
+    """
+    return bool(content.strip()) and not (skip_tables and kind == "table")
+
+
 def compose_content(parts: list[ContentPart], skip_tables: bool = False) -> str:
     """요소로 문서 본문을 만든다. 문서 읽기(``read_document``)와 본문 넣기가 검색과 같은 내용을 보게 한다.
 
@@ -347,9 +361,9 @@ def compose_content(parts: list[ContentPart], skip_tables: bool = False) -> str:
     page: int | None = None
     heading: str | None = None
     for part in parts:
-        text = part.content.strip()
-        if not text or (skip_tables and part.kind == "table"):
+        if not is_shown(part.kind, part.content, skip_tables):
             continue
+        text = part.content.strip()
         if part.page is not None and part.page != page:
             page = part.page
             blocks.append(f"<!-- PAGE {page} -->")

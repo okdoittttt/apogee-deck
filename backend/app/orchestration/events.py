@@ -146,7 +146,7 @@ def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
 
     - 웹 페이지: ``{"title", "url", "published_date"}``. ``http``/``https`` 주소만 남긴다.
     - 프로젝트 문서 (``"type": "document"``): ``{"title", "document_id", "project_id", "location",
-      "image_element_id"}``. ID 는 UUID 형식만 남긴다.
+      "image_element_id", "chunk_id"}``. ID 는 UUID 형식만 남긴다.
 
     Args:
         artifact: ``ToolMessage.artifact``.
@@ -197,6 +197,7 @@ def _document_source(item: dict[str, Any]) -> dict[str, str | None] | None:
         "project_id": project_id,
         "location": str(item.get("location") or ""),
         "image_element_id": _uuid_or_none(item.get("image_element_id")),
+        "chunk_id": _uuid_or_none(item.get("chunk_id")),
     }
 
 

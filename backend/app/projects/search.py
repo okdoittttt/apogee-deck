@@ -306,7 +306,9 @@ def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]
         hits: 검색 결과.
 
     Returns:
-        ``{"type": "document", "title", "document_id", "project_id", "location", "image_element_id"}`` 목록.
+        ``{"type": "document", "title", "document_id", "project_id", "location", "image_element_id",
+        "chunk_id"}`` 목록. ``chunk_id`` 는 문서 보기 패널에서 근거 위치를 강조할 때 쓴다
+        (같은 위치의 청크가 여럿이면 가장 앞선 것).
     """
     found: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None]] = set()
@@ -334,6 +336,7 @@ def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]
                 "project_id": str(project_id),
                 "location": location,
                 "image_element_id": image,
+                "chunk_id": str(hit.chunk_id),
             }
         )
     return found

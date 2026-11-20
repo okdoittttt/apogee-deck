@@ -13,7 +13,10 @@ from sqlalchemy import select
 from app.api.deps import ApprovedUser, SessionDep
 from app.api.schemas import (
     ConversationOut,
+    DocumentBlock,
+    DocumentHighlight,
     DocumentOut,
+    DocumentView,
     ProjectDetail,
     ProjectIn,
     ProjectOut,
@@ -281,6 +284,65 @@ async def _reprocess(session: SessionDep, project: Project, document_id: uuid.UU
         raise _http_error(exc) from exc
     documents.schedule_parse(doc.id, data, doc.kind, doc.filename)
     return doc
+
+
+@router.get("/{project_id}/documents/{document_id}/view")
+async def view_project_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    session: SessionDep,
+    user: ApprovedUser,
+    chunk_id: uuid.UUID | None = None,
+) -> DocumentView:
+    """프로젝트 문서의 추출 내용을 돌려준다 (문서 보기 패널).
+
+    Args:
+        project_id: 프로젝트 ID.
+        document_id: 문서 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+        chunk_id: 강조할 검색 결과 청크 ID (출처 카드의 ``chunk_id``).
+
+    Returns:
+        블록 목록과 강조할 위치.
+
+    Raises:
+        HTTPException: 프로젝트나 문서가 없거나 내 것이 아니면 404.
+    """
+    project = await _own(session, project_id, user)
+    try:
+        view = await service.document_view(session, project, document_id, chunk_id)
+    except ProjectError as exc:
+        raise _http_error(exc) from exc
+    doc = view.document
+    return DocumentView(
+        id=doc.id,
+        filename=doc.filename,
+        kind=doc.kind,
+        status=doc.status,
+        page_count=doc.page_count,
+        blocks=[
+            DocumentBlock(
+                id=b.id,
+                kind=b.kind,
+                page=b.page,
+                heading=b.heading,
+                content=b.content,
+                described=b.described,
+                image_url=f"/api/projects/{project.id}/images/{b.id}" if b.has_image else None,
+            )
+            for b in view.blocks
+        ],
+        highlight=(
+            DocumentHighlight(
+                block_ids=view.highlight.block_ids,
+                text=view.highlight.text,
+                page=view.highlight.page,
+            )
+            if view.highlight
+            else None
+        ),
+    )
 
 
 @router.get("/{project_id}/images/{element_id}")
