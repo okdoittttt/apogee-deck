@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AuthGate } from "@/components/Auth";
 import { Composer } from "@/components/Composer";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
@@ -34,6 +35,7 @@ import {
   streamChat,
   uploadDocument,
 } from "@/lib/api";
+import type { User } from "@/lib/auth";
 import { type PendingDocument, extensionOf, formatBytes, isImageFile } from "@/lib/documents";
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
 
@@ -60,6 +62,25 @@ function greeting(): string {
 }
 
 export default function ChatPage() {
+  return (
+    <AuthGate>
+      {(user, me, onLogout) => (
+        <ChatApp user={user} authRequired={me.auth_required} onLogout={onLogout} />
+      )}
+    </AuthGate>
+  );
+}
+
+/** 승인된 사용자의 채팅 화면. */
+function ChatApp({
+  user,
+  authRequired,
+  onLogout,
+}: {
+  user: User;
+  authRequired: boolean;
+  onLogout: () => void;
+}) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -678,6 +699,9 @@ export default function ChatPage() {
           onOpen={openConversation}
           onDelete={removeConversation}
           onClose={() => toggleSidebar(false)}
+          user={user}
+          authRequired={authRequired}
+          onLogout={onLogout}
         />
       </div>
 

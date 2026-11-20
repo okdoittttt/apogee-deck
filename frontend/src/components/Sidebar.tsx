@@ -2,6 +2,8 @@
 
 import { forwardRef, useMemo, useState } from "react";
 import type { AppInfo, Conversation } from "@/lib/api";
+import type { User } from "@/lib/auth";
+import { Avatar } from "./Auth";
 import { LogoIcon, PlusIcon, SearchIcon, SidebarIcon, TrashIcon } from "./icons";
 
 interface SidebarProps {
@@ -14,10 +16,27 @@ interface SidebarProps {
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
   onClose: () => void;
+  /** 로그인한 사용자 (아래쪽 사용자 메뉴) */
+  user?: User;
+  /** 로그인을 요구하는 설정인지. 아니면(로컬 사용자) 로그아웃을 숨긴다. */
+  authRequired?: boolean;
+  onLogout?: () => void;
 }
 
 export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sidebar(
-  { conversations, activeId, info, modelLabel, onNew, onOpen, onDelete, onClose },
+  {
+    conversations,
+    activeId,
+    info,
+    modelLabel,
+    onNew,
+    onOpen,
+    onDelete,
+    onClose,
+    user,
+    authRequired = false,
+    onLogout,
+  },
   searchRef,
 ) {
   const [query, setQuery] = useState("");
@@ -104,9 +123,9 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
         ))}
       </nav>
 
-      {/* Footer: 현재 모델 */}
-      <div className="border-t border-line px-4 py-3">
-        <div className="flex items-center gap-2 text-xs text-muted">
+      {/* Footer: 현재 모델, 사용자 */}
+      <div className="space-y-2 border-t border-line px-3 py-3">
+        <div className="flex items-center gap-2 px-1 text-xs text-muted">
           <span
             className={`h-2 w-2 rounded-full ${info ? "bg-emerald-500" : "bg-subtle"}`}
             aria-hidden
@@ -115,6 +134,26 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
             {info ? (modelLabel ?? "사용 가능한 모델 없음") : "백엔드 연결 중…"}
           </span>
         </div>
+        {user && (
+          <div className="flex items-center gap-2.5 rounded-lg px-1 py-1">
+            <Avatar user={user} size="h-7 w-7" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm text-fg">{user.name}</div>
+              <div className="flex gap-2 text-[11px] text-muted">
+                {user.is_admin && (
+                  <a href="/admin" className="hover:text-fg">
+                    관리
+                  </a>
+                )}
+                {authRequired && onLogout && (
+                  <button onClick={onLogout} className="hover:text-fg">
+                    로그아웃
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );

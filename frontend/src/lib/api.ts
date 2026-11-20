@@ -1,5 +1,30 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+/** 로그인 상태가 바뀌었을 수 있을 때(401, 승인 상태 403) 보내는 이벤트. AuthGate 가 내 정보를 다시 읽는다. */
+export const AUTH_CHANGED_EVENT = "auth-changed";
+
+/**
+ * 백엔드 요청. 세션 쿠키를 붙이고(화면과 백엔드의 포트가 달라도), 로그인이 풀렸거나
+ * 승인 상태가 바뀌어 거절되면 AUTH_CHANGED_EVENT 를 보낸다.
+ */
+export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${API_URL}${path}`, { credentials: "include", ...init });
+  if (res.status === 401 || (res.status === 403 && (await isStatusError(res)))) {
+    window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+  }
+  return res;
+}
+
+/** 403 이 승인 상태(대기·거절·정지) 때문인지. 본문은 복사본으로 읽어서 호출한 쪽이 다시 읽을 수 있다. */
+async function isStatusError(res: Response): Promise<boolean> {
+  try {
+    const body = await res.clone().json();
+    return typeof body?.detail === "object" && typeof body.detail?.code === "string";
+  } catch {
+    return false;
+  }
+}
+
 export type Role = "user" | "assistant";
 
 /** 실행 단계: 모델의 추론 과정 (Claude 는 요약, qwen 등은 원문). */
@@ -75,7 +100,7 @@ export interface Conversation {
 }
 
 export async function listConversations(): Promise<Conversation[]> {
-  const res = await fetch(`${API_URL}/api/conversations`);
+  const res = await apiFetch(`/api/conversations`);
   if (!res.ok) throw new Error(`Failed to load conversations (${res.status})`);
   return res.json();
 }
@@ -86,7 +111,7 @@ export interface ConversationDetail extends Conversation {
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const res = await fetch(`${API_URL}/api/conversations/${id}`);
+  const res = await apiFetch(`/api/conversations/${id}`);
   if (!res.ok) throw new Error(`Failed to load conversation (${res.status})`);
   const data: Conversation & { messages: MessageOut[]; running: boolean } = await res.json();
   return {
@@ -110,7 +135,7 @@ export interface ImageInput {
 
 /** 대화의 응답 생성 여부. 다른 창의 응답이 끝났는지 주기적으로 확인할 때 쓴다. */
 export async function getConversationStatus(id: string): Promise<{ running: boolean }> {
-  const res = await fetch(`${API_URL}/api/conversations/${id}/status`);
+  const res = await apiFetch(`/api/conversations/${id}/status`);
   if (!res.ok) throw new Error(`Failed to load status (${res.status})`);
   return res.json();
 }
@@ -126,7 +151,7 @@ async function errorDetail(res: Response): Promise<string> {
 
 /** 대화를 삭제한다. 응답 생성 중이면 서버가 409 로 거절하며, 그 이유를 담아 예외를 던진다. */
 export async function deleteConversation(id: string): Promise<void> {
-  const res = await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE" });
+  const res = await apiFetch(`/api/conversations/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
 }
 
@@ -174,7 +199,7 @@ export async function streamChat(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API_URL}/api/chat`, {
+  const res = await apiFetch(`/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -261,25 +286,25 @@ export const documentFileUrl = (id: string) => `${API_URL}/api/documents/${id}/f
 export async function uploadDocument(file: File, signal?: AbortSignal): Promise<DocumentInfo> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_URL}/api/documents`, { method: "POST", body: form, signal });
+  const res = await apiFetch(`/api/documents`, { method: "POST", body: form, signal });
   if (!res.ok) throw new Error((await errorDetail(res)) || `업로드 실패 (${res.status})`);
   return res.json();
 }
 
 /** 문서의 파싱 상태를 확인한다. */
 export async function getDocument(id: string): Promise<DocumentInfo> {
-  const res = await fetch(`${API_URL}/api/documents/${id}`);
+  const res = await apiFetch(`/api/documents/${id}`);
   if (!res.ok) throw new Error((await errorDetail(res)) || `문서 조회 실패 (${res.status})`);
   return res.json();
 }
 
 /** 보내지 않은 문서를 지운다 (입력창에서 첨부를 뺄 때). 실패해도 서버가 하루 뒤 지운다. */
 export async function deleteDocument(id: string): Promise<void> {
-  await fetch(`${API_URL}/api/documents/${id}`, { method: "DELETE" }).catch(() => undefined);
+  await apiFetch(`/api/documents/${id}`, { method: "DELETE" }).catch(() => undefined);
 }
 
 export async function getInfo(): Promise<AppInfo> {
-  const res = await fetch(`${API_URL}/api/info`);
+  const res = await apiFetch(`/api/info`);
   if (!res.ok) throw new Error(`Failed to load info (${res.status})`);
   return res.json();
 }
@@ -300,7 +325,7 @@ export interface ModelList {
 
 /** 지금 쓸 수 있는 모델 목록 (API 키가 있는 provider, 실행 중인 Ollama 의 설치 모델). */
 export async function getModels(): Promise<ModelList> {
-  const res = await fetch(`${API_URL}/api/models`);
+  const res = await apiFetch(`/api/models`);
   if (!res.ok) throw new Error(`Failed to load models (${res.status})`);
   return res.json();
 }
