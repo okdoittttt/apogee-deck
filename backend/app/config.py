@@ -159,8 +159,8 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
     openai_model: str = "gpt-6-luna"
-    openai_models: str = "gpt-6-luna,gpt-5-mini,gpt-6.1-terra"
-    openai_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = "low"
+    openai_models: str = "gpt-6-luna,gpt-5.6-luna,gpt-6.1-terra"
+    openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = "low"
     openai_reasoning_summary: bool = True
     openai_max_output_tokens: int = 8192
     openai_timeout_seconds: float = 120.0

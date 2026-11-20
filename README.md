@@ -55,7 +55,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 
 | provider | 목록에 나오는 조건 | 모델 |
 |---|---|---|
-| `openai` | `OPENAI_API_KEY` 가 있을 때 | `OPENAI_MODELS` (기본 gpt-6-luna, gpt-5-mini, gpt-6.1-terra) |
+| `openai` | `OPENAI_API_KEY` 가 있을 때 | `OPENAI_MODELS` (기본 gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra) |
 | `google` | `GOOGLE_API_KEY` 가 있을 때 | `GOOGLE_MODELS` (기본 Gemma 4 26B, 31B) |
 | `anthropic` | `ANTHROPIC_API_KEY` 가 있을 때 | `ANTHROPIC_MODELS` (기본 Opus, Sonnet, Haiku) |
 | `ollama` | Ollama 서버가 응답할 때 | 설치된 모델 전체 (`ollama list`). 꺼져 있으면 빠집니다 |

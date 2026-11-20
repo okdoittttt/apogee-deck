@@ -49,7 +49,7 @@ async def test_openai_models_are_listed_first(monkeypatch):
     ids = [
         o.id for o in await available_models(SETTINGS.model_copy(update={"google_api_key": "k"}))
     ]
-    assert ids[:3] == ["openai:gpt-6-luna", "openai:gpt-5-mini", "openai:gpt-6.1-terra"]
+    assert ids[:3] == ["openai:gpt-6-luna", "openai:gpt-5.6-luna", "openai:gpt-6.1-terra"]
     assert ids[3].startswith("google:")
 
 
