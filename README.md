@@ -305,17 +305,18 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 
 ## 첨부 파일 저장소 (MinIO)
 
-첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다. 문서 첨부 기능은 [ROADMAP.md](ROADMAP.md)에서 단계별로 만들고 있습니다.
+첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다.
 
 - Langfuse 용 MinIO 와 계정·볼륨을 나눴습니다. Langfuse 없이도 동작하고, Langfuse 를 초기화해도 첨부 원본은 남습니다.
 - 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일)을 만듭니다.
   MinIO 에 연결하지 못해도 앱은 시작하고, 첨부만 쓸 수 없습니다.
 - 코드는 MinIO 전용 API 가 아니라 S3 API(boto3)만 씁니다. `S3_ENDPOINT_URL`과 키만 바꾸면 AWS S3, Cloudflare R2 등으로 옮길 수 있습니다.
 
-### 첨부 문서 (진행 중)
+### 첨부 문서
 
 `POST /api/documents`로 문서를 올리면 원본을 저장소에 넣고, 백그라운드에서 텍스트로 바꿉니다.
-파싱이 끝난 문서를 `POST /api/chat`의 `document_ids`로 보내면 모델이 읽고 답합니다. 화면은 다음 단계에서 붙입니다 ([ROADMAP.md](ROADMAP.md)).
+파싱이 끝난 문서를 `POST /api/chat`의 `document_ids`로 보내면 모델이 읽고 답합니다.
+화면에서는 입력창의 첨부 버튼, 붙여넣기, 끌어다 놓기로 올리고, 다 읽을 때까지 파일 칩에 상태가 보입니다.
 
 - **형식**: PDF, DOCX, XLSX, PPTX, HWP, HWPX, TXT, MD, CSV. 확장자가 아니라 파일 내용으로 형식을 확인하고, 압축 폭탄을 막습니다.
 - **파싱**: [xberg](https://github.com/kreuzberg-dev/kreuzberg)(Kreuzberg 후속, MIT) + PaddleOCR 한국어 모델.
