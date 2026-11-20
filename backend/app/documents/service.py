@@ -276,7 +276,6 @@ async def _ingest_project_document(
     await _finish_project_document(
         document_id,
         project_id,
-        result.content,
         [element_id for element_id, _ in images],
         [k for _, _, k in plan if k],
         len(plan),
@@ -339,16 +338,21 @@ async def _describe_images(
 async def _finish_project_document(
     document_id: uuid.UUID,
     project_id: uuid.UUID,
-    content: str,
     image_ids: list[uuid.UUID],
     image_keys: list[str],
     element_count: int,
     described: dict[uuid.UUID, str],
 ) -> None:
-    """그림 설명을 저장하고 용량을 확인한 뒤 검색 준비(``index_document``)로 넘긴다. 넘으면 ``failed``."""
+    """그림 설명을 저장하고, 요소로 본문을 다시 만들고, 용량을 확인한 뒤 검색 준비로 넘긴다.
+
+    본문(``documents.content``)은 파서가 만든 것 대신 요소(본문·표·그림 설명)로 다시 만든다
+    (``elements.compose_content``). 그래야 문서 읽기(``read_document``), 작은 프로젝트의 본문 넣기, 검색이
+    모두 같은 내용을 본다. 용량을 넘으면 ``failed`` 로 바꾸고 요소와 그림 원본을 지운다.
+    """
     settings = get_settings()
-    total = estimate_tokens(content) + sum(estimate_tokens(t) for t in described.values())
     async with SessionLocal() as session:
+        content = await _compose_document_content(session, document_id, described)
+        total = estimate_tokens(content)
         used = await project_usage(session, project_id, exclude=document_id)
         if used + total > settings.project_max_tokens:
             await session.execute(
@@ -377,6 +381,7 @@ async def _finish_project_document(
             .where(Document.id == document_id, Document.status.in_(BUSY_STATUSES))
             .values(
                 status="indexing",
+                content=content,
                 token_count=total,
                 image_fallback_count=len(image_ids) - len(described),
             )
@@ -394,6 +399,36 @@ async def _finish_project_document(
         total,
     )
     await index_document(document_id)
+
+
+async def _compose_document_content(
+    session: AsyncSession, document_id: uuid.UUID, described: dict[uuid.UUID, str]
+) -> str:
+    """저장한 요소와 새로 만든 그림 설명으로 문서 본문을 만든다 (``elements.compose_content``)."""
+    kind = await session.scalar(select(Document.kind).where(Document.id == document_id))
+    rows = await session.execute(
+        select(
+            DocumentElement.id,
+            DocumentElement.kind,
+            DocumentElement.content,
+            DocumentElement.page,
+            DocumentElement.heading,
+        )
+        .where(DocumentElement.document_id == document_id)
+        .order_by(DocumentElement.position)
+    )
+    parts = [
+        el.ContentPart(
+            r.kind,
+            described.get(r.id, r.content),
+            r.page,
+            r.heading,
+            described=r.id in described,
+        )
+        for r in rows
+    ]
+    # PDF 는 표 내용이 본문에 행 단위로 이미 들어 있다.
+    return el.compose_content(parts, skip_tables=kind == DocumentKind.PDF)
 
 
 # --- 검색 준비: 요소 → 청크 → 임베딩 ----------------------------------------------------------------

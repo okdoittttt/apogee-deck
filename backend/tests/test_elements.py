@@ -141,3 +141,30 @@ def test_vision_model_needs_openai_key():
         vision.build_vision_model(Settings(openai_api_key=""))
     model = vision.build_vision_model(Settings(openai_api_key="sk-test"))
     assert model.model_name == "gpt-6-luna"
+
+
+def test_compose_content_for_pdf_skips_tables_and_labels_figures():
+    parts = [
+        el.ContentPart("text", "1쪽 본문", 1),
+        el.ContentPart("table", "| a | b |\n| --- | --- |", 1),
+        el.ContentPart("image", "10월 앱 만족도는 4.3점이다.", 1, described=True),
+        el.ContentPart("text", "2쪽 본문", 2),
+        el.ContentPart("image", "그림 2\n-6\n60대 이상", 2),  # 설명 실패: OCR 글자
+        el.ContentPart("image", "", 2),  # 설명도 OCR 글자도 없는 그림은 뺀다
+    ]
+    assert el.compose_content(parts, skip_tables=True) == (
+        "<!-- PAGE 1 -->\n\n1쪽 본문\n\n[그림] 10월 앱 만족도는 4.3점이다.\n\n"
+        "<!-- PAGE 2 -->\n\n2쪽 본문\n\n[그림 속 글자 (OCR)] 그림 2 / -6 / 60대 이상"
+    )
+
+
+def test_compose_content_for_office_keeps_tables_and_headings():
+    parts = [
+        el.ContentPart("text", "머리말", None, None),
+        el.ContentPart("text", "본문", None, "**1장 매출**"),
+        el.ContentPart("table", "| 지역 | 매출 |\n| --- | --- |", None, "**1장 매출**"),
+        el.ContentPart("text", "재고 본문", None, "2장 재고"),
+    ]
+    assert el.compose_content(parts) == (
+        "머리말\n\n## 1장 매출\n\n본문\n\n| 지역 | 매출 |\n| --- | --- |\n\n## 2장 재고\n\n재고 본문"
+    )

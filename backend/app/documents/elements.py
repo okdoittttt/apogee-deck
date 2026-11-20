@@ -304,3 +304,63 @@ def limit_images(elements: list[Element], max_images: int) -> list[Element]:
                 continue
         kept.append(e)
     return kept
+
+
+FIGURE_LABEL = "[그림]"
+FIGURE_OCR_LABEL = "[그림 속 글자 (OCR)]"
+
+
+@dataclass(frozen=True)
+class ContentPart:
+    """문서 본문을 다시 만들 때 쓰는 요소 하나 (DB 에 저장한 요소에서 만든다).
+
+    Attributes:
+        kind: ``text`` | ``table`` | ``image``.
+        content: 본문, 표 Markdown, 그림 설명 또는 그림 속 글자.
+        page: 쪽 번호. 없으면 ``None``.
+        heading: 제목 경로. 없으면 ``None``.
+        described: 그림이면 설명을 만들었는지 (아니면 ``content`` 는 그림 속 OCR 글자다).
+    """
+
+    kind: str
+    content: str
+    page: int | None = None
+    heading: str | None = None
+    described: bool = False
+
+
+def compose_content(parts: list[ContentPart], skip_tables: bool = False) -> str:
+    """요소로 문서 본문을 만든다. 문서 읽기(``read_document``)와 본문 넣기가 검색과 같은 내용을 보게 한다.
+
+    - 쪽이 바뀌면 ``<!-- PAGE n -->`` 를 넣는다.
+    - 제목 경로가 바뀌면 ``## 제목 경로`` 를 넣는다 (Office·한글).
+    - 그림은 설명이 있으면 ``[그림] 설명``, 없으면 ``[그림 속 글자 (OCR)] 글자`` 로 넣는다. 둘 다 없으면 뺀다.
+
+    Args:
+        parts: 문서 순서대로의 요소.
+        skip_tables: 표 요소를 뺄지. PDF 는 표 내용이 본문에 행 단위로 이미 들어 있어서 뺀다.
+
+    Returns:
+        본문 (Markdown).
+    """
+    blocks: list[str] = []
+    page: int | None = None
+    heading: str | None = None
+    for part in parts:
+        text = part.content.strip()
+        if not text or (skip_tables and part.kind == "table"):
+            continue
+        if part.page is not None and part.page != page:
+            page = part.page
+            blocks.append(f"<!-- PAGE {page} -->")
+        if part.heading and part.heading != heading:
+            heading = part.heading
+            blocks.append("## " + heading.replace("**", "").strip())
+        if part.kind == "image":
+            label = FIGURE_LABEL if part.described else FIGURE_OCR_LABEL
+            if not part.described:
+                text = " / ".join(line.strip() for line in text.splitlines() if line.strip())
+            blocks.append(f"{label} {text}")
+        else:
+            blocks.append(text)
+    return "\n\n".join(blocks)
