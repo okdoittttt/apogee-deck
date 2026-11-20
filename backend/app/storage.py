@@ -19,6 +19,9 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+DOCUMENTS_PREFIX = "documents/"
+"""보관 기간 규칙을 받는 객체 키 접두어 (문서 원본)."""
+
 LIFECYCLE_RULE_ID = "expire-attachments"
 """첨부 원본을 보관 기간 뒤에 지우는 버킷 lifecycle 규칙의 ID."""
 
@@ -111,7 +114,8 @@ class ObjectStorage:
                     {
                         "ID": LIFECYCLE_RULE_ID,
                         "Status": "Enabled",
-                        "Filter": {"Prefix": ""},
+                        # 문서 원본만 보관 기간 뒤에 지운다. 채팅 이미지(images/)는 대화 내용이라 대화와 함께 둔다.
+                        "Filter": {"Prefix": DOCUMENTS_PREFIX},
                         "Expiration": {"Days": self.retention_days},
                     }
                 ]

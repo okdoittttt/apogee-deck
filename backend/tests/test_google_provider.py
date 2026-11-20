@@ -163,7 +163,12 @@ async def test_image_input_is_sent_as_inline_data(monkeypatch, fake_google):
     monkeypatch.setitem(runtime._graphs, "chat", graph)
 
     png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
-    events = [e async for e in runtime.stream_reply("g2", "이게 뭐야?", [("image/png", png)])]
+    events = [
+        e
+        async for e in runtime.stream_reply(
+            "g2", "이게 뭐야?", [{"type": "image", "base64": png, "mime_type": "image/png"}]
+        )
+    ]
 
     assert events[-1].text == "고양이입니다."
     parts = [p for c in models.requests[0]["contents"] for p in c.parts]

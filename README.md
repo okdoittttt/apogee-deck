@@ -109,8 +109,10 @@ make backend
 
 ### 이미지 입력 (VLM)
 채팅 입력창에서 이미지 버튼, 붙여넣기, 드래그 앤 드롭으로 첨부합니다(메시지당 최대 4장).
-- 프론트엔드가 긴 변 1024px로 줄여서 base64로 전송 → 백엔드가 검증(형식, 5MB, 장수) 후 `message_images` 테이블에 저장
-- LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 만들어 그래프에 전달 → Anthropic / Google / Ollama 형식으로 자동 변환
+- 프론트엔드가 긴 변 1024px로 줄여서 base64로 전송 → 백엔드가 검증(형식, 5MB, 장수) 후 원본을 첨부 저장소(MinIO `images/<ID>`)에 저장하고, `message_images` 테이블에는 객체 키만 저장
+- 대화 상태(checkpoint)에는 원본 대신 이미지 ID 만 담은 참조 블록을 저장 → 턴마다 같은 이미지가 다시 쌓이지 않음
+- 모델을 부르기 직전에 참조를 LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 바꿔서 전달 → Anthropic / Google / Ollama 형식으로 자동 변환 (`app/images.py`)
+- 이미지는 문서 원본과 달리 보관 기간으로 지우지 않고, 대화를 지울 때 함께 지움 (첨부 저장소가 없으면 이미지 전송은 503)
 - 화면에서는 `GET /api/images/{id}`로 이미지를 불러옴
 - vision을 지원하지 않는 모델이면 `ENABLE_VISION=false` (이미지 첨부 시 400 응답)
 
@@ -329,7 +331,7 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다.
 
 - Langfuse 용 MinIO 와 계정·볼륨을 나눴습니다. Langfuse 없이도 동작하고, Langfuse 를 초기화해도 첨부 원본은 남습니다.
-- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일)을 만듭니다.
+- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일, 문서 원본 `documents/` 에만 적용)을 만듭니다.
   MinIO 에 연결하지 못해도 앱은 시작하고, 첨부만 쓸 수 없습니다.
 - 코드는 MinIO 전용 API 가 아니라 S3 API(boto3)만 씁니다. `S3_ENDPOINT_URL`과 키만 바꾸면 AWS S3, Cloudflare R2 등으로 옮길 수 있습니다.
 

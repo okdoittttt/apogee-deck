@@ -23,7 +23,7 @@ LIFECYCLE = {
             {
                 "ID": LIFECYCLE_RULE_ID,
                 "Status": "Enabled",
-                "Filter": {"Prefix": ""},
+                "Filter": {"Prefix": "documents/"},
                 "Expiration": {"Days": 30},
             }
         ]

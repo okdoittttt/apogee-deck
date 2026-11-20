@@ -30,7 +30,9 @@ async def test_images_are_passed_to_model(monkeypatch):
     graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
     monkeypatch.setitem(runtime._graphs, "chat", graph)
 
-    streamed, _ = await _run("t2", "이게 뭐야?", [("image/png", "iVBORw0KGgo=")])
+    streamed, _ = await _run(
+        "t2", "이게 뭐야?", [{"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"}]
+    )
     assert "(+1 image)" in streamed
 
 

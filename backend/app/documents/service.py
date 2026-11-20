@@ -22,7 +22,7 @@ from app.documents.parser import ParseError
 from app.documents.reading import AttachedDocument, estimate_tokens, max_inline_chars
 from app.documents.worker import parse_in_subprocess
 from app.models import Document
-from app.storage import ObjectStorage, get_storage
+from app.storage import DOCUMENTS_PREFIX, ObjectStorage, get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def storage_key(document_id: uuid.UUID) -> str:
     Returns:
         ``"documents/<문서 ID>"``.
     """
-    return f"documents/{document_id}"
+    return f"{DOCUMENTS_PREFIX}{document_id}"
 
 
 async def create_document(

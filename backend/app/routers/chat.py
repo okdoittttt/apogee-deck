@@ -12,6 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app import images as chat_images
 from app.agents import runtime
 from app.agents.events import (
     Finished,
@@ -42,6 +43,7 @@ from app.schemas import (
     ModelList,
     ModelOut,
 )
+from app.storage import ObjectNotFoundError, get_storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -260,10 +262,15 @@ async def get_image(image_id: uuid.UUID, session: SessionDep, user: ApprovedUser
         .join(Conversation, Conversation.id == Message.conversation_id)
         .where(MessageImage.id == image_id, Conversation.user_id == user.id)
     )
-    if img is None:
+    storage = get_storage()
+    if img is None or storage is None:
         raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        data = await storage.get(img.storage_key)
+    except ObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Image not found") from exc
     return Response(
-        content=img.data,
+        content=data,
         media_type=img.mime_type,
         headers={"Cache-Control": "private, max-age=31536000, immutable"},
     )
@@ -273,11 +280,11 @@ async def get_image(image_id: uuid.UUID, session: SessionDep, user: ApprovedUser
 async def delete_conversation(
     conversation_id: uuid.UUID, session: SessionDep, user: ApprovedUser
 ) -> None:
-    """대화와 그 에이전트 상태(checkpoint), 첨부 문서를 삭제한다.
+    """대화와 그 에이전트 상태(checkpoint), 첨부 문서와 이미지를 삭제한다.
 
     checkpoint 삭제가 실패해도 대화 삭제는 유지되고, 남은 checkpoint 는 다음 기동 시 정리된다.
-    첨부 문서의 DB 기록은 대화와 함께 지워지고, 원본은 저장소에서 지운다 (실패하면 보관 기간이
-    지나 저장소가 지운다).
+    첨부 문서와 이미지의 DB 기록은 대화와 함께 지워지고, 원본은 저장소에서 지운다. 문서 원본은
+    지우지 못해도 보관 기간이 지나면 저장소가 지우지만, 이미지 원본은 기록만 남는다.
 
     Args:
         conversation_id: 대화 ID.
@@ -291,9 +298,17 @@ async def delete_conversation(
     if await run_registry.is_running(str(conversation_id)):
         raise HTTPException(status_code=409, detail="응답 생성 중인 대화는 삭제할 수 없습니다.")
     document_keys = await documents.conversation_storage_keys(session, conversation_id)
+    image_keys = list(
+        await session.scalars(
+            select(MessageImage.storage_key)
+            .join(Message, Message.id == MessageImage.message_id)
+            .where(Message.conversation_id == conversation_id)
+        )
+    )
     await session.delete(conv)
     await session.commit()
     await documents.delete_objects(document_keys)
+    await chat_images.delete_images(get_storage(), image_keys)
     try:
         await runtime.delete_thread(str(conversation_id))
     except Exception:
@@ -333,6 +348,11 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     settings = get_settings()
     if req.images and not settings.enable_vision:
         raise HTTPException(status_code=400, detail="현재 모델은 이미지 입력을 지원하지 않습니다.")
+    storage = get_storage()
+    if req.images and storage is None:
+        raise HTTPException(
+            status_code=503, detail="첨부 저장소가 설정되지 않아 이미지를 보낼 수 없습니다."
+        )
     if req.model and req.model not in {o.id for o in await available_models(settings)}:
         raise HTTPException(
             status_code=400,
@@ -358,16 +378,20 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     if not await run_registry.try_acquire(str(conv.id)):
         raise HTTPException(status_code=409, detail=BUSY_DETAIL)
 
-    # 2) 사용자 메시지(+이미지) 저장, 문서 연결. 실패하면 생성 중 표시를 되돌린다.
+    # 2) 이미지 원본을 저장소에 올리고, 사용자 메시지 저장, 문서 연결.
+    #    실패하면 올린 이미지를 지우고 생성 중 표시를 되돌린다.
+    image_rows: list[MessageImage] = []
     try:
+        if req.images:
+            assert storage is not None
+            image_rows = await chat_images.store_images(
+                storage, [(img.mime_type, img.to_bytes()) for img in req.images]
+            )
         user_message = Message(
             conversation_id=conv.id,
             role="user",
             content=req.message,
-            images=[
-                MessageImage(position=i, mime_type=img.mime_type, data=img.to_bytes())
-                for i, img in enumerate(req.images)
-            ],
+            images=image_rows,
         )
         session.add(user_message)
         await session.flush()
@@ -378,12 +402,14 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
         await session.commit()
     except documents.AttachError as exc:
         await session.rollback()
+        await chat_images.delete_images(storage, [r.storage_key for r in image_rows])
         await run_registry.release(str(conv.id))
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except BaseException:
+        await chat_images.delete_images(storage, [r.storage_key for r in image_rows])
         await run_registry.release(str(conv.id))
         raise
-    images = [(img.mime_type, img.data) for img in req.images]
+    images = [chat_images.image_ref_block(row) for row in image_rows]
     model_text = reading.with_attachments(
         req.message, reading.attachment_block(attachments, can_read=settings.enable_tools)
     )
@@ -440,7 +466,7 @@ async def save_assistant_message(
 async def stream_and_save(
     conversation_id: uuid.UUID,
     text: str,
-    images: list[tuple[str, str]],
+    images: list[dict[str, Any]],
     model: str | None = None,
 ) -> AsyncIterator[str]:
     """에이전트 응답을 SSE 이벤트로 스트리밍하고, 화면에 보여준 텍스트를 저장한다.
@@ -461,7 +487,7 @@ async def stream_and_save(
     Args:
         conversation_id: 대화 ID. 호출 전에 ``run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
         text: 모델에게 보낼 사용자 메시지 텍스트 (첨부 목록 포함).
-        images: ``(mime_type, base64)`` 목록.
+        images: 이미지 참조 블록 (``app.images.image_ref_block``).
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
 
     Yields:

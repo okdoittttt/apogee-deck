@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -164,14 +164,14 @@ class Message(Base):
 
 
 class MessageImage(Base):
-    """사용자가 첨부한 이미지 원본 (UI 표시용).
+    """사용자가 첨부한 이미지. 원본은 첨부 저장소(MinIO)에 두고 여기에는 위치만 둔다 (``app.images``).
 
     Attributes:
-        id: 이미지 ID. ``GET /api/images/{id}`` 로 내려준다.
+        id: 이미지 ID. ``GET /api/images/{id}`` 로 내려주고, checkpoint 의 이미지 참조 블록도 이 ID 를 쓴다.
         message_id: 속한 메시지 ID.
         position: 메시지 안에서의 순서.
         mime_type: 이미지 MIME 타입.
-        data: 이미지 바이너리.
+        storage_key: 첨부 저장소의 객체 키 (``images/<ID>``).
         message: 속한 메시지.
     """
 
@@ -183,7 +183,7 @@ class MessageImage(Base):
     )
     position: Mapped[int] = mapped_column(Integer, default=0)
     mime_type: Mapped[str] = mapped_column(String(50))
-    data: Mapped[bytes] = mapped_column(LargeBinary)
+    storage_key: Mapped[str] = mapped_column(String(200))
 
     message: Mapped[Message] = relationship(back_populates="images")
 

@@ -36,8 +36,10 @@ from app.agents.context import (
 )
 from app.agents.tooling import handle_tool_error
 from app.config import Settings
+from app.images import resolve_images
 from app.llm import build_chat_model, build_summary_model
 from app.llm.catalog import model_id
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +122,10 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
             text = f"{text}\n\n{summary_prompt.text}"
             history = summary.unsummarized(history, state.get("summarized_until"))
         system = SystemMessage(text)
+        # checkpoint 에는 이미지 참조만 있으므로 보낼 메시지의 이미지만 저장소에서 원본으로 바꾼다.
+        context = await resolve_images(get_storage(), list(select_context(system, history)))
         response = await call_model.ainvoke(
-            [system, *select_context(system, history)],
+            [system, *context],
             config={"metadata": prompt.trace_metadata()},
         )
         # 대화 도중 모델을 바꿨을 때 이 응답의 추론을 다른 모델에 보내지 않도록 모델을 기록한다.

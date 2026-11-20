@@ -203,24 +203,24 @@ def _stop_reason(msg: AIMessage) -> str | None:
     return _STOP_REASON_MAP.get(raw, raw)
 
 
-def build_user_message(text: str, images: list[tuple[str, str]]) -> HumanMessage:
+def build_user_message(text: str, images: list[dict[str, Any]]) -> HumanMessage:
     """텍스트와 이미지를 LangChain 표준 content block 으로 된 사용자 메시지로 만든다.
 
-    표준 블록은 provider 별 형식(Anthropic ``source``/base64, Ollama ``images`` 필드)으로
-    자동 변환된다. 이미지를 텍스트보다 앞에 둔다.
+    이미지는 원본 대신 참조 블록(``app.images.image_ref_block``)으로 넣는다. 이 메시지가
+    checkpoint 에 저장되기 때문이다. 모델을 부르기 직전에 원본으로 바꾸고, 그때 표준 블록이
+    provider 별 형식(Anthropic ``source``/base64, Ollama ``images`` 필드)으로 자동 변환된다.
+    이미지를 텍스트보다 앞에 둔다.
 
     Args:
         text: 사용자 메시지 텍스트.
-        images: ``(mime_type, base64)`` 목록.
+        images: 이미지 블록 목록.
 
     Returns:
         이미지가 없으면 텍스트만, 있으면 이미지 + 텍스트 블록을 가진 ``HumanMessage``.
     """
     if not images:
         return HumanMessage(text)
-    blocks: list[dict[str, Any]] = [
-        {"type": "image", "base64": data, "mime_type": mime} for mime, data in images
-    ]
+    blocks: list[dict[str, Any]] = list(images)
     if text.strip():
         blocks.append({"type": "text", "text": text})
     return HumanMessage(content=blocks)
@@ -229,7 +229,7 @@ def build_user_message(text: str, images: list[tuple[str, str]]) -> HumanMessage
 async def stream_reply(
     conversation_id: str,
     user_text: str,
-    images: list[tuple[str, str]] | None = None,
+    images: list[dict[str, Any]] | None = None,
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
@@ -247,7 +247,7 @@ async def stream_reply(
     Args:
         conversation_id: 대화 ID (= checkpointer ``thread_id``, Langfuse session ID).
         user_text: 사용자 메시지 텍스트.
-        images: ``(mime_type, base64)`` 목록.
+        images: 이미지 참조 블록 (``app.images.image_ref_block``).
         agent: 실행할 에이전트 이름 (``AGENTS`` 의 키).
         model: 모델 ID (``app.llm.catalog``). ``None`` 이면 설정의 기본 모델.
 
