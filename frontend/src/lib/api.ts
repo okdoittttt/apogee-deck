@@ -425,6 +425,23 @@ export async function uploadProjectDocument(projectId: string, file: File): Prom
   return json(res, "업로드 실패");
 }
 
+/** 프로젝트 문서를 저장된 원본으로 처음부터 다시 처리한다 (서버는 processing 상태로 응답한다). */
+export async function reprocessProjectDocument(
+  projectId: string,
+  documentId: string,
+): Promise<DocumentInfo> {
+  const res = await apiFetch(`/api/projects/${projectId}/documents/${documentId}/reprocess`, {
+    method: "POST",
+  });
+  return json(res, "다시 처리 실패");
+}
+
+/** 프로젝트의 문서를 모두 다시 처리한다. 처리 중인 문서는 건너뛴다. */
+export async function reprocessProjectDocuments(projectId: string): Promise<DocumentInfo[]> {
+  const res = await apiFetch(`/api/projects/${projectId}/reprocess`, { method: "POST" });
+  return json(res, "다시 처리 실패");
+}
+
 export async function deleteProjectDocument(projectId: string, documentId: string): Promise<void> {
   const res = await apiFetch(`/api/projects/${projectId}/documents/${documentId}`, {
     method: "DELETE",

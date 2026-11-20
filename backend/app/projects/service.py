@@ -7,7 +7,8 @@ HTTP 를 모른다. 사용자에게 보여줄 실패는 ``ProjectError`` (상태
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -15,7 +16,7 @@ from app.core.config import get_settings
 from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.documents import service as documents
 from app.documents.reading import AttachedDocument
-from app.models import Conversation, Document, DocumentElement, Project
+from app.models import Conversation, Document, DocumentChunk, DocumentElement, Project
 
 
 class ProjectError(Exception):
@@ -223,6 +224,59 @@ async def delete_document(session: AsyncSession, project: Project, document_id: 
     await session.delete(doc)
     await session.commit()
     await documents.delete_objects(keys)
+
+
+async def reprocess_document(
+    session: AsyncSession, storage: ObjectStorage, project: Project, document_id: uuid.UUID
+) -> tuple[Document, bytes]:
+    """프로젝트 문서를 처음부터 다시 처리할 준비를 한다 (파서를 고친 뒤 다시 적재할 때).
+
+    저장해 둔 원본을 읽고, 이전 처리 결과(요소, 청크, 그림 원본, 본문)를 지운 뒤 ``processing`` 으로 되돌린다.
+    실제 파싱은 호출하는 쪽이 ``documents.schedule_parse`` 로 시작한다 (처음 올릴 때와 같은 흐름).
+
+    Args:
+        session: DB 세션. 이 함수가 commit 한다.
+        storage: 첨부 저장소.
+        project: 프로젝트 (``get_own`` 으로 확인한 것).
+        document_id: 문서 ID.
+
+    Returns:
+        ``(processing 상태의 문서, 원본 바이트)``.
+
+    Raises:
+        ProjectError: 이 프로젝트의 문서가 아니거나 원본이 없으면 404, 처리 중인 문서면 409.
+    """
+    doc = await session.get(Document, document_id, options=[defer(Document.content)])
+    if doc is None or doc.project_id != project.id:
+        raise ProjectError(404, "Document not found")
+    if doc.status in documents.BUSY_STATUSES:
+        raise ProjectError(409, "처리 중인 문서는 끝난 뒤에 다시 처리할 수 있습니다.")
+    try:
+        data = await storage.get(doc.storage_key)
+    except ObjectNotFoundError as exc:
+        raise ProjectError(404, "원본 파일이 없어 다시 처리할 수 없습니다.") from exc
+    keys = await documents.element_image_keys(session, Document.id == doc.id)
+    await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
+    await session.execute(delete(DocumentElement).where(DocumentElement.document_id == doc.id))
+    await session.execute(
+        sql_update(Document)
+        .where(Document.id == doc.id)
+        .values(
+            status="processing",
+            error=None,
+            content=None,
+            page_count=None,
+            token_count=None,
+            image_count=None,
+            image_fallback_count=None,
+            parsed_at=None,
+        )
+    )
+    await session.commit()
+    await session.refresh(doc)
+    # 새 그림은 같은 객체 키(문서 안의 순서)로 다시 올라오므로, 파싱을 시작하기 전에 지운다.
+    await documents.delete_objects(keys)
+    return doc, data
 
 
 async def read_element_image(

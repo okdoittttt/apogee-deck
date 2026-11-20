@@ -8,6 +8,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Response, UploadFile
+from sqlalchemy import select
 
 from app.api.deps import ApprovedUser, SessionDep
 from app.api.schemas import (
@@ -26,7 +27,7 @@ from app.core.config import get_settings
 from app.core.storage import get_storage
 from app.documents import service as documents
 from app.documents.formats import UnsupportedDocumentError
-from app.models import Project, User
+from app.models import Document, Project, User
 from app.projects import service
 from app.projects.service import ProjectError
 
@@ -209,6 +210,77 @@ async def delete_project_document(
         await service.delete_document(session, project, document_id)
     except ProjectError as exc:
         raise _http_error(exc) from exc
+
+
+@router.post("/{project_id}/documents/{document_id}/reprocess", status_code=202)
+async def reprocess_project_document(
+    project_id: uuid.UUID, document_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> DocumentOut:
+    """프로젝트 문서를 저장된 원본으로 처음부터 다시 처리한다 (파서를 고친 뒤 다시 적재할 때).
+
+    Args:
+        project_id: 프로젝트 ID.
+        document_id: 문서 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+
+    Returns:
+        ``processing`` 상태의 문서 정보.
+
+    Raises:
+        HTTPException: 프로젝트·문서·원본이 없거나 내 것이 아니면 404, 처리 중이면 409,
+            첨부 저장소를 쓸 수 없으면 503.
+    """
+    project = await _own(session, project_id, user)
+    return document_out(await _reprocess(session, project, document_id), None)
+
+
+@router.post("/{project_id}/reprocess", status_code=202)
+async def reprocess_project_documents(
+    project_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> list[DocumentOut]:
+    """프로젝트의 문서를 모두 다시 처리한다. 처리 중인 문서는 건너뛴다.
+
+    Args:
+        project_id: 프로젝트 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+
+    Returns:
+        다시 처리를 시작한 문서들 (``processing`` 상태).
+
+    Raises:
+        HTTPException: 프로젝트가 없거나 내 것이 아니면 404, 첨부 저장소를 쓸 수 없으면 503.
+    """
+    project = await _own(session, project_id, user)
+    ids = await session.scalars(
+        select(Document.id).where(
+            Document.project_id == project.id, Document.status.not_in(documents.BUSY_STATUSES)
+        )
+    )
+    started = []
+    for document_id in list(ids):
+        try:
+            doc = await _reprocess(session, project, document_id)
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                raise
+            continue  # 원본이 없거나 그 사이 처리가 시작된 문서는 건너뛴다
+        started.append(document_out(doc, None))
+    return started
+
+
+async def _reprocess(session: SessionDep, project: Project, document_id: uuid.UUID) -> Document:
+    """문서 하나를 다시 처리하도록 되돌리고 파싱을 시작한다."""
+    storage = get_storage()
+    if storage is None:
+        raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE)
+    try:
+        doc, data = await service.reprocess_document(session, storage, project, document_id)
+    except ProjectError as exc:
+        raise _http_error(exc) from exc
+    documents.schedule_parse(doc.id, data, doc.kind, doc.filename)
+    return doc
 
 
 @router.get("/{project_id}/images/{element_id}")

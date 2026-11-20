@@ -11,6 +11,8 @@ import {
   deleteProjectDocument,
   documentFileUrl,
   getProject,
+  reprocessProjectDocument,
+  reprocessProjectDocuments,
   updateProject,
   uploadProjectDocument,
 } from "@/lib/api";
@@ -227,6 +229,30 @@ export function ProjectView({
     }
   }
 
+  async function reprocessDocument(doc: DocumentInfo) {
+    try {
+      await reprocessProjectDocument(projectId, doc.id);
+      await load();
+    } catch (e) {
+      onToast((e as Error).message);
+    }
+  }
+
+  async function reprocessAll() {
+    if (!detail) return;
+    const ok = window.confirm(
+      `문서 ${detail.documents.length}개를 저장된 원본으로 다시 처리할까요?\n그림 설명을 다시 만들어서 시간이 걸리고 비용이 듭니다.`,
+    );
+    if (!ok) return;
+    try {
+      const started = await reprocessProjectDocuments(projectId);
+      onToast(`문서 ${started.length}개를 다시 처리합니다.`);
+      await load();
+    } catch (e) {
+      onToast((e as Error).message);
+    }
+  }
+
   async function remove() {
     if (!detail) return;
     const ok = window.confirm(
@@ -308,12 +334,23 @@ export function ProjectView({
             <section>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-medium text-fg">문서</h3>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover hover:text-fg"
-                >
-                  <UploadIcon className="h-3.5 w-3.5" /> 올리기
-                </button>
+                <div className="flex items-center gap-1">
+                  {detail.documents.length > 0 && !processing && (
+                    <button
+                      onClick={() => void reprocessAll()}
+                      className="rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover hover:text-fg"
+                      title="파서를 고친 뒤 저장된 원본으로 모든 문서를 다시 읽습니다"
+                    >
+                      모두 다시 처리
+                    </button>
+                  )}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-muted hover:bg-hover hover:text-fg"
+                  >
+                    <UploadIcon className="h-3.5 w-3.5" /> 올리기
+                  </button>
+                </div>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -357,6 +394,15 @@ export function ProjectView({
                       />
                       {fallbackNote(doc) && (
                         <p className="mt-1 px-1 text-[11px] text-subtle">{fallbackNote(doc)}</p>
+                      )}
+                      {(doc.status === "ready" || doc.status === "failed") && (
+                        <button
+                          onClick={() => void reprocessDocument(doc)}
+                          className="mt-0.5 px-1 text-[11px] text-subtle hover:text-fg"
+                          title="저장된 원본으로 이 문서를 처음부터 다시 읽습니다"
+                        >
+                          다시 처리
+                        </button>
                       )}
                     </div>
                   ))}
