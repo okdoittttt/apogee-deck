@@ -42,6 +42,8 @@ logs: ## 백엔드 로그 보기 (Ctrl+C 로 종료)
 
 backend: ## 백엔드만 다시 빌드/재시작 (코드·프롬프트 수정 후)
 	@$(COMPOSE) up -d --build backend
+	@# 백엔드 네트워크를 같이 쓰는 Langfuse 미디어 전달기는 백엔드를 다시 만들면 다시 붙여야 한다
+	@if $(COMPOSE) config --services | grep -qx langfuse-media-proxy; then $(COMPOSE) up -d langfuse-media-proxy; fi
 
 frontend: ## 프론트엔드만 다시 빌드/재시작
 	@$(COMPOSE) up -d --build frontend

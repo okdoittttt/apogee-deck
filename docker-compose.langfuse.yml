@@ -77,6 +77,19 @@ services:
       LANGFUSE_INIT_USER_NAME: admin
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
 
+  # 백엔드 컨테이너 안의 localhost:9090 → Langfuse MinIO.
+  # Langfuse 는 트레이스 속 이미지를 올릴 주소로 브라우저용 http://localhost:9090 (위 LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT)
+  # 을 알려주는데, 백엔드 컨테이너에서 localhost 는 자기 자신이라 연결이 거부된다. 그래서 백엔드와 네트워크를
+  # 같이 쓰는 작은 전달기를 둔다. 주소(Host)를 바꾸지 않고 전달하므로 미리 서명된 업로드 주소가 그대로 맞는다.
+  langfuse-media-proxy:
+    image: alpine/socat:1.8.1.1
+    restart: unless-stopped
+    network_mode: "service:backend"
+    depends_on:
+      - backend
+      - langfuse-minio
+    command: tcp-listen:${LANGFUSE_MINIO_PORT:-9090},fork,reuseaddr tcp-connect:langfuse-minio:9000
+
   langfuse-clickhouse:
     image: docker.io/clickhouse/clickhouse-server:26.3.62.3
     restart: unless-stopped
