@@ -71,3 +71,9 @@ body {
   overflow-y: hidden;
   padding: 0.25rem 0;
 }
+
+/* 문서 보기 패널: 근거가 된 청크 글자 (CSS Custom Highlight API) */
+::highlight(doc-chunk) {
+  background-color: rgb(245 158 11 / 0.45);
+  color: inherit;
+}

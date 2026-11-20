@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AuthGate } from "@/components/Auth";
 import { Composer } from "@/components/Composer";
+import {
+  DocumentViewer,
+  type OpenedTarget,
+  OpenDocumentProvider,
+  type ViewerTarget,
+} from "@/components/DocumentViewer";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
 import { ModelPicker } from "@/components/ModelPicker";
@@ -90,6 +96,13 @@ function ChatApp({
 }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // 오른쪽 문서 보기 패널 (출처 카드, 프로젝트 문서 칩에서 연다)
+  const [viewerTarget, setViewerTarget] = useState<OpenedTarget | null>(null);
+  const openDocument = useCallback(
+    (target: ViewerTarget) => setViewerTarget((prev) => ({ ...target, opened: (prev?.opened ?? 0) + 1 })),
+    [],
+  );
+  const closeViewer = useCallback(() => setViewerTarget(null), []);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -805,193 +818,196 @@ function ChatApp({
   );
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-app text-fg">
-      {/* Sidebar: 데스크톱은 밀어내기, 모바일은 오버레이 */}
-      {sidebarOpen && isMobile && (
-        <div className="fixed inset-0 z-30 bg-black/40" onClick={() => toggleSidebar(false)} />
-      )}
-      <div
-        className={`${isMobile ? "fixed inset-y-0 left-0 z-40" : "relative"} transition-[margin] duration-200 ${
-          sidebarOpen ? "ml-0" : "-ml-[264px]"
-        }`}
-      >
-        <Sidebar
-          ref={searchRef}
-          conversations={conversations}
-          activeId={conversationId}
-          projects={projects}
-          activeProjectId={projectHome ? projectId : null}
-          onNewProject={startNewProject}
-          onOpenProject={openProject}
-          info={info}
-          modelLabel={models.find((m) => m.id === selectedModel)?.label}
-          onNew={newConversation}
-          onOpen={openConversation}
-          onDelete={removeConversation}
-          onClose={() => toggleSidebar(false)}
-          user={user}
-          authRequired={authRequired}
-          onLogout={onLogout}
-        />
-      </div>
-
-      <main
-        className="relative flex min-w-0 flex-1 flex-col"
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes("Files")) {
-            e.preventDefault();
-            setDragging(true);
-          }
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragging(false);
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          if (projectHome && projectDropRef.current) projectDropRef.current(e.dataTransfer.files);
-          else void addFiles(e.dataTransfer.files);
-        }}
-      >
-        {/* Top bar */}
-        <header className="flex h-14 shrink-0 items-center gap-1 px-3">
-          {!sidebarOpen && (
-            <>
-              <button
-                onClick={() => toggleSidebar(true)}
-                className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
-                aria-label="사이드바 열기"
-                title="사이드바 열기"
-              >
-                <SidebarIcon />
-              </button>
-              <button
-                onClick={newConversation}
-                className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
-                aria-label="새 대화"
-                title={`새 대화 (${shortcutLabel("N")})`}
-              >
-                <PlusIcon />
-              </button>
-            </>
-          )}
-          {!isEmpty && activeTitle && (
-            <h1 className="ml-1 flex min-w-0 items-center gap-1.5 text-sm font-medium text-muted">
-              {activeProject && (
-                <>
-                  <button
-                    onClick={() => openProject(activeProject.id)}
-                    className="shrink-0 truncate rounded-md px-1 py-0.5 hover:bg-hover hover:text-fg"
-                    title="프로젝트로 돌아가기"
-                  >
-                    {activeProject.name}
-                  </button>
-                  <span className="text-subtle">/</span>
-                </>
-              )}
-              <span className="truncate">{activeTitle}</span>
-            </h1>
-          )}
-        </header>
-
-        {dragging && (
-          <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-line-strong bg-app/85 text-muted">
-            {projectHome ? "프로젝트에 문서를 올리려면 여기에 놓으세요" : "파일을 여기에 놓으세요"}
-          </div>
+    <OpenDocumentProvider value={openDocument}>
+      <div className="flex h-dvh overflow-hidden bg-app text-fg">
+        {/* Sidebar: 데스크톱은 밀어내기, 모바일은 오버레이 */}
+        {sidebarOpen && isMobile && (
+          <div className="fixed inset-0 z-30 bg-black/40" onClick={() => toggleSidebar(false)} />
         )}
-
-        {creatingProject ? (
-          <NewProjectForm
-            onCreated={(project) => {
-              refreshProjects();
-              openProject(project.id);
-            }}
-            onCancel={newConversation}
+        <div
+          className={`${isMobile ? "fixed inset-y-0 left-0 z-40" : "relative"} transition-[margin] duration-200 ${
+            sidebarOpen ? "ml-0" : "-ml-[264px]"
+          }`}
+        >
+          <Sidebar
+            ref={searchRef}
+            conversations={conversations}
+            activeId={conversationId}
+            projects={projects}
+            activeProjectId={projectHome ? projectId : null}
+            onNewProject={startNewProject}
+            onOpenProject={openProject}
+            info={info}
+            modelLabel={models.find((m) => m.id === selectedModel)?.label}
+            onNew={newConversation}
+            onOpen={openConversation}
+            onDelete={removeConversation}
+            onClose={() => toggleSidebar(false)}
+            user={user}
+            authRequired={authRequired}
+            onLogout={onLogout}
           />
-        ) : projectHome ? (
-          <ProjectView
-            key={projectId}
-            projectId={projectId}
-            composer={
+        </div>
+
+        <main
+          className="relative flex min-w-0 flex-1 flex-col"
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) {
+              e.preventDefault();
+              setDragging(true);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget === e.target) setDragging(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            if (projectHome && projectDropRef.current) projectDropRef.current(e.dataTransfer.files);
+            else void addFiles(e.dataTransfer.files);
+          }}
+        >
+          {/* Top bar */}
+          <header className="flex h-14 shrink-0 items-center gap-1 px-3">
+            {!sidebarOpen && (
               <>
+                <button
+                  onClick={() => toggleSidebar(true)}
+                  className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
+                  aria-label="사이드바 열기"
+                  title="사이드바 열기"
+                >
+                  <SidebarIcon />
+                </button>
+                <button
+                  onClick={newConversation}
+                  className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
+                  aria-label="새 대화"
+                  title={`새 대화 (${shortcutLabel("N")})`}
+                >
+                  <PlusIcon />
+                </button>
+              </>
+            )}
+            {!isEmpty && activeTitle && (
+              <h1 className="ml-1 flex min-w-0 items-center gap-1.5 text-sm font-medium text-muted">
+                {activeProject && (
+                  <>
+                    <button
+                      onClick={() => openProject(activeProject.id)}
+                      className="shrink-0 truncate rounded-md px-1 py-0.5 hover:bg-hover hover:text-fg"
+                      title="프로젝트로 돌아가기"
+                    >
+                      {activeProject.name}
+                    </button>
+                    <span className="text-subtle">/</span>
+                  </>
+                )}
+                <span className="truncate">{activeTitle}</span>
+              </h1>
+            )}
+          </header>
+
+          {dragging && (
+            <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-line-strong bg-app/85 text-muted">
+              {projectHome ? "프로젝트에 문서를 올리려면 여기에 놓으세요" : "파일을 여기에 놓으세요"}
+            </div>
+          )}
+
+          {creatingProject ? (
+            <NewProjectForm
+              onCreated={(project) => {
+                refreshProjects();
+                openProject(project.id);
+              }}
+              onCancel={newConversation}
+            />
+          ) : projectHome ? (
+            <ProjectView
+              key={projectId}
+              projectId={projectId}
+              composer={
+                <>
+                  {errorBox}
+                  {composer}
+                </>
+              }
+              documentExtensions={info?.documents?.extensions ?? []}
+              onOpenConversation={openConversation}
+              onChanged={refreshProjects}
+              onDeleted={onProjectDeleted}
+              onToast={setToast}
+              registerDrop={registerProjectDrop}
+            />
+          ) : isEmpty ? (
+            /* 빈 화면: 가운데 인사말 + 입력창 */
+            <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
+              <div className="mb-8 flex items-center gap-3">
+                <LogoIcon className="h-9 w-9 text-fg" />
+                <h2 className="font-display text-[32px] font-normal leading-tight text-fg">
+                  {hello}
+                </h2>
+              </div>
+              <div className="w-full max-w-[680px]">
                 {errorBox}
                 {composer}
-              </>
-            }
-            documentExtensions={info?.documents?.extensions ?? []}
-            onOpenConversation={openConversation}
-            onChanged={refreshProjects}
-            onDeleted={onProjectDeleted}
-            onToast={setToast}
-            registerDrop={registerProjectDrop}
-          />
-        ) : isEmpty ? (
-          /* 빈 화면: 가운데 인사말 + 입력창 */
-          <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
-            <div className="mb-8 flex items-center gap-3">
-              <LogoIcon className="h-9 w-9 text-fg" />
-              <h2 className="font-display text-[32px] font-normal leading-tight text-fg">
-                {hello}
-              </h2>
-            </div>
-            <div className="w-full max-w-[680px]">
-              {errorBox}
-              {composer}
-              <p className="mt-3 text-center text-xs text-subtle">
-                이미지와 문서를 붙여넣거나 끌어다 놓을 수 있어요 · Shift+Enter 로 줄바꿈
-              </p>
-            </div>
-          </div>
-        ) : (
-          /* 대화 화면: 메시지 목록 + 하단 고정 입력창 */
-          <>
-            <div ref={setScrollBox} className="flex-1 overflow-y-auto">
-              <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
-                {earlier.length > 0 && (
-                  <MessageList
-                    messages={earlier}
-                    activeId={activeAssistantId}
-                    modelLabels={modelLabels}
-                  />
-                )}
-                {/* 마지막으로 보낸 메시지부터: 최소 화면 높이만큼 차지해서 그 메시지를 맨 위로 올릴 수 있게 한다 */}
-                <div
-                  ref={pinnedTurnRef}
-                  className={earlier.length > 0 && pinned.length > 0 ? "mt-7" : undefined}
-                  style={
-                    pinned.length > 0
-                      ? { minHeight: Math.max(0, scrollBoxHeight - PIN_GAP_PX - PIN_BOTTOM_PX) }
-                      : undefined
-                  }
-                >
-                  <MessageList
-                    messages={pinned}
-                    activeId={activeAssistantId}
-                    modelLabels={modelLabels}
-                  />
-                  {queued && (
-                    <QueuedMessageBubble
-                      message={queued}
-                      paused={queuePaused}
-                      onSendNow={sendQueuedNow}
-                      onRemove={() => setQueued(null)}
-                    />
-                  )}
-                  {remoteRunning && <RemoteRunningNotice />}
-                </div>
+                <p className="mt-3 text-center text-xs text-subtle">
+                  이미지와 문서를 붙여넣거나 끌어다 놓을 수 있어요 · Shift+Enter 로 줄바꿈
+                </p>
               </div>
             </div>
-            <div className="mx-auto w-full max-w-3xl px-4 pb-4">
-              {errorBox}
-              {composer}
-              <p className="mt-2 text-center text-[11px] text-subtle">
-                AI 응답은 부정확할 수 있습니다. 중요한 정보는 확인하세요.
-              </p>
-            </div>
-          </>
-        )}
-      </main>
-      <Toast message={toast} onClose={closeToast} />
-    </div>
+          ) : (
+            /* 대화 화면: 메시지 목록 + 하단 고정 입력창 */
+            <>
+              <div ref={setScrollBox} className="flex-1 overflow-y-auto">
+                <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-2">
+                  {earlier.length > 0 && (
+                    <MessageList
+                      messages={earlier}
+                      activeId={activeAssistantId}
+                      modelLabels={modelLabels}
+                    />
+                  )}
+                  {/* 마지막으로 보낸 메시지부터: 최소 화면 높이만큼 차지해서 그 메시지를 맨 위로 올릴 수 있게 한다 */}
+                  <div
+                    ref={pinnedTurnRef}
+                    className={earlier.length > 0 && pinned.length > 0 ? "mt-7" : undefined}
+                    style={
+                      pinned.length > 0
+                        ? { minHeight: Math.max(0, scrollBoxHeight - PIN_GAP_PX - PIN_BOTTOM_PX) }
+                        : undefined
+                    }
+                  >
+                    <MessageList
+                      messages={pinned}
+                      activeId={activeAssistantId}
+                      modelLabels={modelLabels}
+                    />
+                    {queued && (
+                      <QueuedMessageBubble
+                        message={queued}
+                        paused={queuePaused}
+                        onSendNow={sendQueuedNow}
+                        onRemove={() => setQueued(null)}
+                      />
+                    )}
+                    {remoteRunning && <RemoteRunningNotice />}
+                  </div>
+                </div>
+              </div>
+              <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+                {errorBox}
+                {composer}
+                <p className="mt-2 text-center text-[11px] text-subtle">
+                  AI 응답은 부정확할 수 있습니다. 중요한 정보는 확인하세요.
+                </p>
+              </div>
+            </>
+          )}
+        </main>
+        {viewerTarget && <DocumentViewer target={viewerTarget} onClose={closeViewer} />}
+        <Toast message={toast} onClose={closeToast} />
+      </div>
+    </OpenDocumentProvider>
   );
 }

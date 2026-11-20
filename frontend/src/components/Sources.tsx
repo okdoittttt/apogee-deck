@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { projectImageUrl } from "@/lib/api";
 import type { DocumentSource, Source, Step, WebSource } from "@/lib/api";
+import { pageOfLocation, useOpenDocument } from "./DocumentViewer";
 import { FileIcon, GlobeIcon } from "./icons";
 
 /** 처음에 보여줄 출처 수. 나머지는 "더 보기" 로 펼친다. */
@@ -61,15 +62,28 @@ function WebCard({ source, index }: { source: WebSource; index: number }) {
   );
 }
 
-/** 프로젝트 문서 출처: 문서 이름과 위치. 그림 결과는 미리보기를 누르면 원본을 새 탭에서 연다. */
+/** 프로젝트 문서 출처: 문서 이름과 위치. 누르면 문서 보기 패널에서 근거 위치를 보여준다. */
 function DocumentCard({ source, index }: { source: DocumentSource; index: number }) {
+  const openDocument = useOpenDocument();
   const image = source.image_element_id
     ? projectImageUrl(source.project_id, source.image_element_id)
     : null;
+  const label = source.location ? `${source.title} · ${source.location}` : source.title;
   return (
-    <div
-      className="flex h-full gap-2.5 rounded-xl border border-line px-3 py-2"
-      title={source.location ? `${source.title} · ${source.location}` : source.title}
+    <button
+      type="button"
+      disabled={!openDocument}
+      onClick={() =>
+        openDocument?.({
+          projectId: source.project_id,
+          documentId: source.document_id,
+          title: source.title,
+          chunkId: source.chunk_id ?? null,
+          page: pageOfLocation(source.location),
+        })
+      }
+      className="flex h-full w-full gap-2.5 rounded-xl border border-line px-3 py-2 text-left enabled:hover:bg-hover"
+      title={`${label}\n눌러서 문서에서 보기`}
     >
       <span className="mt-px shrink-0 font-mono text-[11px] text-subtle">{index}</span>
       <span className="min-w-0 flex-1">
@@ -80,16 +94,14 @@ function DocumentCard({ source, index }: { source: DocumentSource; index: number
         </span>
       </span>
       {image && (
-        <a href={image} target="_blank" rel="noopener noreferrer" className="shrink-0">
-          {/* eslint-disable-next-line @next/next/no-img-element -- 로그인 쿠키가 필요한 API 그림 */}
-          <img
-            src={image}
-            alt={`${source.title} 그림`}
-            className="h-10 w-14 rounded-md border border-line object-cover"
-          />
-        </a>
+        // eslint-disable-next-line @next/next/no-img-element -- 로그인 쿠키가 필요한 API 그림
+        <img
+          src={image}
+          alt={`${source.title} 그림`}
+          className="h-10 w-14 shrink-0 rounded-md border border-line object-cover"
+        />
       )}
-    </div>
+    </button>
   );
 }
 

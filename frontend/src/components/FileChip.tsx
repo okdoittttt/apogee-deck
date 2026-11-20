@@ -23,6 +23,7 @@ export function FileChip({
   status = "ready",
   error,
   href,
+  onOpen,
   onRemove,
   removeLabel = "첨부 빼기",
 }: {
@@ -31,6 +32,7 @@ export function FileChip({
   status?: ChipStatus;
   error?: string | null;
   href?: string; // 원본 받기 주소
+  onOpen?: () => void; // 누르면 내용 보기 (href 대신)
   onRemove?: () => void;
   removeLabel?: string; // 빼기 버튼의 접근성 문구 (예: "첨부 빼기", "문서 삭제")
 }) {
@@ -75,7 +77,16 @@ export function FileChip({
       }`}
       title={failed && error ? `${name}\n${error}` : name}
     >
-      {href ? (
+      {onOpen ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-2.5 py-2 hover:bg-hover"
+          aria-label={`${name} 내용 보기`}
+        >
+          {body}
+        </button>
+      ) : href ? (
         <a
           href={href}
           className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-2.5 py-2 hover:bg-hover"

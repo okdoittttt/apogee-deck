@@ -49,6 +49,7 @@ export interface DocumentSource {
   project_id: string;
   location: string; // 쪽과 제목 경로 (예: "p.3 · 1장 > 1.1"), 없으면 빈 문자열
   image_element_id: string | null; // 그림 결과면 그림 요소 ID (미리보기)
+  chunk_id?: string | null; // 검색 결과 청크 ID (문서 보기 패널에서 근거 위치 강조). 예전 출처에는 없다.
 }
 
 export type Source = WebSource | DocumentSource;
@@ -112,6 +113,47 @@ export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
 /** 프로젝트 문서 속 그림 원본 주소 (검색 결과 미리보기). */
 export const projectImageUrl = (projectId: string, elementId: string) =>
   `${API_URL}/api/projects/${projectId}/images/${elementId}`;
+
+/** 문서 보기 패널의 블록 하나 (저장한 요소 하나). */
+export interface DocumentBlock {
+  id: string;
+  kind: "text" | "table" | "image";
+  page: number | null;
+  heading: string | null;
+  content: string; // 본문, 표 Markdown, 그림 설명 또는 그림 속 OCR 글자
+  described: boolean; // 그림이면 설명을 만들었는지 (아니면 content 는 그림 속 OCR 글자)
+  image_url: string | null; // 그림 원본 경로 (API 기준, 예: "/api/projects/…/images/…")
+}
+
+/** 프로젝트 문서의 추출 내용. 모델이 읽은 본문과 같은 규칙으로 만든다. */
+export interface DocumentView {
+  id: string;
+  filename: string;
+  kind: string;
+  status: DocumentInfo["status"];
+  page_count: number | null;
+  blocks: DocumentBlock[];
+  highlight: {
+    block_ids: string[]; // 강조할 블록. 비어 있으면 page 로 스크롤한다
+    text: string | null; // 블록 안에서 한 번 더 표시할 청크 본문 (긴 본문을 나눈 조각)
+    page: number | null;
+  } | null;
+}
+
+/** 프로젝트 문서의 추출 내용을 가져온다. chunkId 를 주면 그 청크의 위치도 알려준다. */
+export async function getDocumentView(
+  projectId: string,
+  documentId: string,
+  chunkId?: string | null,
+  signal?: AbortSignal,
+): Promise<DocumentView> {
+  const query = chunkId ? `?chunk_id=${encodeURIComponent(chunkId)}` : "";
+  const res = await apiFetch(`/api/projects/${projectId}/documents/${documentId}/view${query}`, {
+    signal,
+  });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `문서를 불러오지 못했습니다 (${res.status})`);
+  return res.json();
+}
 
 export interface Conversation {
   id: string;

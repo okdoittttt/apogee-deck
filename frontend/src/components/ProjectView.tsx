@@ -9,7 +9,6 @@ import {
   createProject,
   deleteProject,
   deleteProjectDocument,
-  documentFileUrl,
   getProject,
   reprocessProjectDocument,
   reprocessProjectDocuments,
@@ -17,6 +16,7 @@ import {
   uploadProjectDocument,
 } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
+import { useOpenDocument } from "./DocumentViewer";
 import { FileChip } from "./FileChip";
 import { FolderIcon, UploadIcon } from "./icons";
 
@@ -127,6 +127,7 @@ export function ProjectView({
   onToast: (message: string) => void;
   registerDrop: (handler: ((files: FileList) => void) | null) => void;
 }) {
+  const openDocument = useOpenDocument();
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(0);
@@ -388,7 +389,16 @@ export function ProjectView({
                         meta={projectDocumentMeta(doc)}
                         status={doc.status}
                         error={doc.error}
-                        href={doc.status === "ready" ? documentFileUrl(doc.id) : undefined}
+                        onOpen={
+                          doc.status === "ready" && openDocument
+                            ? () =>
+                                openDocument({
+                                  projectId,
+                                  documentId: doc.id,
+                                  title: doc.filename,
+                                })
+                            : undefined
+                        }
                         onRemove={() => void removeDocument(doc)}
                         removeLabel="문서 삭제"
                       />

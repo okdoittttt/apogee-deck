@@ -428,6 +428,13 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
     표는 행 단위로 나누며 조각마다 머리글을 붙이고, 그림은 설명 하나가 청크 하나입니다 (`CHUNK_*` 설정).
   - 임베딩 입력 앞에는 "문서 이름 | 제목 경로 | 쪽" 을 붙여 맥락을 줍니다. 결과는 문서 이름·쪽·제목 경로와 함께 모델에게 주고,
     화면에는 답변 아래 **출처 카드**로 보여줍니다 (그림 결과는 미리보기, `GET /api/projects/{id}/images/{element_id}`).
+  - **문서 보기 패널**: 출처 카드를 누르면 오른쪽 패널에 문서의 추출 내용을 보여주고 근거가 된 부분으로 스크롤해 강조합니다
+    (`GET /api/projects/{id}/documents/{doc}/view?chunk_id=…`, `components/DocumentViewer.tsx`). 프로젝트 화면의 문서 칩을 눌러도
+    같은 패널이 열립니다(원본은 패널 위 "원본 받기"). 원본 모양이 아니라 **모델이 읽은 내용**(문서 본문과 같은 규칙으로 고른 요소,
+    그림은 미리보기와 설명)이라서 답이 정말 거기서 나왔는지 바로 확인할 수 있고, 형식과 관계없이 같은 화면입니다.
+    청크는 자기를 만든 요소 ID(`element_ids`)를 기억해서 그 블록을 강조하고, 긴 본문을 나눈 조각이면 블록 안의 그 부분을
+    형광펜(CSS Custom Highlight API)으로 한 번 더 표시합니다. 이 기능 전에 만든 청크는 같은 쪽에서 내용이 겹치는 블록을 찾고,
+    청크 ID 가 없는 예전 출처 카드는 그 쪽으로만 이동합니다. PDF 표 청크는 표가 본문에 들어 있어 따로 보이지 않으므로 그 쪽으로 이동합니다.
   - 임베딩에 실패하면 청크만 저장하고 문서는 준비됩니다. 빠졌거나 다른 모델로 만든 임베딩은 검색할 때 다시 만듭니다
     (모델을 바꿔도 자동으로 다시 임베딩). 빠진 키워드 토큰도 검색할 때 채웁니다. 검색 기능 전에 올린 프로젝트 문서는
     앱이 시작할 때 청크를 만듭니다.
@@ -545,7 +552,10 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | DELETE | `/api/projects/{id}` | 프로젝트와 그 안의 대화·문서 삭제 (생성 중인 대화가 있으면 409) |
 | POST | `/api/projects/{id}/documents` | 프로젝트 문서 올리기 (multipart `file`). 용량이 꽉 찼으면 409 |
 | DELETE | `/api/projects/{id}/documents/{doc_id}` | 프로젝트 문서 지우기 |
-| GET | `/api/projects/{id}/images/{element_id}` | 프로젝트 문서 속 그림 원본 (검색 결과 출처 카드 미리보기) |
+| POST | `/api/projects/{id}/documents/{doc_id}/reprocess` | 프로젝트 문서 다시 처리 (처리 중이면 409) |
+| POST | `/api/projects/{id}/reprocess` | 프로젝트 문서 모두 다시 처리 (처리 중이거나 원본이 없는 문서는 건너뜀) |
+| GET | `/api/projects/{id}/documents/{doc_id}/view` | 프로젝트 문서의 추출 내용 (문서 보기 패널). `?chunk_id=` 를 주면 강조할 위치도 |
+| GET | `/api/projects/{id}/images/{element_id}` | 프로젝트 문서 속 그림 원본 (출처 카드·문서 보기 패널) |
 | GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |
