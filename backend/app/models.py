@@ -11,7 +11,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -348,6 +348,8 @@ class DocumentChunk(Base):
         token_count: ``content`` 의 추정 토큰 수.
         embedding: 임베딩. 아직 만들지 못했으면 ``None`` (검색할 때 다시 만든다).
         embedding_model: 임베딩을 만든 모델 (``"openai:text-embedding-3-small"``).
+        search_vector: 키워드 검색용 tsvector (``app.documents.keywords`` 토큰, ``simple`` 설정).
+            아직 만들지 못했으면 ``None`` (검색할 때 만든다).
     """
 
     __tablename__ = "document_chunks"
@@ -359,6 +361,8 @@ class DocumentChunk(Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # 키워드 검색 (전문 검색)
+        Index("ix_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -382,3 +386,4 @@ class DocumentChunk(Base):
         Vector(EMBEDDING_DIMENSIONS), nullable=True
     )
     embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    search_vector: Mapped[Any | None] = mapped_column(TSVECTOR, nullable=True)

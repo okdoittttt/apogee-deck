@@ -62,13 +62,6 @@ def _web_search(settings: Settings) -> BaseTool | None:
     return make_web_search(settings) if settings.tavily_api_key else None
 
 
-def _search_project(settings: Settings) -> BaseTool | None:
-    # 임베딩을 쓸 수 없으면(OpenAI 키 없음) 도구를 빼고 read_document 로 읽게 한다.
-    if settings.embedding_provider == "openai" and not settings.openai_api_key:
-        return None
-    return make_search_project(settings)
-
-
 def _fetch_url(settings: Settings) -> BaseTool | None:
     # 페이지 읽기는 키 없이도 동작한다.
     return make_fetch_url(settings) if settings.enable_fetch_url else None
@@ -84,7 +77,7 @@ TOOLS: dict[str, ToolSpec] = {
         make_read_document, ToolLabel(running="문서 읽는 중", done="문서 읽음")
     ),
     "search_project": ToolSpec(
-        _search_project, ToolLabel(running="프로젝트 문서 찾는 중", done="프로젝트 문서 찾음")
+        make_search_project, ToolLabel(running="프로젝트 문서 찾는 중", done="프로젝트 문서 찾음")
     ),
 }
 

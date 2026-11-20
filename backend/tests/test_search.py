@@ -1,4 +1,4 @@
-"""프로젝트 문서 검색: 청크 나누기, 임베딩, 검색 도구, 출처."""
+"""프로젝트 문서 검색: 청크 나누기, 임베딩, 키워드 토큰, 결과 합치기(RRF), 검색 도구, 출처."""
 
 import math
 import uuid
@@ -8,7 +8,7 @@ from langchain_core.messages import ToolMessage
 
 from app.api.schemas import ToolStep
 from app.core.config import Settings
-from app.documents import chunking
+from app.documents import chunking, keywords
 from app.documents.reading import estimate_tokens
 from app.llm import embeddings
 from app.orchestration.events import tool_sources
@@ -117,11 +117,45 @@ def test_build_embeddings_by_provider():
     assert model.check_embedding_ctx_length is False  # tiktoken 파일을 내려받지 않는다
 
 
-def test_search_tool_is_hidden_without_openai_key():
-    names = lambda s: [t.name for t in build_tools(s, ["search_project"])]
-    assert names(Settings(embedding_provider="openai", openai_api_key="")) == []
-    assert names(Settings(embedding_provider="openai", openai_api_key="sk-x")) == ["search_project"]
-    assert names(Settings(embedding_provider="fake")) == ["search_project"]
+def test_search_tool_is_available_without_openai_key():
+    # 임베딩을 쓸 수 없어도 키워드 검색으로 찾는다
+    for settings in (Settings(openai_api_key=""), Settings(embedding_provider="fake")):
+        assert [t.name for t in build_tools(settings, ["search_project"])] == ["search_project"]
+
+
+def test_keyword_tokens_split_korean_into_bigrams():
+    assert keywords.keyword_tokens("부산의 매출은 85억, GPT-6") == [
+        "부산의",
+        "부산",
+        "산의",
+        "매출은",
+        "매출",
+        "출은",
+        "85",
+        "억",
+        "gpt",
+        "6",
+    ]
+    # 조사가 붙은 낱말도 검색어의 두 글자 조각으로 만난다
+    assert "부산" in keywords.keyword_tokens("부산광역시")
+    assert keywords.keyword_query("부산 매출, 부산!") == "부산 | 매출"
+    assert keywords.keyword_query("?! ...") is None
+
+
+def test_keyword_tokens_never_contain_tsquery_syntax():
+    tokens = keywords.keyword_tokens("a & b | !c <-> 'd':* (e) 한:*글")
+    assert all(t.isalnum() for t in tokens)
+
+
+def test_fuse_rewards_chunks_found_by_both_searches():
+    a, b, c, d = (uuid.uuid4() for _ in range(4))
+    fused = search.fuse([[a, b, c], [c, d]], k=60)
+    # b 와 d 는 둘 다 2위라 점수가 같다: 먼저 나온 검색(벡터)의 결과가 앞
+    assert [chunk_id for chunk_id, _ in fused] == [c, a, b, d]
+    assert math.isclose(dict(fused)[c], 1 / 63 + 1 / 61)
+    # 한쪽 검색만 있어도 그 순위를 그대로 따른다 (임베딩을 못 쓸 때)
+    assert [i for i, _ in search.fuse([[], [d, a]], k=60)] == [d, a]
+    assert search.fuse([[], []], k=60) == []
 
 
 def _hit(**kw):
@@ -223,14 +257,3 @@ async def test_search_tool_searches_only_the_server_given_project(monkeypatch):
     message = await tool.ainvoke(call, config={"configurable": {}})
     assert message.content == document_tools.NOT_IN_PROJECT
     assert len(calls) == 1
-
-
-async def test_search_tool_reports_when_embeddings_are_unavailable(monkeypatch):
-    async def unavailable(*args):
-        raise embeddings.EmbeddingUnavailableError("no key")
-
-    monkeypatch.setattr(document_tools, "SessionLocal", _Session)
-    monkeypatch.setattr(document_tools.search, "search", unavailable)
-    tool = document_tools.make_search_project(Settings())
-    result = await tool.ainvoke({"query": "x"}, config={"configurable": {"project": PROJECT}})
-    assert result == document_tools.SEARCH_UNAVAILABLE

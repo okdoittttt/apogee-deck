@@ -150,7 +150,7 @@ async def test_reasoning_tool_call_and_answer(monkeypatch, fake_google):
     first, second = models.requests
     assert first["config"].system_instruction is not None
     declared = [f.name for t in first["config"].tools for f in t.function_declarations]
-    assert declared == ["get_current_time", "read_document"]
+    assert declared == ["get_current_time", "read_document", "search_project"]
     # 두 번째 호출에는 도구 호출과 그 결과가 이어서 들어간다
     parts = [p for c in second["contents"] for p in c.parts]
     assert any(p.function_call and p.function_call.name == "get_current_time" for p in parts)

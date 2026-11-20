@@ -405,14 +405,20 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
     그림 설명도 용량에 들어갑니다.
   - 대화 첨부 문서는 올리는 시간이 길어지지 않도록 요소를 만들지 않고 그림도 설명하지 않습니다.
 - **검색 (RAG)**: 요소를 **청크**로 묶거나 나눠 OpenAI 임베딩(`EMBEDDING_MODEL`, 기본 `text-embedding-3-small`, 1536차원)과 함께
-  `document_chunks` 에 저장하고, pgvector 의 HNSW 인덱스(코사인 거리)로 찾습니다 (`app/documents/chunking.py`, `app/projects/search.py`).
+  `document_chunks` 에 저장합니다 (`app/documents/chunking.py`, `app/projects/search.py`).
+  - **하이브리드 검색**: 벡터 검색(pgvector HNSW, 코사인 거리)과 키워드 검색(Postgres 전문 검색, GIN)에서 각각 후보 30개
+    (`PROJECT_SEARCH_CANDIDATES`)를 뽑고, 순위를 RRF(`1 / (k + 순위)` 의 합, `PROJECT_SEARCH_RRF_K=60`)로 합쳐 상위 8개를 돌려줍니다.
+    벡터는 뜻이 비슷한 글을, 키워드는 코드명·숫자·고유명사처럼 글자가 같아야 하는 것을 잘 찾습니다.
+  - 키워드 토큰(`app/documents/keywords.py`): 기본 전문 검색은 "부산의" 와 "부산" 을 다른 단어로 봐서, 한글 낱말은 낱말과
+    **두 글자 조각**("부산의" → 부산의, 부산, 산의)으로 나눠 `to_tsvector('simple', ...)` 에 넣습니다. 형태소 분석기나 확장이 필요 없습니다.
   - 청크: 같은 제목 아래의 작은 본문은 목표 500 토큰까지 묶고, 800 토큰이 넘는 본문은 문단 → 줄 → 문장 순으로 나눠 80 토큰씩 겹칩니다.
     표는 행 단위로 나누며 조각마다 머리글을 붙이고, 그림은 설명 하나가 청크 하나입니다 (`CHUNK_*` 설정).
   - 임베딩 입력 앞에는 "문서 이름 | 제목 경로 | 쪽" 을 붙여 맥락을 줍니다. 결과는 문서 이름·쪽·제목 경로와 함께 모델에게 주고,
     화면에는 답변 아래 **출처 카드**로 보여줍니다 (그림 결과는 미리보기, `GET /api/projects/{id}/images/{element_id}`).
   - 임베딩에 실패하면 청크만 저장하고 문서는 준비됩니다. 빠졌거나 다른 모델로 만든 임베딩은 검색할 때 다시 만듭니다
-    (모델을 바꿔도 자동으로 다시 임베딩). 검색 기능 전에 올린 프로젝트 문서는 앱이 시작할 때 청크를 만듭니다.
-  - OpenAI 키가 없으면 `search_project` 도구를 빼고 `read_document` 로 읽게 합니다. `EMBEDDING_PROVIDER=fake` 는 네트워크 없이 도는
+    (모델을 바꿔도 자동으로 다시 임베딩). 빠진 키워드 토큰도 검색할 때 채웁니다. 검색 기능 전에 올린 프로젝트 문서는
+    앱이 시작할 때 청크를 만듭니다.
+  - OpenAI 키가 없거나 임베딩 요청이 실패하면 키워드 검색만 씁니다. `EMBEDDING_PROVIDER=fake` 는 네트워크 없이 도는
     글자 조각 해시 임베딩입니다 (테스트·개발용).
   - Postgres 는 `postgres:17-alpine` 에 pgvector 를 빌드해 넣은 이미지를 씁니다 (`docker/postgres/Dockerfile`). 공식 pgvector 이미지는
     Debian(glibc) 기반이라 기존 alpine(musl) 데이터 디렉터리에 붙이면 문자열 정렬 규칙이 달라질 수 있어서입니다.

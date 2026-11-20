@@ -9,14 +9,10 @@ from app.core.config import Settings
 from app.core.db import SessionLocal
 from app.documents import reading
 from app.documents import service as documents
-from app.llm.embeddings import EmbeddingUnavailableError
 from app.projects import search
 
 NOT_IN_PROJECT = (
     "This conversation is not in a project, so there are no project documents to search."
-)
-SEARCH_UNAVAILABLE = (
-    "Project search is not available right now. Read the documents with read_document instead."
 )
 
 
@@ -90,8 +86,9 @@ def make_search_project(settings: Settings) -> BaseTool:
         """Search the documents of this conversation's project for passages relevant to a query.
 
         Use it when the user asks about the project documents and their full text is not
-        included in your instructions. It finds passages by meaning, including tables and
-        descriptions of images (charts, diagrams). Search again with different wording when
+        included in your instructions. It finds passages both by meaning and by exact words
+        (names, codes, numbers), including tables and descriptions of images (charts,
+        diagrams). Search again with different wording when
         the results do not answer the question, and use read_document with a result's
         document_id to read the surrounding text when a passage is cut off or you need more
         context.
@@ -104,13 +101,10 @@ def make_search_project(settings: Settings) -> BaseTool:
         project = (config.get("configurable") or {}).get("project")
         if project is None:
             return NOT_IN_PROJECT, {}
-        try:
-            async with SessionLocal() as session:
-                hits = await search.search(
-                    session, settings, project.id, query, settings.project_search_top_k
-                )
-        except EmbeddingUnavailableError:
-            return SEARCH_UNAVAILABLE, {}
+        async with SessionLocal() as session:
+            hits = await search.search(
+                session, settings, project.id, query, settings.project_search_top_k
+            )
         return search.format_hits(query, hits), {"sources": search.sources(project.id, hits)}
 
     return search_project

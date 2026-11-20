@@ -22,7 +22,7 @@ from sqlalchemy.orm import defer
 from app.core.config import Settings, get_settings
 from app.core.db import SessionLocal
 from app.core.storage import DOCUMENTS_PREFIX, PROJECTS_PREFIX, ObjectStorage, get_storage
-from app.documents import chunking
+from app.documents import chunking, keywords
 from app.documents import elements as el
 from app.documents.formats import DocumentKind, detect, safe_filename
 from app.documents.parser import ParsedDocument, ParseError
@@ -472,15 +472,14 @@ async def _document_chunks(
 async def _chunk_rows(
     document_id: uuid.UUID, project_id: uuid.UUID, filename: str, chunks: list[chunking.Chunk]
 ) -> list[DocumentChunk]:
-    """청크를 임베딩해서 저장할 행으로 만든다. 임베딩에 실패하면 임베딩 없이 만든다."""
+    """청크를 임베딩해서 저장할 행으로 만든다 (키워드 검색 토큰 포함). 임베딩에 실패하면 임베딩 없이 만든다."""
     settings = get_settings()
+    texts = [chunking.embedding_text(filename, c) for c in chunks]
     vectors: list[list[float]] | None = None
     if chunks:
         try:
             model = embeddings.build_embeddings(settings)
-            vectors = await model.aembed_documents(
-                [chunking.embedding_text(filename, c) for c in chunks]
-            )
+            vectors = await model.aembed_documents(texts)
         except embeddings.EmbeddingUnavailableError as exc:
             logger.warning("embedding skipped for document %s: %s", document_id, exc)
         except Exception:
@@ -501,6 +500,7 @@ async def _chunk_rows(
             token_count=chunk.token_count,
             embedding=vectors[position] if vectors is not None else None,
             embedding_model=model_name,
+            search_vector=func.to_tsvector("simple", keywords.keyword_document(texts[position])),
         )
         for position, chunk in enumerate(chunks)
     ]

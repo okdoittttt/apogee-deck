@@ -120,6 +120,8 @@ class Settings(BaseSettings):
         chunk_max_tokens: 청크 최대 크기. 넘는 요소는 나눈다.
         chunk_overlap_tokens: 긴 본문을 나눌 때 앞 청크 끝을 다음 청크 앞에 겹치는 분량.
         project_search_top_k: ``search_project`` 가 돌려줄 청크 수.
+        project_search_candidates: 하이브리드 검색에서 벡터·키워드 검색이 각각 뽑을 후보 수 (합치기 전).
+        project_search_rrf_k: 결과 합치기(RRF)의 상수 ``k``. 클수록 순위 차이를 덜 반영한다.
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -251,6 +253,8 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = 800
     chunk_overlap_tokens: int = 80
     project_search_top_k: int = 8
+    project_search_candidates: int = 30
+    project_search_rrf_k: int = 60
 
     # --- Auth ---
     auth_required: bool = True
