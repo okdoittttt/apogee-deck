@@ -6,16 +6,15 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
 
 형식별 처리:
 
-- PDF: 텍스트 레이어는 pypdfium2 로 쪽별로 뽑는다 (``_pdf_text_layers``). xberg 기본 추출은 "칸 이름 | 값"
-  이 나란한 표 같은 배치를 여러 단으로 보고 단별로 읽어서, 회의록의 서로 다른 회의 내용이 섞일 만큼 줄
-  순서가 틀어졌다. pdfium 은 PDF 에 그린 순서를 따라서 사람이 읽는 순서와 맞았다. 그림·표 목록과 OCR 은
-  xberg 를 그대로 쓴다.
-  텍스트만 있는 쪽은 텍스트 레이어를 그대로 쓰고, 글자가 없는 쪽(스캔본)은 쪽 전체 OCR 결과를 쓴다.
-  텍스트와 큰 그림이 섞인 쪽은 쪽 전체를 OCR 한 뒤(``force_ocr_pages``) 텍스트 레이어와 합친다
-  (``app.documents.ocr_merge``): 줄 순서와 그림 속 글자는 OCR 에서, 글자와 띄어쓰기는 텍스트 레이어에서
-  가져온다. xberg 기본 동작은 섞인 쪽의 그림 글자를 문서 맨 끝에 붙여서 위치가 틀어지고, OCR 결과만 쓰면
-  본문 띄어쓰기가 깨지기 때문이다. 출력은 plain 텍스트다. Markdown 출력은 OCR 결과의 띄어쓰기를 지우고
-  줄을 제목(``#``)으로 바꿔서 한국어 OCR 품질이 크게 떨어졌다.
+- PDF: 본문은 쪽별 텍스트 레이어다. 텍스트 레이어는 pypdfium2 로 뽑는다 (``_pdf_text_layers``). xberg 기본
+  추출은 "칸 이름 | 값" 이 나란한 표 같은 배치를 여러 단으로 보고 단별로 읽어서, 회의록의 서로 다른 회의 내용이
+  섞일 만큼 줄 순서가 틀어졌다. pdfium 은 PDF 에 그린 순서를 따라서 사람이 읽는 순서와 맞았다.
+  그림 속 글자는 쪽 전체가 아니라 **남길 그림만 하나씩 OCR** 해서 본문과 섞지 않는다 (그림이 없으면 OCR 안 함).
+  쪽 전체를 OCR 해서 본문과 합치면 차트의 눈금·범례가 본문 문장 사이에 끼어서, 모델이 눈금 값을 데이터로
+  읽는 오답이 났다. 그림 속 글자는 프로젝트 문서면 그림 요소에(그림 설명의 참고 자료와 대체 글자), 대화 첨부면
+  쪽 끝에 표시를 붙여 넣는다. 글자가 거의 없는 쪽(스캔본)만 쪽 전체 OCR 결과를 본문으로 쓴다.
+  출력은 plain 텍스트다. Markdown 출력은 OCR 결과의 띄어쓰기를 지우고 줄을 제목(``#``)으로 바꿔서 한국어 OCR
+  품질이 크게 떨어졌다.
 - DOCX, XLSX, PPTX, HWP, HWPX: 문서 안 그림을 OCR 해서 제자리에 넣는다(``ocr_embedded_images``).
   출력은 Markdown 이다 (표가 Markdown 표로 남는다).
 - HWPML(XML 로 된 .hwp): xberg 는 일반 XML 로 처리해서 태그 이름이 섞이므로 직접 본문만 뽑는다.
@@ -35,23 +34,17 @@ from typing import Any
 
 from app.documents import elements as el
 from app.documents.formats import DocumentKind
-from app.documents.ocr_merge import merge_page, ocr_only_lines
 
 logger = logging.getLogger(__name__)
 
 OCR_LANGUAGE = "korean"
 """PaddleOCR 언어. 한국어 모델은 영문·숫자도 읽는다."""
 
-FULL_PAGE_OCR_MIN_SIDE = 80
-FULL_PAGE_OCR_MIN_AREA = 50_000
-"""PDF 쪽 전체를 OCR 할 그림 크기 기준(픽셀). 이보다 작은 아이콘·로고만 있는 쪽은 텍스트 레이어를 쓴다."""
-
 MIN_TEXT_LAYER_CHARS = 20
-"""OCR 한 쪽에서 텍스트 레이어와 합칠 최소 글자 수(공백 제외). 이보다 적으면 스캔본으로 보고 OCR 결과만 쓴다."""
+"""PDF 쪽의 텍스트 레이어가 이보다 적으면(공백 제외) 스캔본으로 보고 쪽 전체 OCR 결과를 본문으로 쓴다."""
 
-MIN_LAYER_COVERAGE = 0.8
-"""합친 결과가 텍스트 레이어 글자의 이 비율보다 적게 담으면 OCR 이 본문을 못 읽은 것으로 본다.
-(시험: 정상 슬라이드 PDF 0.92 이상, 한국어 글꼴을 OCR 하지 못한 PDF 0.40~0.53)"""
+FIGURE_TEXT_LABEL = "[그림 속 글자 (OCR, 배치 순서가 정확하지 않을 수 있음)]"
+"""대화 첨부 PDF 에서 쪽 끝에 붙이는 그림 속 글자의 표시. 모델이 본문 문장으로 읽지 않게 한다."""
 
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~<>])")
 """xberg 가 Markdown 출력에 넣는 이스케이프 (``4\\.`` → ``4.``). 표 칸 안의 ``\\|`` 는 표가 깨지므로 남긴다."""
@@ -65,6 +58,9 @@ IMAGE_MIME_TYPES = {
     "jpg": "image/jpeg",
     "webp": "image/webp",
 }
+
+OCR_IMAGE_FORMATS = frozenset({"png", "jpeg", "jpg", "webp", "bmp", "tiff", "tif", "gif"})
+"""그림 하나를 OCR 할 때 xberg 에 넘길 수 있는 그림 형식 (확장자로 형식을 알려준다)."""
 
 PAGE_COUNT_KINDS = {DocumentKind.PDF, DocumentKind.PPTX}
 """쪽(슬라이드) 수를 기록하는 형식. 나머지는 쪽 구분이 없거나(DOCX, 한글) 의미가 다르다(XLSX 시트)."""
@@ -207,8 +203,7 @@ def _image_data(img: Any) -> el.ImageData | None:
     mime = IMAGE_MIME_TYPES.get(str(img.format or "").lower())
     if mime is None or not img.data:
         return None
-    ocr = getattr(img.ocr_result, "content", None) if img.ocr_result else None
-    return el.ImageData(bytes(img.data), mime, img.width or 0, img.height or 0, (ocr or "").strip())
+    return el.ImageData(bytes(img.data), mime, img.width or 0, img.height or 0, _ocr_text(img))
 
 
 def _image_kind(img: Any) -> str | None:
@@ -235,8 +230,10 @@ async def _parse_with_xberg(
             **kwargs,
         )
 
-    async def run(cfg: "xberg.ExtractionConfig") -> "xberg.ExtractedDocument":
-        source = xberg.ExtractInput(kind="bytes", bytes=data, filename=filename)
+    async def run(
+        cfg: "xberg.ExtractionConfig", source_bytes: bytes = data, name: str = filename
+    ) -> "xberg.ExtractedDocument":
+        source = xberg.ExtractInput(kind="bytes", bytes=source_bytes, filename=name)
         try:
             output = await xberg.extract(source, cfg)
         except Exception as exc:
@@ -268,7 +265,7 @@ async def _parse_with_xberg(
             result = replace(result, elements=_office_elements(doc))
         return result
 
-    # 1차: OCR 없이 쪽별 텍스트 레이어와 큰 그림이 있는 쪽을 찾는다 (빠르다).
+    # 1차: OCR 없이 쪽별 텍스트 레이어와 그림을 뽑는다 (빠르다).
     scan = await run(
         config(
             output_format="plain",
@@ -290,42 +287,69 @@ async def _parse_with_xberg(
     page_count = len(text_pages)
     if page_count > max_pages:
         raise ParseError(f"쪽 수가 너무 많습니다 ({page_count}쪽, 최대 {max_pages}쪽).")
-    ocr_pages = {
-        img.page_number
-        for img in scan.images or []
-        if img.page_number
-        and min(img.width or 0, img.height or 0) >= FULL_PAGE_OCR_MIN_SIDE
-        and (img.width or 0) * (img.height or 0) >= FULL_PAGE_OCR_MIN_AREA
-    }
-    ocr_pages |= {n for n, text in text_pages.items() if not text.strip()}
 
-    # 2차: 고른 쪽만 쪽 전체 OCR. OCR 할 쪽이 없으면 건너뛴다 (OCR 모델을 불러오는 데 1초 넘게 걸린다).
-    ocr_texts: dict[int, str] = {}
-    if ocr_pages:
+    # 2차: 글자가 거의 없는 쪽(스캔본)만 쪽 전체를 OCR 해서 본문으로 쓴다.
+    scanned = {n for n, text in text_pages.items() if _chars(text) < MIN_TEXT_LAYER_CHARS}
+    if scanned:
         doc = await run(
             config(
                 output_format="plain",
                 ocr=ocr,
-                force_ocr_pages=sorted(ocr_pages),
+                force_ocr_pages=sorted(scanned),
                 ocr_embedded_images=False,
                 pages=xberg.PageConfig(extract_pages=True),
             )
         )
-        ocr_texts = {
-            p.page_number: p.content or "" for p in doc.pages or [] if p.page_number in ocr_pages
-        }
+        for p in doc.pages or []:
+            if p.page_number in scanned and _chars(p.content or "") > _chars(
+                text_pages[p.page_number]
+            ):
+                text_pages[p.page_number] = p.content or ""
 
-    page_bodies: dict[int, str] = {}
-    for number in sorted(text_pages):
-        body = text_pages[number]
-        if number in ocr_texts:
-            body = _combine_ocr(body, ocr_texts[number])
-        page_bodies[number] = body.strip()
-    content = "\n\n".join(f"<!-- PAGE {n} -->\n\n{b}" for n, b in page_bodies.items())
-    result = ParsedDocument(content, page_count)
+    # 3차: 남길 그림만 하나씩 OCR 한다 (그림 속 글자). 그림이 없으면 OCR 모델을 불러오지 않는다.
+    figures = _pdf_figures(scan.images or [])
+    figure_ocr: dict[int, str] = {}
+    for img in figures:
+        ext = str(img.format or "").lower()
+        if not img.data or ext not in OCR_IMAGE_FORMATS:
+            continue
+        try:
+            found = await run(
+                config(output_format="plain", ocr=ocr), bytes(img.data), f"figure.{ext}"
+            )
+        except ParseError:
+            continue  # 그림 하나를 못 읽어도 문서는 계속 처리한다
+        if text := (found.content or "").strip():
+            figure_ocr[id(img)] = text
+
+    page_bodies = {n: text_pages[n].strip() for n in sorted(text_pages)}
     if structured:
-        result = replace(result, elements=_pdf_elements(scan, page_bodies))
-    return result
+        content = _pdf_content(page_bodies, {})
+        elements = _pdf_elements(scan, page_bodies, figures, figure_ocr)
+        return ParsedDocument(content, page_count, elements)
+    # 대화 첨부는 그림 설명이 없으므로 그림 속 글자를 쪽 끝에 표시와 함께 남긴다.
+    figure_text: dict[int, list[str]] = {}
+    for img in figures:
+        if text := figure_ocr.get(id(img)):
+            figure_text.setdefault(img.page_number, []).append(text)
+    return ParsedDocument(_pdf_content(page_bodies, figure_text), page_count)
+
+
+def _chars(text: str) -> int:
+    return sum(not c.isspace() for c in text)
+
+
+def _pdf_content(page_bodies: dict[int, str], figure_text: dict[int, list[str]]) -> str:
+    """쪽 표시를 넣은 PDF 본문. 그림 속 글자가 있으면 그 쪽 끝에 표시와 함께 붙인다."""
+    pages = []
+    for number, body in page_bodies.items():
+        parts = [body] if body else []
+        for text in figure_text.get(number, []):
+            # OCR 은 줄마다 한 칸(눈금, 범례 등)이라, 한 줄로 이어서 본문과 구분한다.
+            joined = " / ".join(line.strip() for line in text.splitlines() if line.strip())
+            parts.append(f"{FIGURE_TEXT_LABEL} {joined}")
+        pages.append(f"<!-- PAGE {number} -->\n\n" + "\n\n".join(parts))
+    return "\n\n".join(pages)
 
 
 def _office_elements(doc: Any) -> list[el.Element]:
@@ -346,18 +370,45 @@ def _office_elements(doc: Any) -> list[el.Element]:
     return el.from_structure(nodes, images, notes)
 
 
-def _pdf_elements(scan: Any, page_bodies: dict[int, str]) -> list[el.Element]:
-    """PDF 의 쪽별 본문, 표 추출 결과, 그림으로 요소 목록을 만든다."""
+def _pdf_figures(images: list[Any]) -> list[Any]:
+    """PDF 그림 중 남길 것: 투명도 마스크와 버릴 그림(아이콘, 작은 그림, 빈 그림)을 뺀다.
+
+    Args:
+        images: xberg 그림 목록 (그림마다 OCR 결과가 들어 있다).
+
+    Returns:
+        남길 xberg 그림 (문서 순서).
+    """
+    masks = _soft_masks(images)
+    return [
+        img
+        for img in images
+        if img.page_number
+        and id(img) not in masks
+        and el.keep_image(
+            img.width or 0, img.height or 0, _image_kind(img), len(img.data or b"") or None
+        )
+    ]
+
+
+def _ocr_text(img: Any) -> str:
+    """Xberg 가 그림을 OCR 한 결과 (Office·한글 문서는 xberg 가 그림마다 OCR 한다)."""
+    return ((getattr(img.ocr_result, "content", None) if img.ocr_result else None) or "").strip()
+
+
+def _pdf_elements(
+    scan: Any, page_bodies: dict[int, str], figures: list[Any], figure_ocr: dict[int, str]
+) -> list[el.Element]:
+    """PDF 의 쪽별 본문, 표 추출 결과, 그림(그림 속 글자 포함)으로 요소 목록을 만든다."""
     tables = [
         el.PdfTable(p.page_number, [[str(c or "") for c in row] for row in t.cells or []])
         for p in sorted(scan.pages or [], key=lambda p: p.page_number)
         for t in p.tables or []
     ]
-    masks = _soft_masks(scan.images or [])
     images = [
-        (img.page_number, image, _image_kind(img))
-        for img in scan.images or []
-        if img.page_number and id(img) not in masks and (image := _image_data(img)) is not None
+        (img.page_number, replace(image, ocr_text=figure_ocr.get(id(img), "")), _image_kind(img))
+        for img in figures
+        if (image := _image_data(img)) is not None
     ]
     return el.from_pdf(page_bodies, tables, images)
 
@@ -386,25 +437,6 @@ def _soft_masks(images: list[Any]) -> set[int]:
         if str(getattr(img, "colorspace", "") or "") == "DeviceGray"
         and (img.page_number, img.width, img.height) in colored
     }
-
-
-def _combine_ocr(text_layer: str, ocr_text: str) -> str:
-    """OCR 한 쪽의 본문을 정한다.
-
-    텍스트 레이어가 충분하면 합치고, 아니면(스캔본) OCR 결과를 쓴다. OCR 이 아무것도 못 읽었으면
-    텍스트 레이어를 쓴다. 합친 결과가 텍스트 레이어를 너무 적게 담으면(OCR 이 본문 글자를 못 읽은 경우,
-    예: 글꼴을 그리지 못한 PDF) 텍스트 레이어를 그대로 쓰고 OCR 에만 있는 줄(그림 속 글자)을 뒤에 붙인다.
-    """
-    if not ocr_text.strip():
-        return text_layer
-    layer_chars = sum(not c.isspace() for c in text_layer)
-    if layer_chars < MIN_TEXT_LAYER_CHARS:
-        return ocr_text
-    merged, stats = merge_page(text_layer, ocr_text)
-    if stats.matched_chars < layer_chars * MIN_LAYER_COVERAGE:
-        extra = ocr_only_lines(text_layer, ocr_text)
-        return "\n".join([text_layer.strip(), *extra]) if extra else text_layer
-    return merged
 
 
 def _describe_xberg_error(exc: object) -> str:

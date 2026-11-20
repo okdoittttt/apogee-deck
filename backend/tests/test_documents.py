@@ -208,6 +208,58 @@ def test_soft_mask_companions_are_dropped():
     assert masks == {id(mask)}
 
 
+def _figure(page=1, w=856, h=490, colorspace="DeviceRGB", size=12_446, kind=None):
+    return SimpleNamespace(
+        page_number=page,
+        width=w,
+        height=h,
+        colorspace=colorspace,
+        data=b"x" * size,
+        format="webp",
+        image_kind=kind,
+        ocr_result=None,
+    )
+
+
+def test_pdf_figures_keep_only_real_figures():
+    chart = _figure()
+    figures = parser_module._pdf_figures(
+        [
+            chart,
+            _figure(colorspace="DeviceGray", size=244),  # 투명도 마스크
+            _figure(page=2, w=60, h=60, size=900),  # 작은 아이콘
+            _figure(page=2, size=200),  # 빈 그림
+            _figure(page=2, kind="logo"),
+        ]
+    )
+    assert figures == [chart]
+
+
+def test_pdf_elements_attach_figure_ocr_to_images():
+    chart = _figure()
+    scan = SimpleNamespace(pages=[SimpleNamespace(page_number=1, tables=[])])
+    elements = parser_module._pdf_elements(
+        scan, {1: "본문 문장"}, [chart], {id(chart): "그림 1. 만족도\n4.6\n-6"}
+    )
+    assert [(e.kind, e.content) for e in elements] == [
+        ("text", "본문 문장"),
+        ("image", "그림 1. 만족도\n4.6\n-6"),
+    ]
+    assert elements[1].image.ocr_text == "그림 1. 만족도\n4.6\n-6"
+    assert "4.6" not in elements[0].content  # 그림 속 글자는 본문에 섞이지 않는다
+
+
+def test_pdf_content_marks_figure_text_for_attachments():
+    content = parser_module._pdf_content(
+        {1: "본문 문장", 2: "둘째 쪽"}, {1: ["그림 1. 만족도\n4.6\n모바일 앱"]}
+    )
+    assert content == (
+        "<!-- PAGE 1 -->\n\n본문 문장\n\n"
+        f"{parser_module.FIGURE_TEXT_LABEL} 그림 1. 만족도 / 4.6 / 모바일 앱\n\n"
+        "<!-- PAGE 2 -->\n\n둘째 쪽"
+    )
+
+
 def test_parse_pdf_page_limit_and_broken_pdf():
     with pytest.raises(ParseError, match="쪽 수"):
         parse(text_pdf(["a", "b", "c"]), DocumentKind.PDF, "a.pdf", 2)
