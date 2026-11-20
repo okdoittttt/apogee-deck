@@ -13,7 +13,7 @@ const displaySerif = Noto_Serif_KR({
 });
 
 export const metadata: Metadata = {
-  title: "Agent",
+  title: "okdoitttt",
   description: "LLM 기반 에이전트",
 };
 

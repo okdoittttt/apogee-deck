@@ -187,7 +187,8 @@ async def test_reject_and_suspend_end_sessions(sent):
         await approval.decide(session, target, decision, SETTINGS)
         assert target.status == end
         assert any("DELETE FROM sessions" in q for q in session.executed)
-    assert [m.subject for m in sent] == ["[Agent] 가입 신청 결과"]  # 정지는 메일을 보내지 않는다
+    # 정지는 메일을 보내지 않는다
+    assert [m.subject for m in sent] == ["[okdoitttt] 가입 신청 결과"]
 
 
 @pytest.mark.parametrize(

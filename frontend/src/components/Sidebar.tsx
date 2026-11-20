@@ -52,7 +52,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
       <div className="flex h-14 items-center justify-between px-3">
         <div className="flex items-center gap-2 px-1 text-fg">
           <LogoIcon className="h-6 w-6" />
-          <span className="text-[17px] font-semibold tracking-tight">Agent</span>
+          <span className="text-[17px] font-semibold tracking-tight">okdoitttt</span>
         </div>
         <button
           onClick={onClose}

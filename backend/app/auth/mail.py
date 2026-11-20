@@ -18,7 +18,7 @@ from app.config import Settings
 logger = logging.getLogger(__name__)
 
 SMTP_TIMEOUT_SECONDS = 20
-APP_NAME = "Agent"
+APP_NAME = "okdoitttt"
 
 
 def build_message(settings: Settings, to: list[str], subject: str, body: str) -> EmailMessage:

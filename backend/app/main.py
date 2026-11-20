@@ -86,7 +86,7 @@ async def prepare_storage() -> None:
         )
 
 
-app = FastAPI(title="Agent API", lifespan=lifespan)
+app = FastAPI(title="okdoitttt API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
