@@ -62,3 +62,5 @@ def render(name: str, /, **variables: Any) -> Prompt:
 - DB 스키마 변경은 `app/models.py` 수정 → `make db-revision m="..."` → 생성된 파일 검토.
 - 프롬프트는 `app/agents/<에이전트>/prompts/*.md` 와 `app/prompts/shared/` 에서 관리한다. 코드에서는 이름으로 부른다.
   그래프 노드 같은 비동기 코드에서는 `await prompts.arender(...)` 를 쓴다 (`render` 는 Langfuse 조회 때문에 이벤트 루프를 막을 수 있다).
+
+@.claude/pstack-models.md
