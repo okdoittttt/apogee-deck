@@ -99,6 +99,9 @@ export interface ChatMessage {
   thinking?: boolean; // 화면 전용: 지금 추론 과정을 받는 중인지
   model?: string | null; // assistant 응답을 만든 모델 ID
   documents?: DocumentInfo[]; // 사용자 메시지에 첨부한 문서
+  serverId?: string | null; // 서버에 저장된 메시지 ID (피드백을 보낼 때). 불러온 메시지는 id 와 같다
+  feedback?: 1 | -1 | null; // 응답에 단 피드백 (👍 1, 👎 -1)
+  feedbackComment?: string | null; // 피드백과 함께 남긴 의견
 }
 
 interface MessageOut {
@@ -109,6 +112,8 @@ interface MessageOut {
   steps: Step[];
   model: string | null;
   documents: DocumentInfo[];
+  feedback: 1 | -1 | null;
+  feedback_comment: string | null;
 }
 
 export const imageUrl = (id: string) => `${API_URL}/api/images/${id}`;
@@ -189,8 +194,30 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
       steps: m.steps,
       model: m.model,
       documents: m.documents ?? [],
+      serverId: m.id,
+      feedback: m.feedback ?? null,
+      feedbackComment: m.feedback_comment ?? null,
     })),
   };
+}
+
+/**
+ * 응답에 👍/👎 피드백(과 의견)을 단다. 같은 응답에 다시 보내면 바꾸고, value 가 null 이면 지운다.
+ * 서버는 DB 에 저장하고 응답의 Langfuse 트레이스에 점수로 남긴다.
+ */
+export async function setFeedback(
+  conversationId: string,
+  messageId: string,
+  value: 1 | -1 | null,
+  comment?: string | null,
+): Promise<{ feedback: 1 | -1 | null; comment: string | null }> {
+  const res = await apiFetch(`/api/conversations/${conversationId}/messages/${messageId}/feedback`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value, comment: comment ?? null }),
+  });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `피드백을 저장하지 못했습니다 (${res.status})`);
+  return res.json();
 }
 
 export interface ImageInput {
@@ -246,7 +273,7 @@ export interface StreamHandlers {
   onReasoning?: (text: string) => void;
   onToolStart?: (data: ToolStartEvent) => void;
   onToolEnd?: (data: ToolEndEvent) => void;
-  onDone?: (data: { stop_reason: string | null; model: string }) => void;
+  onDone?: (data: { stop_reason: string | null; model: string; message_id?: string | null }) => void;
   /**
    * 응답 실패. `transient` 는 서버 혼잡(5xx)·사용 한도·시간 초과처럼
    * 잠시 후 다시 보내면 풀릴 수 있는 오류인지 나타낸다.

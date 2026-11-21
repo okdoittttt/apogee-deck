@@ -238,6 +238,18 @@ Today's date is {{ today }}.
 
 **잘못된 프롬프트는 배포 후 첫 요청이 아니라 앱 기동 시점에 실패합니다.**
 
+### 응답 피드백 (👍/👎 → Langfuse 점수)
+
+- 응답 한 턴은 Langfuse 트레이스 하나입니다. 트레이스 ID 를 미리 만들어 콜백에 넘기고(`tracing.new_trace_id`) assistant 메시지에도
+  저장합니다(`messages.trace_id`). `done` 이벤트는 저장한 메시지 ID 를 알려 줍니다.
+- 화면의 응답 아래 👍/👎(같은 버튼을 다시 누르면 취소, 👎 는 의견 선택)는 `PUT /api/conversations/{id}/messages/{message_id}/feedback`
+  으로 DB 에 저장되고(`feedback`, `feedback_comment`), 응답 뒤에 그 트레이스에 **`user_feedback` 점수**(BOOLEAN, 👍 1 / 👎 0, 의견은 comment)로
+  남습니다. 점수 ID 는 메시지마다 하나라서 바꾸면 같은 점수를 고치고, 취소하면 지웁니다. Langfuse 가 실패해도 피드백 저장에는 영향이 없습니다.
+- 프롬프트 버전이 그 아래 LLM 호출에 연결되어 있어서, Langfuse 에서 프롬프트 버전별 점수를 비교할 수 있습니다.
+- 이 기능 전의 응답이나 트레이싱이 꺼져 있을 때의 응답은 트레이스 ID 가 없어 DB 에만 저장합니다 (`scored: false`).
+- Langfuse v4(events_only)에서 점수는 `GET /api/public/v3/scores` 로 읽습니다. 의견은 기본 응답에 없고 `fields=core,details` 로 보이며,
+  수정·삭제는 몇 초 뒤에 반영됩니다.
+
 ### Langfuse 프롬프트 관리 연동
 
 git(로컬 파일)이 **원본**이고, Langfuse에는 버전별로 동기화됩니다. 각 LLM 호출 트레이스에는

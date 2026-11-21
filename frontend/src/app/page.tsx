@@ -41,6 +41,7 @@ import {
   listConversations,
   listProjects,
   resumeStream,
+  setFeedback,
   stopConversation,
   streamChat,
   type StreamHandlers,
@@ -739,6 +740,23 @@ function ChatApp({
     void runSend(next);
   }
 
+  /** 응답에 👍/👎 피드백을 단다. 화면을 먼저 바꾸고, 저장에 실패하면 되돌린다. */
+  async function sendFeedback(message: ChatMessage, value: 1 | -1 | null, comment: string | null = null) {
+    const id = conversationIdRef.current;
+    if (!id || !message.serverId) return;
+    const before = { feedback: message.feedback ?? null, feedbackComment: message.feedbackComment ?? null };
+    const patch = (p: Partial<ChatMessage>) =>
+      setMessages((prev) => prev.map((m) => (m.id === message.id ? { ...m, ...p } : m)));
+    patch({ feedback: value, feedbackComment: value === null ? null : comment });
+    try {
+      const saved = await setFeedback(id, message.serverId, value, comment);
+      patch({ feedback: saved.feedback, feedbackComment: saved.comment });
+    } catch (e) {
+      patch(before);
+      setToast((e as Error).message);
+    }
+  }
+
   /** 이 창의 응답 연결만 끊는다 (다른 화면으로 옮김). 응답은 서버에서 계속 만들어지고, 돌아오면 이어서 보인다. */
   function detachStream() {
     const controller = abortRef.current;
@@ -785,9 +803,10 @@ function ChatApp({
             st.type === "tool" && st.id === id ? { ...st, output, status, sources } : st,
           ),
         })),
-      onDone: ({ stop_reason, model }) => {
+      onDone: ({ stop_reason, model, message_id }) => {
         state.outcome = "done";
-        updateAssistant((m) => ({ ...m, model: m.model ?? model }));
+        // 저장된 메시지 ID: 이 응답에 피드백을 보낼 때 쓴다
+        updateAssistant((m) => ({ ...m, model: m.model ?? model, serverId: message_id ?? null }));
         if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
         if (stop_reason === "max_tokens") appendToAssistant("\n\n_(응답이 길어 잘렸습니다.)_");
       },
@@ -1160,6 +1179,7 @@ function ChatApp({
                       messages={earlier}
                       activeId={activeAssistantId}
                       modelLabels={modelLabels}
+                      onFeedback={sendFeedback}
                     />
                   )}
                   {/* 마지막으로 보낸 메시지부터: 최소 화면 높이만큼 차지해서 그 메시지를 맨 위로 올릴 수 있게 한다 */}
@@ -1176,6 +1196,7 @@ function ChatApp({
                       messages={pinned}
                       activeId={activeAssistantId}
                       modelLabels={modelLabels}
+                      onFeedback={sendFeedback}
                     />
                     {queued && (
                       <QueuedMessageBubble
