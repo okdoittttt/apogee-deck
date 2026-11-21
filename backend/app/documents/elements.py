@@ -12,6 +12,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.documents.formats import DocumentKind
+
 ElementKind = Literal["text", "table", "image"]
 
 MIN_IMAGE_SIDE = 80
@@ -329,13 +331,27 @@ class ContentPart:
     described: bool = False
 
 
+def tables_in_body(document_kind: str) -> bool:
+    """표 내용이 본문 요소에 이미 들어 있는 형식인지 (그러면 표 요소는 본문·검색·문서 보기에서 뺀다).
+
+    PDF 는 본문이 텍스트 레이어라서 표 글자가 행 단위로 본문에 들어 있다.
+
+    Args:
+        document_kind: 문서 형식 (``Document.kind``).
+
+    Returns:
+        PDF 면 ``True``.
+    """
+    return document_kind == DocumentKind.PDF
+
+
 def is_shown(kind: str, content: str, skip_tables: bool) -> bool:
-    """요소를 문서 본문과 문서 보기에 넣을지. 둘이 같은 내용을 보이도록 같은 규칙을 쓴다.
+    """요소를 문서 본문, 검색 청크, 문서 보기에 넣을지. 셋이 같은 내용을 보도록 같은 규칙을 쓴다.
 
     Args:
         kind: 요소 종류.
         content: 요소 내용 (그림은 설명 또는 OCR 글자).
-        skip_tables: 표를 뺄지 (PDF 는 표 내용이 본문에 이미 있다).
+        skip_tables: 표를 뺄지 (``tables_in_body``).
 
     Returns:
         넣을 요소면 ``True``. 내용이 빈 요소와 (``skip_tables`` 면) 표는 뺀다.

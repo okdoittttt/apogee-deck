@@ -427,8 +427,7 @@ async def _compose_document_content(
         )
         for r in rows
     ]
-    # PDF 는 표 내용이 본문에 행 단위로 이미 들어 있다.
-    return el.compose_content(parts, skip_tables=kind == DocumentKind.PDF)
+    return el.compose_content(parts, skip_tables=el.tables_in_body(kind))
 
 
 # --- 검색 준비: 요소 → 청크 → 임베딩 ----------------------------------------------------------------
@@ -482,7 +481,13 @@ async def index_document(document_id: uuid.UUID) -> None:
 async def _document_chunks(
     session: AsyncSession, document_id: uuid.UUID, content: str | None
 ) -> list[chunking.Chunk]:
-    """문서의 요소로 청크를 만든다. 요소가 없는 문서(구조화 적재 전에 올린 것)는 본문으로 만든다."""
+    """문서의 요소로 청크를 만든다. 요소가 없는 문서(구조화 적재 전에 올린 것)는 본문으로 만든다.
+
+    문서 본문·문서 보기와 같은 규칙(``elements.is_shown``)으로 요소를 고른다. 그래서 PDF 는 표 요소를
+    청크로 만들지 않는다 (표 내용이 본문 청크에 이미 있어서, 넣으면 같은 내용이 검색 결과 두 자리를 차지한다).
+    """
+    kind = await session.scalar(select(Document.kind).where(Document.id == document_id))
+    skip_tables = el.tables_in_body(kind or "")
     rows = await session.execute(
         select(
             DocumentElement.id,
@@ -494,7 +499,11 @@ async def _document_chunks(
         .where(DocumentElement.document_id == document_id)
         .order_by(DocumentElement.position)
     )
-    sources = [chunking.SourceElement(r.id, r.kind, r.content, r.page, r.heading) for r in rows]
+    sources = [
+        chunking.SourceElement(r.id, r.kind, r.content, r.page, r.heading)
+        for r in rows
+        if el.is_shown(r.kind, r.content, skip_tables)
+    ]
     if not sources and content:
         sources = [chunking.SourceElement(uuid.uuid4(), "text", content)]
     settings = get_settings()

@@ -2,6 +2,7 @@
 
 import math
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -9,6 +10,7 @@ from langchain_core.messages import ToolMessage
 from app.api.schemas import ToolStep
 from app.core.config import Settings
 from app.documents import chunking, keywords
+from app.documents import service as document_service
 from app.documents.reading import estimate_tokens
 from app.llm import embeddings
 from app.orchestration.events import tool_sources
@@ -92,6 +94,38 @@ def test_chunks_remember_their_source_elements():
     assert by_kind["text"] == {long_text.id}  # 나눈 본문 조각은 모두 원래 요소
     assert by_kind["table"] == {table.id}
     assert by_kind["image"] == {image.id}
+
+
+class _ChunkSourceSession:
+    """``_document_chunks`` 가 쓰는 만큼만: 문서 형식은 ``scalar``, 요소는 ``execute``."""
+
+    def __init__(self, kind, rows):
+        self.kind, self.rows = kind, rows
+
+    async def scalar(self, statement):
+        return self.kind
+
+    async def execute(self, statement):
+        return self.rows
+
+
+def _element_row(kind, content, page=1):
+    return SimpleNamespace(id=uuid.uuid4(), kind=kind, content=content, page=page, heading=None)
+
+
+TABLE = "| 항목 | 값 |\n| --- | --- |\n| 무게 | 6.8kg |"
+
+
+@pytest.mark.parametrize(
+    ("document_kind", "kinds"), [("pdf", ["text"]), ("docx", ["text", "table"])]
+)
+async def test_pdf_tables_are_not_chunked_twice(document_kind, kinds):
+    rows = [_element_row("text", "무게 6.8kg 본문"), _element_row("table", TABLE)]
+    chunks = await document_service._document_chunks(
+        _ChunkSourceSession(document_kind, rows), uuid.uuid4(), None
+    )
+    # PDF 는 표 내용이 본문(텍스트 레이어)에 이미 있다. 다른 형식은 표를 따로 청크로 만든다.
+    assert [c.kind for c in chunks] == kinds
 
 
 def test_image_becomes_its_own_chunk_with_element_id():

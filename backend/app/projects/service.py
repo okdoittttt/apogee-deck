@@ -17,7 +17,6 @@ from app.core.config import get_settings
 from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.documents import elements as el
 from app.documents import service as documents
-from app.documents.formats import DocumentKind
 from app.documents.reading import AttachedDocument
 from app.models import Conversation, Document, DocumentChunk, DocumentElement, Project
 
@@ -398,7 +397,7 @@ async def document_view(
     )
     if doc is None:
         raise ProjectError(404, "Document not found")
-    skip_tables = doc.kind == DocumentKind.PDF
+    skip_tables = el.tables_in_body(doc.kind)
     rows = await session.execute(
         select(
             DocumentElement.id,
