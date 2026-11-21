@@ -11,7 +11,7 @@ from app.api.schemas import ToolStep
 from app.core.config import Settings
 from app.documents import chunking, keywords
 from app.documents import service as document_service
-from app.documents.reading import estimate_tokens
+from app.documents.reading import AttachedDocument, estimate_tokens
 from app.llm import embeddings
 from app.orchestration.events import tool_sources
 from app.projects import search
@@ -286,7 +286,7 @@ class _Session:
 async def test_search_tool_searches_only_the_server_given_project(monkeypatch):
     calls = []
 
-    async def fake_search(session, settings, project_id, query, top_k):
+    async def fake_search(session, settings, project_id, query, top_k, document_id=None):
         calls.append((project_id, query, top_k))
         return [_hit()]
 
@@ -310,3 +310,47 @@ async def test_search_tool_searches_only_the_server_given_project(monkeypatch):
     message = await tool.ainvoke(call, config={"configurable": {}})
     assert message.content == document_tools.NOT_IN_PROJECT
     assert len(calls) == 1
+
+
+async def test_search_tool_can_search_one_document(monkeypatch):
+    doc = AttachedDocument(
+        id=str(uuid.uuid4()), filename="설계서.pdf", kind="pdf", page_count=3, char_count=10
+    )
+    project = ProjectContext(id=uuid.uuid4(), name="p", instructions="", documents=[doc])
+    calls = []
+
+    async def fake_search(session, settings, project_id, query, top_k, document_id=None):
+        calls.append(document_id)
+        return []
+
+    monkeypatch.setattr(document_tools, "SessionLocal", _Session)
+    monkeypatch.setattr(document_tools.search, "search", fake_search)
+    tool = document_tools.make_search_project(Settings())
+    config = {"configurable": {"project": project}}
+
+    async def run(**args):
+        call = {"name": "search_project", "args": args, "id": "1", "type": "tool_call"}
+        return await tool.ainvoke(call, config=config)
+
+    message = await run(query="포트", document_id=doc.id)
+    assert calls == [uuid.UUID(doc.id)]
+    # 결과가 없으면 문서 범위를 풀고 다시 찾으라고 알려준다
+    assert "'설계서.pdf'" in message.content
+    assert "leave document_id empty" in message.content
+
+    await run(query="포트")
+    assert calls[-1] is None  # 비워 두면 프로젝트 전체
+
+    # 다른 프로젝트의 문서·잘못된 값은 검색하지 않고 안내한다
+    for bad in (str(uuid.uuid4()), "../etc"):
+        message = await run(query="포트", document_id=bad)
+        assert "no ready document" in message.content
+    assert len(calls) == 2
+
+
+def test_search_scope_limits_to_one_document():
+    project_id, document_id = uuid.uuid4(), uuid.uuid4()
+    assert len(search._scope(project_id, None)) == 2
+    scope = search._scope(project_id, document_id)
+    assert len(scope) == 3
+    assert document_id.hex in str(scope[-1].compile(compile_kwargs={"literal_binds": True}))

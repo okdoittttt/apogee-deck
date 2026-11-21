@@ -12,7 +12,7 @@ The user wrote the instructions below for every conversation in this project. Fo
 {{ instructions }}
 </project_instructions>
 
-The documents below belong to the project and stay available in every conversation of it ("(none)" means there are none yet). When a question may be answered by them, base your answer on their text, and name the document you used (with page numbers when the text marks them). If their full text is included below, answer from it directly. Otherwise, first find the relevant passages with the search_project tool (it matches both meaning and exact words such as names, codes and numbers, and also searches tables and descriptions of images), then read more of a document with the read_document tool when a passage is cut off or more context is needed (long documents are returned in parts). Say so when the documents do not contain what was asked.
+The documents below belong to the project and stay available in every conversation of it ("(none)" means there are none yet). When a question may be answered by them, base your answer on their text, and name the document you used (with page numbers when the text marks them). If their full text is included below, answer from it directly. Otherwise, first find the relevant passages with the search_project tool (it matches both meaning and exact words such as names, codes and numbers, and also searches tables and descriptions of images; pass a document_id only when the user names or clearly points to one document, otherwise search all documents), then read more of a document with the read_document tool when a passage is cut off or more context is needed (long documents are returned in parts). Say so when the documents do not contain what was asked.
 
 <project_documents>
 {{ documents }}

@@ -78,7 +78,12 @@ def fuse(rankings: Sequence[Sequence[uuid.UUID]], k: int) -> list[tuple[uuid.UUI
 
 
 async def search(
-    session: AsyncSession, settings: Settings, project_id: uuid.UUID, query: str, top_k: int
+    session: AsyncSession,
+    settings: Settings,
+    project_id: uuid.UUID,
+    query: str,
+    top_k: int,
+    document_id: uuid.UUID | None = None,
 ) -> list[SearchHit]:
     """프로젝트 문서에서 검색어에 맞는 청크를 하이브리드 검색으로 찾는다.
 
@@ -88,20 +93,22 @@ async def search(
         project_id: 프로젝트 ID. 이 프로젝트의 준비된 문서만 찾는다.
         query: 검색어.
         top_k: 돌려줄 청크 수.
+        document_id: 주면 이 문서 안에서만 찾는다 (프로젝트 조건은 그대로).
 
     Returns:
         합친 순위대로의 청크.
     """
     candidates = max(top_k, settings.project_search_candidates)
     await _fill_search_vectors(session, project_id)
-    keyword_ids = await _keyword_search(session, project_id, query, candidates)
+    scope = _scope(project_id, document_id)
+    keyword_ids = await _keyword_search(session, scope, query, candidates)
     vector_ids: list[uuid.UUID] = []
     try:
         model = embeddings.build_embeddings(settings)
         current = embeddings.model_id(settings)
         await _embed_stale_chunks(session, model, current, project_id)
         vector = await model.aembed_query(query)
-        vector_ids = await _vector_search(session, project_id, vector, current, candidates)
+        vector_ids = await _vector_search(session, scope, vector, current, candidates)
     except embeddings.EmbeddingUnavailableError as exc:
         logger.info("vector search skipped: %s", exc)
     except Exception:
@@ -111,9 +118,17 @@ async def search(
     return await _load_hits(session, fused)
 
 
+def _scope(project_id: uuid.UUID, document_id: uuid.UUID | None) -> list[Any]:
+    """검색 범위 조건: 이 프로젝트의 준비된 문서, ``document_id`` 를 주면 그 문서만."""
+    conditions: list[Any] = [DocumentChunk.project_id == project_id, Document.status == "ready"]
+    if document_id is not None:
+        conditions.append(DocumentChunk.document_id == document_id)
+    return conditions
+
+
 async def _vector_search(
     session: AsyncSession,
-    project_id: uuid.UUID,
+    scope: list[Any],
     vector: list[float],
     model_id: str,
     limit: int,
@@ -126,8 +141,7 @@ async def _vector_search(
         select(DocumentChunk.id, distance.label("distance"))
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(
-            DocumentChunk.project_id == project_id,
-            Document.status == "ready",
+            *scope,
             DocumentChunk.embedding_model == model_id,
             DocumentChunk.embedding.is_not(None),
         )
@@ -139,7 +153,7 @@ async def _vector_search(
 
 
 async def _keyword_search(
-    session: AsyncSession, project_id: uuid.UUID, query: str, limit: int
+    session: AsyncSession, scope: list[Any], query: str, limit: int
 ) -> list[uuid.UUID]:
     """검색어 토큰이 들어 있는 청크 ID (``ts_rank`` 순). 토큰이 많이, 짧은 청크에 들어 있을수록 앞."""
     words = keywords.keyword_query(query)
@@ -152,8 +166,7 @@ async def _keyword_search(
         select(DocumentChunk.id)
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(
-            DocumentChunk.project_id == project_id,
-            Document.status == "ready",
+            *scope,
             DocumentChunk.search_vector.op("@@")(tsquery),
         )
         .order_by(rank.desc(), DocumentChunk.id)
@@ -264,22 +277,25 @@ def _as_chunk(row: DocumentChunk) -> chunking.Chunk:
     )
 
 
-def format_hits(query: str, hits: list[SearchHit]) -> str:
+def format_hits(query: str, hits: list[SearchHit], document: str | None = None) -> str:
     """검색 결과를 모델에게 줄 글로 만든다.
 
     Args:
         query: 검색어.
         hits: 검색 결과.
+        document: 문서 하나로 좁혀 찾았으면 그 문서 이름.
 
     Returns:
         결과마다 번호, 문서 이름·ID, 쪽, 제목 경로, 종류와 본문을 담은 글.
     """
+    where = f"the project document {document!r}" if document else "the project documents"
     if not hits:
+        retry = " or search all documents (leave document_id empty)" if document else ""
         return (
-            f"No passages found in the project documents for {query!r}. "
-            "Try different keywords, or read a document with read_document."
+            f"No passages found in {where} for {query!r}. "
+            f"Try different keywords{retry}, or read a document with read_document."
         )
-    lines = [f"Search results for {query!r} in the project documents (most relevant first):"]
+    lines = [f"Search results for {query!r} in {where} (most relevant first):"]
     for i, hit in enumerate(hits, 1):
         meta = [f"document: {hit.filename} (document_id: {hit.document_id})"]
         if hit.page_start is not None:

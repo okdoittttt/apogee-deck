@@ -1,5 +1,6 @@
 """문서 도구: 첨부·프로젝트 문서 읽기(``read_document``), 프로젝트 문서 검색(``search_project``)."""
 
+import uuid
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -82,7 +83,9 @@ def make_search_project(settings: Settings) -> BaseTool:
     """
 
     @tool(parse_docstring=True, response_format="content_and_artifact")
-    async def search_project(query: str, config: RunnableConfig) -> tuple[str, dict[str, Any]]:
+    async def search_project(
+        query: str, config: RunnableConfig, document_id: str = ""
+    ) -> tuple[str, dict[str, Any]]:
         """Search the documents of this conversation's project for passages relevant to a query.
 
         Use it when the user asks about the project documents and their full text is not
@@ -91,20 +94,41 @@ def make_search_project(settings: Settings) -> BaseTool:
         diagrams). Search again with different wording when
         the results do not answer the question, and use read_document with a result's
         document_id to read the surrounding text when a passage is cut off or you need more
-        context.
+        context. Pass a document_id only when the user names or clearly points to one
+        document (for example "in the design document"); otherwise search all documents,
+        even when you can guess which document is likely, because the answer may be in
+        another document or in several.
 
         Args:
             query: What to look for, written as a short question or the key terms, in the
                 language of the documents.
             config: Run configuration (injected, not visible to the model).
+            document_id: Optional. The document_id of the one project document (from the
+                project document list) that the user named or clearly pointed to. Leave
+                empty to search all project documents.
         """
         project = (config.get("configurable") or {}).get("project")
         if project is None:
             return NOT_IN_PROJECT, {}
+        target = None
+        if document_id.strip():
+            target = next((d for d in project.documents if d.id == document_id.strip()), None)
+            if target is None:
+                return (
+                    f"There is no ready document with document_id {document_id!r} in this "
+                    "project. Use a document_id from the project document list, or leave "
+                    "document_id empty to search all project documents."
+                ), {}
         async with SessionLocal() as session:
             hits = await search.search(
-                session, settings, project.id, query, settings.project_search_top_k
+                session,
+                settings,
+                project.id,
+                query,
+                settings.project_search_top_k,
+                uuid.UUID(target.id) if target else None,
             )
-        return search.format_hits(query, hits), {"sources": search.sources(project.id, hits)}
+        text = search.format_hits(query, hits, target.filename if target else None)
+        return text, {"sources": search.sources(project.id, hits)}
 
     return search_project
