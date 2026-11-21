@@ -254,6 +254,8 @@ export interface StreamHandlers {
   onError?: (message: string, info: { transient: boolean }) => void;
   /** 응답이 중지됨 (이 창이나 다른 창에서 중지 버튼). 그때까지의 응답은 서버가 저장했다. */
   onStopped?: () => void;
+  /** 이벤트 번호 (SSE `id:`). 연결이 끊기면 이 번호 다음부터 다시 받는다. */
+  onEventId?: (id: number) => void;
   /** 같은 대화의 응답이 다른 창에서 생성 중이라 거절됨 (409). 메시지는 저장되지 않았다. */
   onBusy?: (detail: string) => void;
 }
@@ -297,7 +299,31 @@ export async function streamChat(
     });
     return;
   }
+  await readEvents(res, handlers);
+}
 
+/**
+ * 진행 중인(또는 막 끝난) 응답에 다시 붙는다 (새로고침, 다른 창, 끊긴 연결 다시 잇기).
+ * `after` 번 다음 이벤트부터 받는다.
+ *
+ * @returns 붙을 실행이 있었는지. 없으면(끝난 지 오래됨, 서버 재시작) false — 저장된 결과를 다시 읽으면 된다.
+ */
+export async function resumeStream(
+  id: string,
+  after: number,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const res = await apiFetch(`/api/conversations/${id}/stream?after=${after}`, { signal });
+  if (res.status === 204) return false;
+  if (!res.ok || !res.body) throw new Error((await errorDetail(res)) || `응답을 이어 받지 못했습니다 (${res.status})`);
+  await readEvents(res, handlers);
+  return true;
+}
+
+/** SSE 응답 본문을 읽어 이벤트별 핸들러를 호출한다 (본문이 있는 응답만 넘긴다). */
+async function readEvents(res: Response, handlers: StreamHandlers): Promise<void> {
+  if (!res.body) return;
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
 
@@ -313,12 +339,15 @@ export async function streamChat(
 
       let event = "message";
       let data = "";
+      let eventId: number | null = null;
       for (const line of raw.split("\n")) {
         if (line.startsWith("event:")) event = line.slice(6).trim();
         else if (line.startsWith("data:")) data += line.slice(5).trim();
+        else if (line.startsWith("id:")) eventId = Number(line.slice(3).trim());
       }
       if (!data) continue;
       const payload = JSON.parse(data);
+      if (eventId !== null && Number.isInteger(eventId)) handlers.onEventId?.(eventId);
 
       switch (event) {
         case "meta":

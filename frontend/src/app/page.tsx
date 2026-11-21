@@ -17,7 +17,6 @@ import { Sidebar } from "@/components/Sidebar";
 import {
   type QueuedMessage,
   QueuedMessageBubble,
-  RemoteRunningNotice,
 } from "@/components/StatusNotices";
 import { Toast } from "@/components/Toast";
 import {
@@ -41,8 +40,10 @@ import {
   getModels,
   listConversations,
   listProjects,
+  resumeStream,
   stopConversation,
   streamChat,
+  type StreamHandlers,
   uploadDocument,
 } from "@/lib/api";
 import type { User } from "@/lib/auth";
@@ -53,7 +54,9 @@ import { type Route, conversationPath, parseRoute, projectPath, routePath } from
 
 const SIDEBAR_KEY = "sidebar-open";
 const MODEL_KEY = "selected-model";
-const STATUS_POLL_MS = 2000;
+// 연결이 끊긴 응답을 다시 이어 받을 때: 시도 횟수와 첫 대기 시간 (시도마다 두 배)
+const RESUME_RETRIES = 5;
+const RESUME_DELAY_MS = 500;
 // 보낸 메시지를 맨 위로 올릴 때 위쪽 여백, 목록 아래 여백 (메시지 목록의 pt-2, pb-6 과 같다)
 const PIN_GAP_PX = 8;
 const PIN_BOTTOM_PX = 24;
@@ -63,14 +66,22 @@ const IDLE_POLL_MS = 150;
 const IDLE_WAIT_MAX_MS = 10000;
 const QUEUE_FULL_TEXT = "응답 생성 중에는 메시지를 1개까지만 대기열에 넣을 수 있습니다.";
 const QUEUE_PENDING_TEXT = "대기 메시지를 먼저 보내거나 삭제해 주세요.";
-const NAV_BLOCKED_TEXT = "응답과 대기 메시지가 모두 끝난 뒤에 이동할 수 있습니다.";
+const NAV_BLOCKED_TEXT = "대기 메시지가 전송된 뒤에 이동할 수 있습니다.";
 const APP_TITLE = "okdoitttt";
 
 /** 화면을 바꿀 때 주소를 어떻게 남길지: 기록에 쌓기, 지금 기록을 바꾸기, 그대로 두기(주소를 따라 연 경우). */
 type HistoryMode = "push" | "replace" | "none";
-const REMOTE_BUSY_TEXT = "이전 응답이 아직 생성 중입니다. 완료된 후 다시 시도해 주세요.";
+const REMOTE_BUSY_TEXT = "다른 창에서 응답을 만드는 중입니다. 진행 상황을 이어서 보여 드립니다.";
 
-type Outcome = "done" | "error" | "aborted" | "ended" | "busy";
+/**
+ * 응답 스트림이 어떻게 끝났는지.
+ * - ended: 끝 이벤트 없이 연결이 닫힘 (다시 이어 받는다) / gone: 이어 받을 실행이 없음 (저장된 결과를 다시 읽는다)
+ * - detached: 다른 화면으로 옮겨 이 창만 연결을 끊음 (응답은 서버에서 계속 만들어진다)
+ */
+type Outcome = "done" | "error" | "aborted" | "ended" | "busy" | "detached" | "gone";
+
+/** 응답 하나를 받는 동안의 상태: 결과와 마지막으로 받은 이벤트 번호. */
+type ReplyState = { outcome: Outcome; lastId: number };
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -129,8 +140,6 @@ function ChatApp({
   // 같은 창: 응답 생성 중 입력한 메시지 (최대 1개). 오류가 나면 자동 전송을 멈춘다.
   const [queued, setQueuedState] = useState<QueuedMessage | null>(null);
   const [queuePaused, setQueuePaused] = useState(false);
-  // 다른 창에서 이 대화의 응답을 생성 중인지
-  const [remoteRunning, setRemoteRunning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   // 지금 응답을 받고 있는 assistant 메시지 (진행 표시를 이 메시지에만 보인다)
   const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
@@ -154,6 +163,8 @@ function ChatApp({
   const queuedRef = useRef<QueuedMessage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  // 다른 화면으로 옮겨 끊은 연결 (중지가 아니므로 응답 자리를 "중단됨" 으로 바꾸지 않는다)
+  const detachedRef = useRef(new WeakSet<AbortController>());
   // 새 대화의 ID 를 받기 전에 중지를 누르면, ID 를 받자마자 중지한다.
   const stopRequestedRef = useRef(false);
   // 메시지 목록의 스크롤 영역과 그 높이 (보낸 메시지를 맨 위로 올릴 빈 공간을 계산한다)
@@ -279,14 +290,14 @@ function ChatApp({
   const blockedRef = useRef(false);
   useEffect(() => {
     openRouteRef.current = openRoute;
-    blockedRef.current = streaming || queuedRef.current !== null;
+    blockedRef.current = queuedRef.current !== null;
   });
   useEffect(() => {
     pathRef.current = window.location.pathname;
     openRouteRef.current(parseRoute(window.location.pathname));
     const onPop = () => {
       if (blockedRef.current) {
-        // 응답 생성 중에는 다른 화면으로 가지 않는다. 브라우저 뒤로 가기는 막을 수 없어서 주소를 되돌린다.
+        // 대기 메시지가 있으면 다른 화면으로 가지 않는다. 브라우저 뒤로 가기는 막을 수 없어서 주소를 되돌린다.
         window.history.pushState(null, "", pathRef.current);
         setToast(NAV_BLOCKED_TEXT);
         return;
@@ -367,26 +378,6 @@ function ChatApp({
     const offset = turn.getBoundingClientRect().top - scrollBox.getBoundingClientRect().top;
     scrollBox.scrollTo({ top: scrollBox.scrollTop + offset - PIN_GAP_PX, behavior: "smooth" });
   }, [scrollBox, scrollBoxHeight, messages, pinnedId]);
-
-  // 다른 창의 응답이 끝날 때까지 주기적으로 확인하고, 끝나면 대화를 다시 불러온다.
-  useEffect(() => {
-    if (!remoteRunning || !conversationId) return;
-    const id = conversationId;
-    const timer = setInterval(async () => {
-      try {
-        const { running } = await getConversationStatus(id);
-        if (running || conversationIdRef.current !== id) return;
-        const conv = await getConversation(id);
-        if (conversationIdRef.current !== id) return;
-        jumpToBottomRef.current = true;
-        setMessages(conv.messages);
-        setRemoteRunning(conv.running);
-      } catch {
-        setRemoteRunning(false); // 대화가 삭제됨 등
-      }
-    }, STATUS_POLL_MS);
-    return () => clearInterval(timer);
-  }, [remoteRunning, conversationId]);
 
   // 서버가 읽는 중인 문서의 상태를 주기적으로 확인한다.
   const documentsProcessing = documents.some((d) => d.status === "processing");
@@ -479,9 +470,12 @@ function ChatApp({
     setDocuments((prev) => prev.filter((d) => d.localId !== localId));
   }
 
-  /** 응답 생성 중이거나 대기 메시지가 있으면 다른 대화로 이동하지 않는다. */
+  /**
+   * 대기 메시지가 있으면 다른 대화로 이동하지 않는다 (보낼 곳이 사라진다).
+   * 응답 생성 중에는 옮겨도 된다: 응답은 서버에서 끝까지 만들어지고, 돌아오면 이어서 보인다.
+   */
   function navigationBlocked(): boolean {
-    if (streaming || queuedRef.current) {
+    if (queuedRef.current) {
       setToast(NAV_BLOCKED_TEXT);
       return true;
     }
@@ -513,18 +507,20 @@ function ChatApp({
     setError(null);
     try {
       const conv = await getConversation(id);
+      detachStream();
       jumpToBottomRef.current = true;
       setPinnedId(null);
       setCreatingProject(false);
       setProjectId(conv.project_id ?? null);
       setActiveConversation(conv.id);
       setMessages(conv.messages);
-      setRemoteRunning(conv.running);
       setAttachments([]);
       discardDocuments();
       setViewerTarget(null);
       setUrl(conversationPath(conv.id), history);
       if (isMobile) setSidebarOpen(false);
+      // 응답을 만드는 중이면(새로고침, 다른 창·기기) 이어서 보여준다.
+      if (conv.running) void attachRun(conv.id);
     } catch (e) {
       if (history === "none") {
         // 주소로 연 대화가 없다 (지웠거나 다른 사람의 대화): 새 대화 화면으로 바꾼다.
@@ -538,8 +534,8 @@ function ChatApp({
 
   /** 빈 화면으로 간다: 대화를 닫고 입력창을 비운다. */
   function resetToEmpty() {
+    detachStream();
     setActiveConversation(null);
-    setRemoteRunning(false);
     setPinnedId(null);
     setMessages([]);
     setAttachments([]);
@@ -615,18 +611,13 @@ function ChatApp({
 
   /**
    * 입력창의 메시지를 처리한다.
-   * - 다른 창에서 응답 생성 중: 보내지 않고 안내
-   * - 이 창에서 응답 생성 중: 대기열에 넣음 (1개까지, 그 이상은 거절)
+   * - 응답 생성 중 (이 창에서 보냈거나 이어서 보는 중): 대기열에 넣음 (1개까지, 그 이상은 거절)
    * - 그 외: 바로 전송
    */
   function submit() {
     const text = input.trim();
     if (!text && attachments.length === 0 && documents.length === 0) return;
     if (documents.some((d) => d.status !== "ready" || !d.doc)) return; // 입력창이 버튼을 막는다
-    if (remoteRunning) {
-      setToast(REMOTE_BUSY_TEXT);
-      return;
-    }
     if (queuedRef.current) {
       setToast(streaming ? QUEUE_FULL_TEXT : QUEUE_PENDING_TEXT);
       return;
@@ -679,119 +670,57 @@ function ChatApp({
     setPinnedId(userId);
     scrollToPinnedRef.current = true;
 
-    const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) =>
-      setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
-    const appendToAssistant = (chunk: string) =>
-      updateAssistant((m) => ({ ...m, content: m.content + chunk, thinking: false }));
-    // 연속된 추론 조각은 마지막 추론 단계에 이어 붙인다.
-    const appendReasoning = (chunk: string) =>
-      updateAssistant((m) => {
-        const steps = m.steps ?? [];
-        const last = steps.at(-1);
-        const merged: Step[] =
-          last?.type === "reasoning"
-            ? [...steps.slice(0, -1), { ...last, text: last.text + chunk }]
-            : [...steps, { type: "reasoning", text: chunk }];
-        return { ...m, steps: merged, thinking: true };
-      });
-    const updateTool = (id: string, patch: Partial<ToolStep>) =>
-      updateAssistant((m) => ({
-        ...m,
-        steps: (m.steps ?? []).map((st) =>
-          st.type === "tool" && st.id === id ? { ...st, ...patch } : st,
-        ),
-      }));
-
-    const controller = new AbortController();
-    abortRef.current = controller;
     stopRequestedRef.current = false;
     const isNew = conversationIdRef.current === null;
-    // 응답이 어떻게 끝났는지. done 이벤트 없이 스트림이 닫히면(연결 끊김) "ended".
-    // 콜백 안에서 바뀌므로 TS 가 "ended" 로만 좁히지 않게 타입을 명시한다.
-    let outcome = "ended" as Outcome;
-
-    try {
-      await streamChat(
-        {
-          conversation_id: conversationIdRef.current,
-          // 새 대화면 지금 보고 있는 프로젝트 안에 만든다 (이어가는 대화는 원래 프로젝트를 따른다).
-          project_id: conversationIdRef.current === null ? projectIdRef.current : null,
-          message: text,
-          images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
-          document_ids: sendingDocs.map((d) => d.id),
-          model,
+    const outcome = await followReply(
+      assistantId,
+      async (handlers, signal) => {
+        await streamChat(
+          {
+            conversation_id: conversationIdRef.current,
+            // 새 대화면 지금 보고 있는 프로젝트 안에 만든다 (이어가는 대화는 원래 프로젝트를 따른다).
+            project_id: conversationIdRef.current === null ? projectIdRef.current : null,
+            message: text,
+            images: sending.map((a) => ({ mime_type: a.mimeType, data: a.base64 })),
+            document_ids: sendingDocs.map((d) => d.id),
+            model,
+          },
+          handlers,
+          signal,
+        );
+        return true;
+      },
+      (state) => ({
+        onMeta: ({ conversation_id }) => {
+          setActiveConversation(conversation_id);
+          // 빈 화면이 이 대화가 됐다: 뒤로 가기에 빈 화면이 끼지 않게 주소를 바꾼다.
+          setUrl(conversationPath(conversation_id), "replace");
+          if (stopRequestedRef.current) void stopReply();
         },
-        {
-          onMeta: ({ conversation_id }) => {
-            setActiveConversation(conversation_id);
-            // 빈 화면이 이 대화가 됐다: 뒤로 가기에 빈 화면이 끼지 않게 주소를 바꾼다.
-            setUrl(conversationPath(conversation_id), "replace");
-            if (stopRequestedRef.current) void stopReply();
-          },
-          onStopped: () => {
-            outcome = "aborted";
-          },
-          onDelta: appendToAssistant,
-          onReasoning: appendReasoning,
-          onToolStart: (tool) =>
-            updateAssistant((m) => ({
-              ...m,
-              thinking: false,
-              steps: [
-                ...(m.steps ?? []),
-                { type: "tool", ...tool, output: null, status: "running" },
-              ],
-            })),
-          onToolEnd: ({ id, output, status, sources }) =>
-            updateTool(id, { output, status, sources }),
-          onDone: ({ stop_reason }) => {
-            outcome = "done";
-            if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
-            if (stop_reason === "max_tokens") appendToAssistant("\n\n_(응답이 길어 잘렸습니다.)_");
-          },
-          onError: (msg, { transient }) => {
-            outcome = "error";
-            // 서버 혼잡처럼 잠시 후 다시 보내면 되는 오류는 알림으로 짧게 보여준다.
-            if (transient) setToast(msg);
-            else setError(msg);
-          },
-          onBusy: (detail) => {
-            // 다른 창에서 생성 중이라 거절됨: 메시지는 저장되지 않았으니 화면에서 되돌린다.
-            outcome = "busy";
-            setMessages((prev) => prev.filter((m) => m.id !== userId && m.id !== assistantId));
-            setInput((prev) => prev || text);
-            setAttachments((prev) => (prev.length ? prev : sending));
-            setDocuments((prev) =>
-              prev.length
-                ? prev
-                : sendingDocs.map((doc) => ({
-                    localId: crypto.randomUUID(),
-                    filename: doc.filename,
-                    size: doc.size_bytes,
-                    status: "ready",
-                    doc,
-                  })),
-            );
-            setRemoteRunning(true);
-            setToast(detail || REMOTE_BUSY_TEXT);
-          },
+        onBusy: (detail) => {
+          // 다른 창에서 생성 중이라 거절됨: 메시지는 저장되지 않았으니 입력창으로 되돌리고, 그 응답을 이어서 보여준다.
+          state.outcome = "busy";
+          setMessages((prev) => prev.filter((m) => m.id !== userId && m.id !== assistantId));
+          setInput((prev) => prev || text);
+          setAttachments((prev) => (prev.length ? prev : sending));
+          setDocuments((prev) =>
+            prev.length
+              ? prev
+              : sendingDocs.map((doc) => ({
+                  localId: crypto.randomUUID(),
+                  filename: doc.filename,
+                  size: doc.size_bytes,
+                  status: "ready",
+                  doc,
+                })),
+          );
+          setToast(detail || REMOTE_BUSY_TEXT);
+          const id = conversationIdRef.current;
+          if (id) void showRunningReply(id);
         },
-        controller.signal,
-      );
-    } catch (e) {
-      if ((e as Error).name === "AbortError") {
-        outcome = "aborted";
-      } else {
-        outcome = "error";
-        setError(String(e));
-      }
-    } finally {
-      if (outcome !== "busy") finishAssistantMessage(assistantId, outcome);
-      setActiveAssistantId(null);
-      setStreaming(false);
-      abortRef.current = null;
-      if (isNew) refreshConversations();
-    }
+      }),
+    );
+    if (isNew) refreshConversations();
 
     // 대기 메시지 처리: 정상 종료·중지면 바로 이어서 보내고, 오류면 멈추고 버튼을 보여준다.
     if (!queuedRef.current) return;
@@ -810,10 +739,171 @@ function ChatApp({
     void runSend(next);
   }
 
+  /** 이 창의 응답 연결만 끊는다 (다른 화면으로 옮김). 응답은 서버에서 계속 만들어지고, 돌아오면 이어서 보인다. */
+  function detachStream() {
+    const controller = abortRef.current;
+    if (!controller) return;
+    detachedRef.current.add(controller);
+    controller.abort();
+    abortRef.current = null;
+    setActiveAssistantId(null);
+    setStreaming(false);
+  }
+
+  /** 응답 하나를 assistant 메시지에 그리는 핸들러 (답변, 추론, 도구, 끝 이벤트, 이벤트 번호). */
+  function replyHandlers(assistantId: string, state: ReplyState): StreamHandlers {
+    const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) =>
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
+    const appendToAssistant = (chunk: string) =>
+      updateAssistant((m) => ({ ...m, content: m.content + chunk, thinking: false }));
+    return {
+      onEventId: (id) => {
+        state.lastId = id;
+      },
+      onDelta: appendToAssistant,
+      // 연속된 추론 조각은 마지막 추론 단계에 이어 붙인다.
+      onReasoning: (chunk) =>
+        updateAssistant((m) => {
+          const steps = m.steps ?? [];
+          const last = steps.at(-1);
+          const merged: Step[] =
+            last?.type === "reasoning"
+              ? [...steps.slice(0, -1), { ...last, text: last.text + chunk }]
+              : [...steps, { type: "reasoning", text: chunk }];
+          return { ...m, steps: merged, thinking: true };
+        }),
+      onToolStart: (tool) =>
+        updateAssistant((m) => ({
+          ...m,
+          thinking: false,
+          steps: [...(m.steps ?? []), { type: "tool", ...tool, output: null, status: "running" }],
+        })),
+      onToolEnd: ({ id, output, status, sources }) =>
+        updateAssistant((m) => ({
+          ...m,
+          steps: (m.steps ?? []).map((st) =>
+            st.type === "tool" && st.id === id ? { ...st, output, status, sources } : st,
+          ),
+        })),
+      onDone: ({ stop_reason, model }) => {
+        state.outcome = "done";
+        updateAssistant((m) => ({ ...m, model: m.model ?? model }));
+        if (stop_reason === "refusal") appendToAssistant("\n\n_(요청이 거절되었습니다.)_");
+        if (stop_reason === "max_tokens") appendToAssistant("\n\n_(응답이 길어 잘렸습니다.)_");
+      },
+      onError: (msg, { transient }) => {
+        state.outcome = "error";
+        // 서버 혼잡처럼 잠시 후 다시 보내면 되는 오류는 알림으로 짧게 보여준다.
+        if (transient) setToast(msg);
+        else setError(msg);
+      },
+      onStopped: () => {
+        state.outcome = "aborted";
+      },
+    };
+  }
+
   /**
-   * 중지하거나 연결이 끊긴 직후, 서버가 이전 응답을 정리할 때까지 기다린다.
-   * 서버는 연결이 끊긴 것을 알아챈 뒤 부분 응답을 저장하고 생성 중 표시를 해제하는데,
-   * 그 전에 다음 메시지를 보내면 "다른 창의 요청"으로 거절되고 저장 순서도 뒤바뀐다.
+   * 응답 하나를 assistant 메시지(`assistantId`)에 받아 그린다 (보낸 메시지의 응답, 이어서 보는 응답 모두).
+   *
+   * 응답은 서버의 백그라운드 작업이라, 연결이 끊겨 끝 이벤트를 못 받으면 받은 이벤트 번호 다음부터 다시 붙는다.
+   * 이어 받을 실행이 없으면(끝난 지 오래됨, 서버 재시작) 서버가 저장한 결과로 바꾼다.
+   *
+   * @param open 첫 연결. 붙을 실행이 없으면 false.
+   * @param extra 추가 핸들러 (보낸 메시지의 meta, busy 등).
+   */
+  async function followReply(
+    assistantId: string,
+    open: (handlers: StreamHandlers, signal: AbortSignal) => Promise<boolean>,
+    extra: (state: ReplyState) => Partial<StreamHandlers> = () => ({}),
+  ): Promise<Outcome> {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setStreaming(true);
+    setActiveAssistantId(assistantId);
+    const state: ReplyState = { outcome: "ended", lastId: 0 };
+    const handlers: StreamHandlers = { ...replyHandlers(assistantId, state), ...extra(state) };
+
+    const attempt = async (connect: () => Promise<boolean>) => {
+      state.outcome = "ended";
+      try {
+        if (!(await connect())) state.outcome = "gone";
+      } catch (e) {
+        if ((e as Error).name === "AbortError") {
+          state.outcome = detachedRef.current.has(controller) ? "detached" : "aborted";
+        } else if (conversationIdRef.current && state.lastId > 0) {
+          state.outcome = "ended"; // 받던 중 연결이 끊김: 이어 받는다
+        } else {
+          state.outcome = "error";
+          setError(String(e));
+        }
+      }
+    };
+
+    await attempt(() => open(handlers, controller.signal));
+    const id = conversationIdRef.current;
+    for (let n = 0; state.outcome === "ended" && id && n < RESUME_RETRIES; n++) {
+      await new Promise((r) => setTimeout(r, RESUME_DELAY_MS * 2 ** n));
+      if (controller.signal.aborted || conversationIdRef.current !== id) break;
+      await attempt(() => resumeStream(id, state.lastId, handlers, controller.signal));
+    }
+
+    if ((state.outcome === "ended" || state.outcome === "gone") && id && conversationIdRef.current === id) {
+      // 끝을 받지 못했다: 서버가 저장한 결과(끝까지 만든 응답, 또는 중단으로 저장된 응답)로 바꾼다.
+      if (!(await reloadMessages(id))) finishAssistantMessage(assistantId, "ended");
+    } else if (state.outcome !== "busy" && state.outcome !== "detached") {
+      finishAssistantMessage(assistantId, state.outcome);
+    }
+    // 그 사이 다른 응답을 받기 시작했으면(다른 화면으로 옮김) 그쪽 상태를 건드리지 않는다.
+    if (abortRef.current === controller) {
+      abortRef.current = null;
+      setActiveAssistantId(null);
+      setStreaming(false);
+    }
+    return state.outcome;
+  }
+
+  /** 서버에서 만들고 있는 응답을 이어서 보여준다 (대화를 열었을 때, 다른 창에서 생성 중일 때). */
+  async function attachRun(id: string) {
+    const assistantId = crypto.randomUUID();
+    setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
+    jumpToBottomRef.current = true;
+    stopRequestedRef.current = false;
+    await followReply(assistantId, (handlers, signal) => resumeStream(id, 0, handlers, signal));
+  }
+
+  /** 다른 창에서 보낸 메시지까지 다시 읽고, 그 응답을 이어서 보여준다 (보내려다 거절됐을 때). */
+  async function showRunningReply(id: string) {
+    try {
+      const conv = await getConversation(id);
+      if (conversationIdRef.current !== id) return;
+      jumpToBottomRef.current = true;
+      setMessages(conv.messages);
+      if (conv.running) void attachRun(id);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 서버가 저장한 메시지로 화면을 바꾼다. 실패하면 false. */
+  async function reloadMessages(id: string): Promise<boolean> {
+    try {
+      const conv = await getConversation(id);
+      if (conversationIdRef.current === id) {
+        jumpToBottomRef.current = true;
+        setMessages(conv.messages);
+      }
+      return true;
+    } catch {
+      setToast("응답을 다시 불러오지 못했습니다. 새로고침해 주세요.");
+      return false;
+    }
+  }
+
+  /**
+   * 정상 종료가 아닌 직후, 서버가 이전 응답을 정리할 때까지 기다린다 (대기 메시지를 보내기 전).
+   * 중지 API 는 정리가 끝난 뒤 돌려주므로 보통 바로 끝나지만, 이어 받기에 실패했을 때 등을 위해 확인한다.
+   * 정리 전에 보내면 "다른 창의 요청"으로 거절되고 저장 순서도 뒤바뀐다.
    * (정상 종료는 서버가 done 을 보내기 전에 해제하므로 기다릴 필요가 없다.)
    */
   async function waitUntilIdle(id: string | null): Promise<boolean> {
@@ -834,7 +924,7 @@ function ChatApp({
    * 응답 자리를 결과에 맞게 정리한다. 비어 있는 채로 "생각 중" 표시가 남지 않게 하고,
    * 실행 중으로 남은 도구는 중단/오류로 바꾼다 (서버가 저장하는 내용과 같게).
    */
-  function finishAssistantMessage(id: string, outcome: Exclude<Outcome, "busy">) {
+  function finishAssistantMessage(id: string, outcome: Exclude<Outcome, "busy" | "detached">) {
     setMessages((prev) =>
       prev.flatMap((m) => {
         if (m.id !== id) return [m];
@@ -1095,8 +1185,7 @@ function ChatApp({
                         onRemove={() => setQueued(null)}
                       />
                     )}
-                    {remoteRunning && <RemoteRunningNotice />}
-                  </div>
+                    </div>
                 </div>
               </div>
               <div className="mx-auto w-full max-w-3xl px-4 pb-4">
