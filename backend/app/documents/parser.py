@@ -6,13 +6,15 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
 
 형식별 처리:
 
-- PDF: 본문은 쪽별 텍스트 레이어다. 텍스트 레이어는 pypdfium2 로 뽑는다 (``_pdf_text_layers``). xberg 기본
+- PDF: 본문은 쪽별 텍스트 레이어다. 텍스트 레이어는 pypdfium2 로 뽑는다 (``_pdf_pages``). xberg 기본
   추출은 "칸 이름 | 값" 이 나란한 표 같은 배치를 여러 단으로 보고 단별로 읽어서, 회의록의 서로 다른 회의 내용이
   섞일 만큼 줄 순서가 틀어졌다. pdfium 은 PDF 에 그린 순서를 따라서 사람이 읽는 순서와 맞았다.
   그림 속 글자는 쪽 전체가 아니라 **남길 그림만 하나씩 OCR** 해서 본문과 섞지 않는다 (그림이 없으면 OCR 안 함).
   쪽 전체를 OCR 해서 본문과 합치면 차트의 눈금·범례가 본문 문장 사이에 끼어서, 모델이 눈금 값을 데이터로
   읽는 오답이 났다. 그림 속 글자는 프로젝트 문서면 그림 요소에(그림 설명의 참고 자료와 대체 글자), 대화 첨부면
   쪽 끝에 표시를 붙여 넣는다. 글자가 거의 없는 쪽(스캔본)만 쪽 전체 OCR 결과를 본문으로 쓴다.
+  프로젝트 문서의 그림 요소는 쪽 안의 **제자리**에 넣는다: pdfium 이 알려주는 그림 위치로 본문을 그림 앞뒤
+  조각으로 나누고, xberg 그림과는 같은 쪽·같은 픽셀 크기로 짝을 짓는다. 위치를 모르면(스캔 쪽 등) 쪽 끝에 둔다.
   출력은 plain 텍스트다. Markdown 출력은 OCR 결과의 띄어쓰기를 지우고 줄을 제목(``#``)으로 바꿔서 한국어 OCR
   품질이 크게 떨어졌다.
 - DOCX, XLSX, PPTX, HWP, HWPX: 문서 안 그림을 OCR 해서 제자리에 넣는다(``ocr_embedded_images``).
@@ -25,6 +27,7 @@ xberg(Kreuzberg 후속)로 파싱하고, OCR 은 PaddleOCR 한국어 모델을 �
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -162,16 +165,61 @@ def hwpml_to_text(data: bytes) -> str:
 _PDFIUM_JUNK = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
-def _pdf_text_layers(data: bytes) -> dict[int, str] | None:
-    """PDF 의 쪽별 텍스트 레이어를 pdfium 으로 뽑는다 (PDF 에 그린 순서대로).
+@dataclass(frozen=True)
+class PdfPage:
+    """pdfium 으로 읽은 PDF 한 쪽: 그림 자리로 나눈 본문 조각과 그 사이의 그림.
+
+    Attributes:
+        segments: 본문 조각 (그림 수 + 1 개). 그림이 없으면 쪽 본문 하나.
+        images: ``segments[i]`` 뒤에 오는 ``i`` 번째 그림의 픽셀 크기 ``(너비, 높이)``.
+    """
+
+    segments: list[str]
+    images: list[tuple[int, int]]
+
+    @property
+    def text(self) -> str:
+        """쪽 본문 전체."""
+        return "\n".join(s for s in self.segments if s)
+
+
+def _clean_layer(text: str) -> str:
+    """Pdfium 텍스트를 정리한다: 줄바꿈 통일, 제어 문자 제거, 줄 끝 공백 제거."""
+    text = _PDFIUM_JUNK.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+
+def _split_index(boxes: list[tuple[float, float, float, float]], middle: float) -> int:
+    """그림이 들어갈 글자 위치: 읽는 순서에서 처음으로 그림의 세로 가운데보다 아래에 있는 글자.
+
+    Args:
+        boxes: 글자마다 ``(왼쪽, 아래, 오른쪽, 위)`` (PDF 좌표, 위로 갈수록 큼). pdfium 이 만든 줄바꿈 같은
+            글자는 높이가 0 이라 건너뛴다.
+        middle: 그림의 세로 가운데.
+
+    Returns:
+        글자 인덱스. 그림 아래에 글자가 없으면 글자 수 (쪽 끝).
+    """
+    for index, (_, bottom, _, top) in enumerate(boxes):
+        if top > bottom and (bottom + top) / 2 < middle:
+            return index
+    return len(boxes)
+
+
+def _pdf_pages(data: bytes) -> dict[int, PdfPage] | None:
+    """PDF 의 쪽별 텍스트 레이어(PDF 에 그린 순서)와 그림 자리를 pdfium 으로 읽는다.
+
+    그림마다 세로 가운데를 구해서, 읽는 순서상 그보다 아래에 있는 첫 글자에서 본문을 나눈다. 한 단짜리 문서는
+    그림 바로 위 문단과 바로 아래 문단 사이가 된다. 글자 옆에 그림이 있는 배치는 그 글자 사이에 들어간다.
 
     Args:
         data: PDF 바이트.
 
     Returns:
-        쪽 번호(1부터) → 텍스트. PDF 를 열지 못하면 ``None`` (호출하는 쪽이 xberg 결과를 쓴다).
+        쪽 번호(1부터) → 쪽. PDF 를 열지 못하면 ``None`` (호출하는 쪽이 xberg 결과를 쓴다).
     """
     import pypdfium2 as pdfium  # 파싱 프로세스에서만 불러온다
+    import pypdfium2.raw as pdfium_raw
 
     try:
         pdf = pdfium.PdfDocument(data)
@@ -179,20 +227,60 @@ def _pdf_text_layers(data: bytes) -> dict[int, str] | None:
         logger.info("pdfium could not open the PDF, using xberg text: %s", exc)
         return None
     try:
-        layers: dict[int, str] = {}
+        pages: dict[int, PdfPage] = {}
         for index in range(len(pdf)):
             page = pdf[index]
             textpage = page.get_textpage()
             try:
-                text = textpage.get_text_bounded()
+                count = textpage.count_chars()
+                objects = page.get_objects(filter=[pdfium_raw.FPDF_PAGEOBJ_IMAGE], max_depth=3)
+                placed: list[tuple[int, int, int]] = []  # (글자 위치, 너비, 높이)
+                boxes: list[tuple[float, float, float, float]] | None = None
+                for obj in objects:
+                    _, bottom, _, top = obj.get_bounds()
+                    if boxes is None:
+                        boxes = [textpage.get_charbox(i) for i in range(count)]
+                    width, height = obj.get_px_size()
+                    placed.append((_split_index(boxes, (bottom + top) / 2), width, height))
+                placed.sort(key=lambda p: p[0])  # 같은 자리면 PDF 에 그린 순서
+                cuts = [0, *(p[0] for p in placed), count]
+                segments = [
+                    _clean_layer(textpage.get_text_range(start, end - start))
+                    for start, end in itertools.pairwise(cuts)
+                ]
             finally:
                 textpage.close()
                 page.close()
-            text = _PDFIUM_JUNK.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-            layers[index + 1] = "\n".join(line.rstrip() for line in text.split("\n")).strip()
-        return layers
+            pages[index + 1] = PdfPage(segments, [(w, h) for _, w, h in placed])
+        return pages
     finally:
         pdf.close()
+
+
+def _figure_slots(figures: list[Any], pages: dict[int, PdfPage]) -> dict[int, int]:
+    """Xberg 그림마다 쪽 안의 자리(``PdfPage.segments`` 의 몇 번째 조각 뒤인지)를 찾는다.
+
+    같은 쪽에서 픽셀 크기가 같은 pdfium 그림과 짝을 짓는다. 크기가 같은 그림이 여럿이면 문서 순서대로 짝을 짓는다.
+
+    Args:
+        figures: 남길 xberg 그림 (문서 순서).
+        pages: 쪽 번호 → pdfium 으로 읽은 쪽. 자리를 쓰지 않을 쪽(스캔 쪽 등)은 넣지 않는다.
+
+    Returns:
+        그림 객체의 ``id`` → 자리. 짝을 못 찾은 그림은 들어가지 않는다 (쪽 끝에 둔다).
+    """
+    used: set[tuple[int, int]] = set()
+    slots: dict[int, int] = {}
+    for img in figures:
+        page = pages.get(img.page_number)
+        if page is None:
+            continue
+        for slot, size in enumerate(page.images):
+            if (img.page_number, slot) not in used and size == (img.width, img.height):
+                used.add((img.page_number, slot))
+                slots[id(img)] = slot
+                break
+    return slots
 
 
 # --- xberg ---------------------------------------------------------------------------------------
@@ -281,9 +369,11 @@ async def _parse_with_xberg(
     )
     text_pages = {p.page_number: p.content or "" for p in scan.pages or []}
     # 줄 순서는 pdfium 의 텍스트 레이어를 쓴다. 읽지 못하거나 쪽 수가 다르면 xberg 결과를 그대로 쓴다.
-    layers = _pdf_text_layers(data)
-    if layers is not None and layers.keys() == text_pages.keys():
-        text_pages = layers
+    layout = _pdf_pages(data)
+    if layout is not None and layout.keys() == text_pages.keys():
+        text_pages = {n: page.text for n, page in layout.items()}
+    else:
+        layout = {}
     page_count = len(text_pages)
     if page_count > max_pages:
         raise ParseError(f"쪽 수가 너무 많습니다 ({page_count}쪽, 최대 {max_pages}쪽).")
@@ -305,6 +395,7 @@ async def _parse_with_xberg(
                 text_pages[p.page_number]
             ):
                 text_pages[p.page_number] = p.content or ""
+                layout.pop(p.page_number, None)  # OCR 본문에는 그림 자리를 모른다
 
     # 3차: 남길 그림만 하나씩 OCR 한다 (그림 속 글자). 그림이 없으면 OCR 모델을 불러오지 않는다.
     figures = _pdf_figures(scan.images or [])
@@ -325,7 +416,12 @@ async def _parse_with_xberg(
     page_bodies = {n: text_pages[n].strip() for n in sorted(text_pages)}
     if structured:
         content = _pdf_content(page_bodies, {})
-        elements = _pdf_elements(scan, page_bodies, figures, figure_ocr)
+        segments = {
+            n: layout[n].segments if n in layout else [body] for n, body in page_bodies.items()
+        }
+        elements = _pdf_elements(
+            scan, segments, figures, figure_ocr, _figure_slots(figures, layout)
+        )
         return ParsedDocument(content, page_count, elements)
     # 대화 첨부는 그림 설명이 없으므로 그림 속 글자를 쪽 끝에 표시와 함께 남긴다.
     figure_text: dict[int, list[str]] = {}
@@ -397,20 +493,41 @@ def _ocr_text(img: Any) -> str:
 
 
 def _pdf_elements(
-    scan: Any, page_bodies: dict[int, str], figures: list[Any], figure_ocr: dict[int, str]
+    scan: Any,
+    segments: dict[int, list[str]],
+    figures: list[Any],
+    figure_ocr: dict[int, str],
+    slots: dict[int, int] | None = None,
 ) -> list[el.Element]:
-    """PDF 의 쪽별 본문, 표 추출 결과, 그림(그림 속 글자 포함)으로 요소 목록을 만든다."""
+    """PDF 의 쪽별 본문 조각, 표 추출 결과, 그림(그림 속 글자 포함)으로 요소 목록을 만든다.
+
+    Args:
+        scan: xberg 1차 추출 결과 (쪽별 표).
+        segments: 쪽 번호 → 그림 자리로 나눈 본문 조각.
+        figures: 남길 xberg 그림.
+        figure_ocr: 그림 ``id`` → 그림 속 글자.
+        slots: 그림 ``id`` → 쪽 안의 자리 (``_figure_slots``). 없는 그림은 쪽 끝에 둔다.
+
+    Returns:
+        요소 목록 (``elements.from_pdf``).
+    """
+    slots = slots or {}
     tables = [
         el.PdfTable(p.page_number, [[str(c or "") for c in row] for row in t.cells or []])
         for p in sorted(scan.pages or [], key=lambda p: p.page_number)
         for t in p.tables or []
     ]
     images = [
-        (img.page_number, replace(image, ocr_text=figure_ocr.get(id(img), "")), _image_kind(img))
+        (
+            img.page_number,
+            slots.get(id(img)),
+            replace(image, ocr_text=figure_ocr.get(id(img), "")),
+            _image_kind(img),
+        )
         for img in figures
         if (image := _image_data(img)) is not None
     ]
-    return el.from_pdf(page_bodies, tables, images)
+    return el.from_pdf(segments, tables, images)
 
 
 def _soft_masks(images: list[Any]) -> set[int]:

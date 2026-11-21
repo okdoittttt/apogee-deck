@@ -33,23 +33,42 @@ def text_pdf(pages: list[str]) -> bytes:
     return bytes(out)
 
 
-def layout_pdf(items: list[tuple[float, float, str]]) -> bytes:
+def layout_pdf(
+    items: list[tuple[float, float, str]],
+    image: tuple[float, float, float, float, int, int] | None = None,
+) -> bytes:
     """글자를 정한 위치에 놓은 한 쪽짜리 PDF. ``items`` 순서가 곧 PDF 안에 그리는 순서(읽는 순서)다.
 
     Args:
         items: ``(x, y, ASCII 텍스트)`` 목록. 좌표는 PDF 단위(왼쪽 아래가 0, 0).
+        image: ``(x, y, 너비, 높이, 픽셀 너비, 픽셀 높이)`` 회색 그림 하나를 글자 뒤에 그린다.
     """
     ops = " ".join(f"BT /F1 11 Tf 1 0 0 1 {x} {y} Tm ({text}) Tj ET" for x, y, text in items)
+    xobject = b""
+    extra: list[bytes] = []
+    if image is not None:
+        x, y, w, h, pw, ph = image
+        ops += f" q {w} 0 0 {h} {x} {y} cm /Im1 Do Q"
+        pixels = bytes(range(256)) * (pw * ph // 256 + 1)
+        extra.append(
+            b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray "
+            b"/BitsPerComponent 8 /Length %d >>\nstream\n"
+            % (pw, ph, pw * ph)
+            + pixels[: pw * ph]
+            + b"\nendstream"
+        )
+        xobject = b" /XObject << /Im1 6 0 R >>"
     stream = ops.encode()
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-            b"/Resources << /Font << /F1 5 0 R >> >> >>"
+            b"/Resources << /Font << /F1 5 0 R >>" + xobject + b" >> >>"
         ),
         b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        *extra,
     ]
     out = bytearray(b"%PDF-1.4\n")
     offsets = []

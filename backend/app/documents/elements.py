@@ -260,30 +260,41 @@ def merge_continued_tables(tables: list[PdfTable]) -> list[PdfTable]:
 
 
 def from_pdf(
-    pages: dict[int, str],
+    pages: dict[int, list[str]],
     tables: list[PdfTable],
-    images: list[tuple[int, ImageData, str | None]],
+    images: list[tuple[int, int | None, ImageData, str | None]],
 ) -> list[Element]:
-    """PDF 의 쪽별 본문·표·그림으로 요소 목록을 만든다.
+    """PDF 의 쪽별 본문·표·그림으로 요소 목록을 만든다. 그림은 쪽 안의 제자리에 넣는다.
 
     Args:
-        pages: 쪽 번호 → 본문 (OCR 과 합친 것).
+        pages: 쪽 번호 → 그림 자리로 나눈 본문 조각. 자리를 모르면 조각 하나.
         tables: 쪽별 표 (쪽 순서).
-        images: ``(쪽 번호, 원본, xberg 분류)`` 목록.
+        images: ``(쪽 번호, 자리, 원본, xberg 분류)`` 목록. 자리 ``i`` 의 그림은 ``i`` 번째 본문 조각
+            뒤에 온다. 자리를 모르면(``None``, 스캔 쪽 등) 쪽 끝에 둔다.
 
     Returns:
-        쪽마다 본문 → 표 → 그림 순서의 요소 목록. 버린 그림은 들어가지 않는다.
+        쪽마다 본문 조각과 그 사이의 그림, 표, 자리를 모르는 그림 순서의 요소 목록.
+        버린 그림은 들어가지 않는다.
     """
+    placed: dict[int, dict[int | None, list[Element]]] = {}
+    for page, slot, image, image_kind in images:
+        if keep_image(image.width, image.height, image_kind, len(image.data)):
+            if slot is not None and not 0 <= slot < len(pages.get(page) or []):
+                slot = None
+            figure = Element("image", image.ocr_text, page, None, image)
+            placed.setdefault(page, {}).setdefault(slot, []).append(figure)
     by_page: dict[int, list[Element]] = {}
-    for page, body in pages.items():
-        if body.strip():
-            by_page.setdefault(page, []).append(Element("text", body.strip(), page))
+    for page, segments in pages.items():
+        out = by_page.setdefault(page, [])
+        for slot, segment in enumerate(segments):
+            if segment.strip():
+                out.append(Element("text", segment.strip(), page))
+            out.extend(placed.get(page, {}).get(slot, []))
     for table in merge_continued_tables(tables):
         if md := table_markdown(table.rows):
             by_page.setdefault(table.page, []).append(Element("table", md, table.page))
-    for page, image, image_kind in images:
-        if keep_image(image.width, image.height, image_kind, len(image.data)):
-            by_page.setdefault(page, []).append(Element("image", image.ocr_text, page, None, image))
+    for page, slots in placed.items():
+        by_page.setdefault(page, []).extend(slots.get(None, []))
     return [e for page in sorted(by_page) for e in by_page[page]]
 
 

@@ -102,11 +102,35 @@ def test_continued_pdf_table_gets_previous_header():
 
 def test_pdf_elements_are_ordered_by_page():
     out = el.from_pdf(
-        {1: "첫 쪽", 2: "둘째 쪽"},
+        {1: ["첫 쪽"], 2: ["둘째 쪽"]},
         [el.PdfTable(1, [["a"], ["1"]])],
-        [(2, _image(), None), (1, _image(30, 30), None)],
+        [(2, None, _image(), None), (1, None, _image(30, 30), None)],
     )
     assert [(e.page, e.kind) for e in out] == [(1, "text"), (1, "table"), (2, "text"), (2, "image")]
+
+
+def test_pdf_figures_go_between_body_segments():
+    chart, photo, unknown = _image(), _image(400, 300), _image(500, 400)
+    out = el.from_pdf(
+        {1: ["제목과 요약", "그림 아래 본문", "  "], 2: ["스캔 쪽"]},
+        [el.PdfTable(1, [["a"], ["1"]])],
+        [
+            (1, 0, chart, None),
+            (1, 1, photo, None),
+            (1, 7, unknown, None),
+            (2, None, _image(), None),
+        ],
+    )
+    assert [(e.page, e.kind, e.image or e.content) for e in out] == [
+        (1, "text", "제목과 요약"),
+        (1, "image", chart),  # 첫 조각 뒤 (그림 자리)
+        (1, "text", "그림 아래 본문"),
+        (1, "image", photo),
+        (1, "table", "| a |\n| --- |\n| 1 |"),
+        (1, "image", unknown),  # 없는 자리는 쪽 끝
+        (2, "text", "스캔 쪽"),
+        (2, "image", out[-1].image),  # 자리를 모르면 쪽 끝
+    ]
 
 
 def test_limit_images_keeps_first_ones():
