@@ -282,6 +282,10 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 - 도구의 표시 문구는 `app/agents/<에이전트>/tools.py`의 `TOOL_LABELS`에 둡니다.
   예: `get_current_time` → 실행 중 "시간을 확인하는 중", 완료 "시간 확인함". 없으면 기본 문구를 씁니다.
 - 응답이 중단되거나 오류로 끝나면, 실행 중이던 도구는 "중단됨" / "실패"로 저장됩니다.
+- 끊긴 답은 **모델 기억(checkpoint)에도** 남깁니다. LangGraph 는 노드가 끝나야 checkpoint 를 써서, 그대로 두면 다음 턴에 모델이
+  자기가 한 말을 모릅니다. 실행 엔진(`runtime.stream_reply`)이 아직 저장되지 않은 답(진행 중이던 모델 호출의 글자)만 모아 두었다가,
+  중지·시간 초과·앱 종료·오류로 끊기면 `[This reply was cut off before it was finished.]` 를 붙여 `aupdate_state` 로 넣습니다.
+  도구를 부른 앞 단계처럼 이미 저장된 답은 다시 넣지 않고, 추론 과정은 넣지 않습니다.
 
 ## 화면 주소 (URL 라우팅)
 

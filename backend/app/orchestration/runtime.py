@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -35,6 +36,12 @@ from app.orchestration.tooling import RECURSION_LIMIT
 from app.tools import ToolLabel, default_label
 
 logger = logging.getLogger(__name__)
+
+INTERRUPTED_NOTE = "\n\n[This reply was cut off before it was finished.]"
+"""끊긴 응답을 모델 기억(checkpoint)에 넣을 때 붙이는 표시 (모델이 읽으므로 영어).
+
+다음 턴에 모델이 앞 답이 중간에 끊겼다는 것을 알게 한다 ("이어서 해 줘" 면 끊긴 곳부터 잇는다).
+"""
 
 __all__ = ["AgentEvent", "AgentSpec", "Finished", "TextDelta", "register", "stream_reply"]
 
@@ -301,34 +308,84 @@ async def stream_reply(
 
     shown: list[str] = []  # 화면에 보여준 답변 텍스트 → UI 용 messages 테이블에 그대로 저장
     current_msg_id: str | None = None
+    # 아직 checkpoint 에 들어가지 않은 답변 글자 (진행 중인 모델 호출). 그 노드가 끝나면 비운다.
+    pending: list[str] = []
+    pending_node: str | None = None
 
-    async for mode, payload in graph.astream(
-        {"messages": [build_user_message(user_text, images or [])]},
-        config,
-        stream_mode=["messages", "updates"],
-    ):
-        if mode == "messages":
-            chunk, meta = payload
-            if meta.get("langgraph_node") not in spec.stream_nodes:
-                continue
-            if not isinstance(chunk, AIMessageChunk):
-                continue
-            if reasoning := reasoning_text(chunk):
-                yield ReasoningDelta(reasoning)
-            if text := chunk.text:
-                if current_msg_id is not None and chunk.id != current_msg_id and shown:
-                    text = "\n\n" + text
-                current_msg_id = chunk.id
-                shown.append(text)
-                yield TextDelta(text)
-        elif mode == "updates":
-            for event in _tool_events(payload, spec.tool_labels):
-                yield event
+    try:
+        async for mode, payload in graph.astream(
+            {"messages": [build_user_message(user_text, images or [])]},
+            config,
+            stream_mode=["messages", "updates"],
+        ):
+            if mode == "messages":
+                chunk, meta = payload
+                node = meta.get("langgraph_node")
+                if node not in spec.stream_nodes:
+                    continue
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if reasoning := reasoning_text(chunk):
+                    yield ReasoningDelta(reasoning)
+                if text := chunk.text:
+                    pending.append(text)
+                    pending_node = node
+                    if current_msg_id is not None and chunk.id != current_msg_id and shown:
+                        text = "\n\n" + text
+                    current_msg_id = chunk.id
+                    shown.append(text)
+                    yield TextDelta(text)
+            elif mode == "updates":
+                if _answered(payload, spec.stream_nodes):
+                    pending.clear()  # 그 답은 checkpoint 에 들어갔다
+                for event in _tool_events(payload, spec.tool_labels):
+                    yield event
+    except BaseException:
+        # 중지·시간 초과·앱 종료(취소), 화면이 구독을 끊음(GeneratorExit), 오류: 진행 중이던 답을 기억에 넣는다.
+        # 노드가 끝나야 checkpoint 를 쓰므로, 넣지 않으면 모델은 다음 턴에 자기가 한 말을 모른다.
+        with anyio.CancelScope(shield=True):
+            await _remember_interrupted(graph, conversation_id, "".join(pending), pending_node)
+        raise
 
     state = await graph.aget_state(config)
     last = state.values["messages"][-1]
     stop = _stop_reason(last) if isinstance(last, AIMessage) else None
     yield Finished(text="".join(shown), stop_reason=stop, model=used_model)
+
+
+def _answered(update: Mapping[str, Any], nodes: frozenset[str]) -> bool:
+    """답변 노드가 끝나 그 답(AIMessage)이 상태에 들어갔는지."""
+    return any(
+        name in nodes
+        and isinstance(node_update, Mapping)
+        and any(isinstance(m, AIMessage) for m in node_update.get("messages") or [])
+        for name, node_update in update.items()
+    )
+
+
+async def _remember_interrupted(
+    graph: CompiledStateGraph, conversation_id: str, text: str, node: str | None
+) -> None:
+    """끊긴 답을 중단 표시와 함께 checkpoint 에 넣는다. 실패해도 기록만 남긴다 (원래 오류를 가리지 않게).
+
+    그 답을 낸 노드(``as_node``)가 도구 호출 없이 답한 것으로 넣으므로, 다음 턴은 평소처럼 시작된다.
+
+    Args:
+        graph: 실행한 그래프.
+        conversation_id: 대화 ID (checkpointer ``thread_id``).
+        text: 끊기기 전까지의 답 (진행 중이던 모델 호출의 글자). 비었으면 아무것도 하지 않는다.
+        node: 그 답을 내던 노드.
+    """
+    if not text.strip() or node is None:
+        return
+    try:
+        await graph.aupdate_state(
+            {"configurable": {"thread_id": conversation_id}},
+            {"messages": [AIMessage(text + INTERRUPTED_NOTE)]},
+            as_node=node,
+        )
+    except Exception:
+        logger.exception("failed to save the interrupted reply of %s to memory", conversation_id)
 
 
 def _tool_events(
