@@ -77,13 +77,22 @@ function setMark(range: Range | null) {
   else registry.delete(MARK_NAME);
 }
 
-function Block({ block, highlighted }: { block: DocumentBlock; highlighted: boolean }) {
+/** 강조 블록이 이어진 묶음 안에서의 위치. 이어진 강조 블록은 상자 하나처럼 그린다. */
+type Run = "none" | "single" | "first" | "middle" | "last";
+
+const RUN_CLASS: Record<Run, string> = {
+  none: "rounded-lg",
+  single: "rounded-lg bg-amber-300/25 border-l-2 border-amber-500/70 dark:bg-amber-300/10",
+  first: "rounded-t-lg bg-amber-300/25 border-l-2 border-amber-500/70 dark:bg-amber-300/10",
+  middle: "bg-amber-300/25 border-l-2 border-amber-500/70 dark:bg-amber-300/10",
+  last: "rounded-b-lg bg-amber-300/25 border-l-2 border-amber-500/70 dark:bg-amber-300/10",
+};
+
+function Block({ block, run }: { block: DocumentBlock; run: Run }) {
   return (
     <div
       data-block-id={block.id}
-      className={`-mx-2 rounded-lg px-2 py-1 transition-colors ${
-        highlighted ? "bg-amber-300/25 ring-1 ring-amber-500/40 dark:bg-amber-300/10" : ""
-      }`}
+      className={`-mx-2 px-2 py-1 transition-colors ${RUN_CLASS[run]}`}
     >
       {block.kind === "image" ? (
         <figure className="my-1">
@@ -238,11 +247,26 @@ export function DocumentViewer({ target, onClose }: { target: OpenedTarget; onCl
                 근거가 이 화면에 따로 보이지 않는 표에 있습니다. p.{highlight.page} 로 이동했습니다.
               </p>
             )}
-            {current.blocks.map((block) => {
+            {current.blocks.map((block, i) => {
               const newPage = block.page !== null && block.page !== lastPage;
               const newHeading = block.heading !== null && block.heading !== lastHeading;
               if (block.page !== null) lastPage = block.page;
               lastHeading = block.heading;
+              return { block, newPage, newHeading, lit: highlighted.has(block.id), i };
+            }).map(({ block, newPage, newHeading, lit, i }, _, rows) => {
+              // 쪽 구분선이나 제목 표시가 끼면 다른 상자로 그린다.
+              const joinsPrev = lit && i > 0 && rows[i - 1].lit && !newPage && !newHeading;
+              const next = rows[i + 1];
+              const joinsNext = lit && !!next && next.lit && !next.newPage && !next.newHeading;
+              const run: Run = !lit
+                ? "none"
+                : joinsPrev && joinsNext
+                  ? "middle"
+                  : joinsPrev
+                    ? "last"
+                    : joinsNext
+                      ? "first"
+                      : "single";
               return (
                 <div key={block.id}>
                   {newPage && (
@@ -259,7 +283,7 @@ export function DocumentViewer({ target, onClose }: { target: OpenedTarget; onCl
                       {block.heading?.replaceAll("**", "")}
                     </p>
                   )}
-                  <Block block={block} highlighted={highlighted.has(block.id)} />
+                  <Block block={block} run={run} />
                 </div>
               );
             })}
