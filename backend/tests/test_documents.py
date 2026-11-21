@@ -14,6 +14,7 @@ from starlette.datastructures import Headers, UploadFile
 
 from app.api.routers import documents as documents_router
 from app.core.config import Settings
+from app.documents import elements as el
 from app.documents import formats, service
 from app.documents import parser as parser_module
 from app.documents.formats import DocumentKind, UnsupportedDocumentError, detect, safe_filename
@@ -191,47 +192,6 @@ def test_pdf_side_by_side_layout_keeps_reading_order():
     assert "Date Nov 3 10AM Room A" in " ".join(content.split())
 
 
-def test_pdf_pages_fall_back_when_pdfium_cannot_open():
-    assert parser_module._pdf_pages(b"%PDF-1.4 garbage") is None
-    pages = parser_module._pdf_pages(text_pdf(["Hello page one", "Second page"]))
-    assert {n: (p.text, p.images) for n, p in pages.items()} == {
-        1: ("Hello page one", []),
-        2: ("Second page", []),
-    }
-
-
-def test_pdf_pages_split_body_where_the_figure_is():
-    pdf = layout_pdf(
-        [(72, 720, "Title"), (72, 700, "Intro above the chart"), (72, 300, "Text below the chart")],
-        image=(72, 400, 300, 200, 64, 32),  # 세로 400~600: 소개 문장과 아래 문장 사이
-    )
-    [page] = parser_module._pdf_pages(pdf).values()
-    assert page.segments == ["Title\nIntro above the chart", "Text below the chart"]
-    assert page.images == [(64, 32)]
-
-
-def test_figures_are_matched_to_slots_by_page_and_size():
-    pages = {
-        1: parser_module.PdfPage(["a", "b", "c"], [(800, 400), (300, 300)]),
-        2: parser_module.PdfPage(["d", "e"], [(800, 400)]),
-    }
-    small, big, same_size_2, unknown, scanned = (
-        _figure(1, 300, 300),
-        _figure(1, 800, 400),
-        _figure(2, 800, 400),
-        _figure(1, 640, 480),
-        _figure(3, 800, 400),
-    )
-    slots = parser_module._figure_slots([small, big, same_size_2, unknown, scanned], pages)
-    assert slots == {id(small): 1, id(big): 0, id(same_size_2): 0}
-
-
-def test_split_index_is_first_character_below_the_figure_middle():
-    boxes = [(0, 700, 5, 710), (0, 0, 0, 0), (0, 300, 5, 310), (0, 290, 5, 300)]
-    assert parser_module._split_index(boxes, 500) == 2  # 높이 0 인 줄바꿈 글자는 건너뛴다
-    assert parser_module._split_index(boxes, 100) == 4  # 그림 아래 글자가 없으면 쪽 끝
-
-
 def test_soft_mask_companions_are_dropped():
     def img(page, w, h, colorspace):
         return SimpleNamespace(page_number=page, width=w, height=h, colorspace=colorspace)
@@ -274,7 +234,7 @@ def test_pdf_elements_attach_figure_ocr_to_images():
     chart = _figure()
     scan = SimpleNamespace(pages=[SimpleNamespace(page_number=1, tables=[])])
     elements = parser_module._pdf_elements(
-        scan, {1: ["본문 문장"]}, [chart], {id(chart): "그림 1. 만족도\n4.6\n-6"}
+        scan, {1: [el.PdfBlock("본문 문장")]}, [chart], {id(chart): "그림 1. 만족도\n4.6\n-6"}
     )
     assert [(e.kind, e.content) for e in elements] == [
         ("text", "본문 문장"),

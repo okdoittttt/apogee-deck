@@ -34,16 +34,19 @@ def text_pdf(pages: list[str]) -> bytes:
 
 
 def layout_pdf(
-    items: list[tuple[float, float, str]],
+    items: list[tuple[float, float, str]] | list[tuple[float, float, str, float]],
     image: tuple[float, float, float, float, int, int] | None = None,
 ) -> bytes:
     """글자를 정한 위치에 놓은 한 쪽짜리 PDF. ``items`` 순서가 곧 PDF 안에 그리는 순서(읽는 순서)다.
 
     Args:
-        items: ``(x, y, ASCII 텍스트)`` 목록. 좌표는 PDF 단위(왼쪽 아래가 0, 0).
+        items: ``(x, y, ASCII 텍스트[, 글자 크기])`` 목록. 좌표는 PDF 단위(왼쪽 아래가 0, 0). 크기 기본 11.
         image: ``(x, y, 너비, 높이, 픽셀 너비, 픽셀 높이)`` 회색 그림 하나를 글자 뒤에 그린다.
     """
-    ops = " ".join(f"BT /F1 11 Tf 1 0 0 1 {x} {y} Tm ({text}) Tj ET" for x, y, text in items)
+    ops = " ".join(
+        f"BT /F1 {item[3] if len(item) > 3 else 11} Tf 1 0 0 1 {item[0]} {item[1]} Tm ({item[2]}) Tj ET"
+        for item in items
+    )
     xobject = b""
     extra: list[bytes] = []
     if image is not None:

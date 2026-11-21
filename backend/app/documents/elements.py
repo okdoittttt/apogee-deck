@@ -216,6 +216,19 @@ def _add_speaker_notes(elements: list[Element], notes: dict[int, str]) -> list[E
     return elements
 
 
+@dataclass(frozen=True)
+class PdfBlock:
+    """PDF 본문의 문단 하나.
+
+    Attributes:
+        text: 문단 글자.
+        heading: 제목 경로 (``"1. 요약"``, 여러 단계면 ``" > "`` 로 잇는다). 없으면 ``None``.
+    """
+
+    text: str
+    heading: str | None = None
+
+
 @dataclass
 class PdfTable:
     """PDF 한 쪽에서 뽑은 표.
@@ -260,36 +273,38 @@ def merge_continued_tables(tables: list[PdfTable]) -> list[PdfTable]:
 
 
 def from_pdf(
-    pages: dict[int, list[str]],
+    pages: dict[int, list[PdfBlock]],
     tables: list[PdfTable],
-    images: list[tuple[int, int | None, ImageData, str | None]],
+    images: list[tuple[int, int | None, str | None, ImageData, str | None]],
 ) -> list[Element]:
-    """PDF 의 쪽별 본문·표·그림으로 요소 목록을 만든다. 그림은 쪽 안의 제자리에 넣는다.
+    """PDF 의 쪽별 문단·표·그림으로 요소 목록을 만든다. 그림은 쪽 안의 제자리에 넣는다.
 
     Args:
-        pages: 쪽 번호 → 그림 자리로 나눈 본문 조각. 자리를 모르면 조각 하나.
+        pages: 쪽 번호 → 문단 (제목 경로 포함). 문단을 모르면(스캔 쪽 등) 쪽 본문 하나.
         tables: 쪽별 표 (쪽 순서).
-        images: ``(쪽 번호, 자리, 원본, xberg 분류)`` 목록. 자리 ``i`` 의 그림은 ``i`` 번째 본문 조각
-            뒤에 온다. 자리를 모르면(``None``, 스캔 쪽 등) 쪽 끝에 둔다.
+        images: ``(쪽 번호, 자리, 제목 경로, 원본, xberg 분류)`` 목록. 자리 ``k`` 의 그림은 ``k`` 번째 문단
+            앞에 온다 (``k`` 가 문단 수면 마지막 문단 뒤). 자리를 모르면(``None``) 쪽 끝에 둔다.
 
     Returns:
-        쪽마다 본문 조각과 그 사이의 그림, 표, 자리를 모르는 그림 순서의 요소 목록.
+        쪽마다 문단과 그 사이의 그림, 표, 자리를 모르는 그림 순서의 요소 목록.
         버린 그림은 들어가지 않는다.
     """
     placed: dict[int, dict[int | None, list[Element]]] = {}
-    for page, slot, image, image_kind in images:
+    for page, slot, heading, image, image_kind in images:
         if keep_image(image.width, image.height, image_kind, len(image.data)):
-            if slot is not None and not 0 <= slot < len(pages.get(page) or []):
+            if slot is not None and not 0 <= slot <= len(pages.get(page) or []):
                 slot = None
-            figure = Element("image", image.ocr_text, page, None, image)
+            figure = Element("image", image.ocr_text, page, heading, image)
             placed.setdefault(page, {}).setdefault(slot, []).append(figure)
     by_page: dict[int, list[Element]] = {}
-    for page, segments in pages.items():
+    for page, blocks in pages.items():
         out = by_page.setdefault(page, [])
-        for slot, segment in enumerate(segments):
-            if segment.strip():
-                out.append(Element("text", segment.strip(), page))
-            out.extend(placed.get(page, {}).get(slot, []))
+        slots = placed.get(page, {})
+        for slot, block in enumerate(blocks):
+            out.extend(slots.get(slot, []))
+            if block.text.strip():
+                out.append(Element("text", block.text.strip(), page, block.heading))
+        out.extend(slots.get(len(blocks), []))
     for table in merge_continued_tables(tables):
         if md := table_markdown(table.rows):
             by_page.setdefault(table.page, []).append(Element("table", md, table.page))
