@@ -1,5 +1,6 @@
 "use client";
 
+import { conversationPath, isPlainClick, projectPath } from "@/lib/routes";
 import { forwardRef, useMemo, useState } from "react";
 import type { AppInfo, Conversation, Project } from "@/lib/api";
 import type { User } from "@/lib/auth";
@@ -128,9 +129,14 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
         ) : (
           <div className="mb-3">
             {projects.map((p) => (
-              <button
+              <a
                 key={p.id}
-                onClick={() => onOpenProject(p.id)}
+                href={projectPath(p.id)}
+                onClick={(e) => {
+                  if (!isPlainClick(e)) return; // ⌘/Ctrl+클릭은 새 탭
+                  e.preventDefault();
+                  onOpenProject(p.id);
+                }}
                 className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-[7px] text-left text-sm ${
                   p.id === activeProjectId ? "bg-active text-fg" : "text-fg/85 hover:bg-hover"
                 }`}
@@ -138,7 +144,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
               >
                 <FolderIcon className="h-4 w-4 shrink-0 text-muted" />
                 <span className="truncate">{p.name}</span>
-              </button>
+              </a>
             ))}
           </div>
         )}
@@ -157,8 +163,13 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
               c.id === activeId ? "bg-active text-fg" : "text-fg/85 hover:bg-hover"
             }`}
           >
-            <button
-              onClick={() => onOpen(c.id)}
+            <a
+              href={conversationPath(c.id)}
+              onClick={(e) => {
+                if (!isPlainClick(e)) return; // ⌘/Ctrl+클릭은 새 탭
+                e.preventDefault();
+                onOpen(c.id);
+              }}
               className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-[7px] text-left"
               title={
                 c.project_id
@@ -168,7 +179,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
             >
               {c.project_id && <FolderIcon className="h-3.5 w-3.5 shrink-0 text-subtle" />}
               <span className="truncate">{c.title}</span>
-            </button>
+            </a>
             <button
               onClick={() => onDelete(c.id)}
               className="mr-1 rounded-md p-1 text-subtle opacity-0 hover:bg-hover hover:text-red-500 focus:opacity-100 group-hover:opacity-100"

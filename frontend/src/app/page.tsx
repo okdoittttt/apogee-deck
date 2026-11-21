@@ -48,6 +48,7 @@ import type { User } from "@/lib/auth";
 import { type PendingDocument, extensionOf, formatBytes, isImageFile } from "@/lib/documents";
 import { type Attachment, MAX_IMAGES, fileToAttachment } from "@/lib/images";
 import { isMacPlatform, shortcutLabel } from "@/lib/platform";
+import { type Route, conversationPath, parseRoute, projectPath, routePath } from "@/lib/routes";
 
 const SIDEBAR_KEY = "sidebar-open";
 const MODEL_KEY = "selected-model";
@@ -62,6 +63,10 @@ const IDLE_WAIT_MAX_MS = 10000;
 const QUEUE_FULL_TEXT = "응답 생성 중에는 메시지를 1개까지만 대기열에 넣을 수 있습니다.";
 const QUEUE_PENDING_TEXT = "대기 메시지를 먼저 보내거나 삭제해 주세요.";
 const NAV_BLOCKED_TEXT = "응답과 대기 메시지가 모두 끝난 뒤에 이동할 수 있습니다.";
+const APP_TITLE = "okdoitttt";
+
+/** 화면을 바꿀 때 주소를 어떻게 남길지: 기록에 쌓기, 지금 기록을 바꾸기, 그대로 두기(주소를 따라 연 경우). */
+type HistoryMode = "push" | "replace" | "none";
 const REMOTE_BUSY_TEXT = "이전 응답이 아직 생성 중입니다. 완료된 후 다시 시도해 주세요.";
 
 type Outcome = "done" | "error" | "aborted" | "ended" | "busy";
@@ -159,6 +164,17 @@ function ChatApp({
     setConversationId(id);
   }
 
+  // 지금 화면의 주소. 뒤로 가기를 막아야 할 때(응답 생성 중) 이 주소로 되돌린다.
+  const pathRef = useRef("/");
+
+  /** 주소를 화면에 맞춘다 (lib/routes.ts). 같은 주소면 기록을 남기지 않는다. */
+  function setUrl(path: string, mode: HistoryMode) {
+    pathRef.current = path;
+    if (mode === "none" || window.location.pathname === path) return;
+    if (mode === "push") window.history.pushState(null, "", path);
+    else window.history.replaceState(null, "", path);
+  }
+
   function setProjectId(id: string | null) {
     projectIdRef.current = id;
     setProjectIdState(id);
@@ -254,6 +270,41 @@ function ChatApp({
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
   }, [refreshConversations, refreshProjects, refreshModels]);
+
+  // 주소대로 화면을 연다: 처음 열 때 한 번, 뒤로·앞으로 가기마다.
+  const openRouteRef = useRef<(route: Route) => void>(() => {});
+  const blockedRef = useRef(false);
+  useEffect(() => {
+    openRouteRef.current = openRoute;
+    blockedRef.current = streaming || queuedRef.current !== null;
+  });
+  useEffect(() => {
+    pathRef.current = window.location.pathname;
+    openRouteRef.current(parseRoute(window.location.pathname));
+    const onPop = () => {
+      if (blockedRef.current) {
+        // 응답 생성 중에는 다른 화면으로 가지 않는다. 브라우저 뒤로 가기는 막을 수 없어서 주소를 되돌린다.
+        window.history.pushState(null, "", pathRef.current);
+        setToast(NAV_BLOCKED_TEXT);
+        return;
+      }
+      openRouteRef.current(parseRoute(window.location.pathname));
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // 탭 제목: 대화 제목이나 프로젝트 이름 (탭과 방문 기록에서 구분하기 쉽게)
+  useEffect(() => {
+    const title = conversationId
+      ? conversations.find((c) => c.id === conversationId)?.title
+      : projectId
+        ? projects.find((p) => p.id === projectId)?.name
+        : creatingProject
+          ? "새 프로젝트"
+          : null;
+    document.title = title ? `${title} - ${APP_TITLE}` : APP_TITLE;
+  }, [conversationId, conversations, projectId, projects, creatingProject]);
 
   // ⌘K / Ctrl+K: 대화 검색
   useEffect(() => {
@@ -434,8 +485,8 @@ function ChatApp({
     return false;
   }
 
-  async function openConversation(id: string) {
-    if (navigationBlocked()) return;
+  async function openConversation(id: string, history: HistoryMode = "push") {
+    if (history !== "none" && navigationBlocked()) return;
     setError(null);
     try {
       const conv = await getConversation(id);
@@ -448,9 +499,17 @@ function ChatApp({
       setRemoteRunning(conv.running);
       setAttachments([]);
       discardDocuments();
+      setViewerTarget(null);
+      setUrl(conversationPath(conv.id), history);
       if (isMobile) setSidebarOpen(false);
     } catch (e) {
-      setError(String(e));
+      if (history === "none") {
+        // 주소로 연 대화가 없다 (지웠거나 다른 사람의 대화): 새 대화 화면으로 바꾼다.
+        setToast("대화를 찾을 수 없습니다.");
+        newConversation("replace");
+      } else {
+        setError(String(e));
+      }
     }
   }
 
@@ -464,30 +523,34 @@ function ChatApp({
     discardDocuments();
     setInput("");
     setError(null);
+    setViewerTarget(null);
     if (isMobile) setSidebarOpen(false);
   }
 
-  function newConversation() {
-    if (navigationBlocked()) return;
+  function newConversation(history: HistoryMode = "push") {
+    if (history !== "none" && navigationBlocked()) return;
     resetToEmpty();
     setProjectId(null);
     setCreatingProject(false);
     setHello(greeting());
+    setUrl("/", history);
   }
 
   /** 프로젝트 화면을 연다. 여기서 보내는 메시지는 이 프로젝트 안의 새 대화가 된다. */
-  function openProject(id: string) {
-    if (navigationBlocked()) return;
+  function openProject(id: string, history: HistoryMode = "push") {
+    if (history !== "none" && navigationBlocked()) return;
     resetToEmpty();
     setCreatingProject(false);
     setProjectId(id);
+    setUrl(projectPath(id), history);
   }
 
-  function startNewProject() {
-    if (navigationBlocked()) return;
+  function startNewProject(history: HistoryMode = "push") {
+    if (history !== "none" && navigationBlocked()) return;
     resetToEmpty();
     setProjectId(null);
     setCreatingProject(true);
+    setUrl(routePath({ kind: "newProject" }), history);
   }
 
   function onProjectDeleted() {
@@ -496,6 +559,15 @@ function ChatApp({
     resetToEmpty();
     setProjectId(null);
     setHello(greeting());
+    setUrl("/", "replace");
+  }
+
+  /** 주소대로 화면을 연다 (처음 열 때, 뒤로·앞으로 가기). 주소는 다시 쌓지 않는다. */
+  function openRoute(route: Route) {
+    if (route.kind === "conversation") void openConversation(route.id, "none");
+    else if (route.kind === "project") openProject(route.id, "none");
+    else if (route.kind === "newProject") startNewProject("none");
+    else newConversation("none");
   }
 
   async function removeConversation(id: string) {
@@ -510,10 +582,10 @@ function ChatApp({
       return;
     }
     if (id === conversationIdRef.current) {
-      // 프로젝트 안의 대화였으면 그 프로젝트 화면으로 돌아간다.
+      // 프로젝트 안의 대화였으면 그 프로젝트 화면으로 돌아간다. 지운 대화의 주소는 기록에서 바꾼다.
       const project = projectIdRef.current;
-      if (project) openProject(project);
-      else newConversation();
+      if (project) openProject(project, "replace");
+      else newConversation("replace");
     }
     refreshConversations();
   }
@@ -626,7 +698,11 @@ function ChatApp({
           model,
         },
         {
-          onMeta: ({ conversation_id }) => setActiveConversation(conversation_id),
+          onMeta: ({ conversation_id }) => {
+            setActiveConversation(conversation_id);
+            // 빈 화면이 이 대화가 됐다: 뒤로 가기에 빈 화면이 끼지 않게 주소를 바꾼다.
+            setUrl(conversationPath(conversation_id), "replace");
+          },
           onDelta: appendToAssistant,
           onReasoning: appendReasoning,
           onToolStart: (tool) =>
@@ -835,12 +911,12 @@ function ChatApp({
             activeId={conversationId}
             projects={projects}
             activeProjectId={projectHome ? projectId : null}
-            onNewProject={startNewProject}
-            onOpenProject={openProject}
+            onNewProject={() => startNewProject()}
+            onOpenProject={(id) => openProject(id)}
             info={info}
             modelLabel={models.find((m) => m.id === selectedModel)?.label}
-            onNew={newConversation}
-            onOpen={openConversation}
+            onNew={() => newConversation()}
+            onOpen={(id) => void openConversation(id)}
             onDelete={removeConversation}
             onClose={() => toggleSidebar(false)}
             user={user}
@@ -880,7 +956,7 @@ function ChatApp({
                   <SidebarIcon />
                 </button>
                 <button
-                  onClick={newConversation}
+                  onClick={() => newConversation()}
                   className="rounded-lg p-1.5 text-muted hover:bg-hover hover:text-fg"
                   aria-label="새 대화"
                   title={`새 대화 (${shortcutLabel("N")})`}
@@ -918,9 +994,9 @@ function ChatApp({
             <NewProjectForm
               onCreated={(project) => {
                 refreshProjects();
-                openProject(project.id);
+                openProject(project.id, "replace"); // /p/new 를 만든 프로젝트 주소로 바꾼다
               }}
-              onCancel={newConversation}
+              onCancel={() => newConversation()}
             />
           ) : projectHome ? (
             <ProjectView
@@ -933,7 +1009,7 @@ function ChatApp({
                 </>
               }
               documentExtensions={info?.documents?.extensions ?? []}
-              onOpenConversation={openConversation}
+              onOpenConversation={(id) => void openConversation(id)}
               onChanged={refreshProjects}
               onDeleted={onProjectDeleted}
               onToast={setToast}

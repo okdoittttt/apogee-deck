@@ -16,6 +16,7 @@ import {
   uploadProjectDocument,
 } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
+import { conversationPath, isPlainClick } from "@/lib/routes";
 import { useOpenDocument } from "./DocumentViewer";
 import { FileChip } from "./FileChip";
 import { FolderIcon, UploadIcon } from "./icons";
@@ -315,15 +316,20 @@ export function ProjectView({
               <ul className="divide-y divide-line rounded-xl border border-line">
                 {detail.conversations.map((c: Conversation) => (
                   <li key={c.id}>
-                    <button
-                      onClick={() => onOpenConversation(c.id)}
+                    <a
+                      href={conversationPath(c.id)}
+                      onClick={(e) => {
+                        if (!isPlainClick(e)) return; // ⌘/Ctrl+클릭은 새 탭
+                        e.preventDefault();
+                        onOpenConversation(c.id);
+                      }}
                       className="flex w-full items-baseline justify-between gap-3 px-3.5 py-2.5 text-left text-sm hover:bg-hover"
                     >
                       <span className="truncate text-fg">{c.title}</span>
                       <span className="shrink-0 text-[11px] text-subtle">
                         {new Date(c.created_at).toLocaleDateString()}
                       </span>
-                    </button>
+                    </a>
                   </li>
                 ))}
               </ul>
