@@ -15,6 +15,7 @@ from app.agents import AGENTS, DEFAULT_AGENT
 from app.api.routers import admin, approvals, auth, chat
 from app.api.routers import documents as documents_router
 from app.api.routers import projects as projects_router
+from app.conversations import runs
 from app.core.config import get_settings
 from app.core.db import SessionLocal, run_migrations
 from app.core.storage import get_storage
@@ -48,7 +49,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     시작 시 DB 마이그레이션 적용 → 첨부 저장소 준비 → 파싱 중이던 문서를 실패로 표시 →
     에이전트 런타임 시작 → UI 대화가 없는 checkpoint 정리 순서로 실행하고, 문서 정리 작업(하루 한 번)을
-    띄운다. 종료 시 정리 작업과 런타임을 정리한다.
+    띄운다. 종료 시 정리 작업, 진행 중인 응답(중단으로 저장), 런타임을 정리한다.
 
     첨부 저장소를 준비하지 못해도 앱은 시작한다 (첨부만 쓸 수 없다).
 
@@ -70,6 +71,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     backfill.cancel()
     cleanup.cancel()
+    # 진행 중인 응답을 중단으로 저장한 뒤(checkpointer 를 쓸 수 있을 때) 런타임을 닫는다.
+    await runs.shutdown_runs()
     await runtime.shutdown()
 
 

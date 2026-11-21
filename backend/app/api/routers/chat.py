@@ -53,7 +53,7 @@ def sse(event: str, data: dict[str, Any]) -> str:
 async def sse_stream(events: AsyncIterator[StreamEvent]) -> AsyncIterator[str]:
     """이벤트 스트림을 SSE 문자열 스트림으로 바꾼다.
 
-    이 스트림이 닫히면(연결 끊김) 안쪽 스트림도 바로 닫아서, 안쪽의 저장·해제 정리가 실행되게 한다.
+    이 스트림이 닫히면(연결 끊김) 안쪽 스트림(실행 구독)도 바로 닫는다. 실행 자체는 백그라운드에서 계속된다.
 
     Args:
         events: 대화 서비스가 내보내는 이벤트.
@@ -268,6 +268,9 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     텍스트와 실행 단계는 assistant 메시지로 저장한다 (``turns.run_turn`` 참고). LLM 에 들어가는 대화 이력은
     checkpointer 가 관리하고, ``messages`` 테이블은 화면 표시용이다.
 
+    응답은 백그라운드 작업에서 만들고(``turns.start_reply``) 이 응답은 그 실행을 구독한다. 연결이 끊겨도
+    응답은 끝까지 만들어져 저장된다.
+
     같은 대화의 응답이 이미 생성 중이면(다른 창에서 보낸 경우) 메시지를 저장하지 않고
     409 로 거절한다. 같은 창 안의 추가 질문은 프론트엔드가 대기열로 처리한다.
 
@@ -296,17 +299,13 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     except (ConversationError, AttachError) as exc:
         raise _http_error(exc) from exc
 
-    # 에이전트 응답 스트리밍 → 끝나면(또는 중단되면) assistant 메시지 저장, 생성 중 표시 해제
+    # 응답은 백그라운드에서 만든다 (끝나면 assistant 메시지 저장, 생성 중 표시 해제).
+    # 이 응답은 그 실행을 구독할 뿐이라, 연결이 끊겨도(새로고침, 탭 닫기) 실행은 끝까지 돈다.
+    run = turns.start_reply(
+        turn.conversation_id, turn.text, turn.images, turn.model, project_id=turn.project_id
+    )
     return StreamingResponse(
-        sse_stream(
-            turns.run_turn(
-                turn.conversation_id,
-                turn.text,
-                turn.images,
-                turn.model,
-                project_id=turn.project_id,
-            )
-        ),
+        sse_stream(run.follow_events()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

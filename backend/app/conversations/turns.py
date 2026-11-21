@@ -187,6 +187,44 @@ async def run_turn(
             await runs.run_registry.release(run_id)
 
 
+def start_reply(
+    conversation_id: uuid.UUID,
+    text: str,
+    images: list[dict[str, Any]],
+    model: str | None = None,
+    project_id: uuid.UUID | None = None,
+) -> runs.RunStream:
+    """응답 실행(``run_turn``)을 백그라운드 작업으로 시작한다. 화면 연결이 끊겨도 끝까지 돌고 저장된다.
+
+    Args:
+        conversation_id: 대화 ID. 호출 전에 ``runs.run_registry`` 에서 생성 중으로 표시되어 있어야 한다.
+        text: 모델에게 보낼 사용자 메시지 텍스트 (첨부 목록 포함).
+        images: 이미지 참조 블록.
+        model: 응답할 모델 ID.
+        project_id: 대화가 속한 프로젝트 ID.
+
+    Returns:
+        실행 기록. 화면은 ``follow`` / ``follow_events`` 로 구독한다.
+    """
+    max_seconds = get_settings().run_max_seconds
+    timeout = StreamEvent(
+        "error",
+        {
+            "message": (
+                f"응답 시간이 너무 길어 멈췄습니다 (최대 {max_seconds / 60:.0f}분). "
+                "그때까지의 응답은 저장했습니다."
+            ),
+            "transient": False,
+        },
+    )
+    return runs.start_run(
+        str(conversation_id),
+        run_turn(conversation_id, text, images, model, project_id=project_id),
+        max_seconds=max_seconds,
+        timeout_event=timeout,
+    )
+
+
 async def _agent_context(project_id: uuid.UUID | None) -> dict[str, Any]:
     """에이전트에게 넘길 턴 정보. 프로젝트 대화면 이번 턴 시작 시점의 프로젝트 정보를 담는다."""
     if project_id is None:

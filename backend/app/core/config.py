@@ -80,6 +80,8 @@ class Settings(BaseSettings):
         context_max_tokens: 모델에 보낼 대화 이력의 토큰 예산. ``None`` 이면 provider 별 기본값
             (``history_token_budget`` 참고).
         run_stale_seconds: 응답 생성 중 표시가 이 시간 동안 갱신되지 않으면 끝난 것으로 본다.
+        run_max_seconds: 응답 실행 시간 상한. 응답은 화면 연결과 관계없이 백그라운드에서 끝까지 돌므로,
+            아무도 보지 않는 실행이 끝없이 비용을 쓰지 않게 이 시간이 지나면 멈추고 중단으로 저장한다.
             정상적으로는 응답이 끝날 때 해제되며, 해제되지 못한 경우를 대비한 안전장치다.
             모델이 토큰 사이에 기다릴 수 있는 시간(``ollama_timeout_seconds``)보다 길어야 한다.
         database_url: 앱 DB URL (SQLAlchemy asyncpg 형식).
@@ -216,6 +218,7 @@ class Settings(BaseSettings):
 
     # --- Concurrency ---
     run_stale_seconds: float = 600.0
+    run_max_seconds: float = 600.0
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://agent:agent@postgres:5432/agent"

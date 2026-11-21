@@ -12,3 +12,12 @@ def registered_agents():
     runtime.register(AGENTS, DEFAULT_AGENT)
     yield
     runtime.register(AGENTS, DEFAULT_AGENT)
+
+
+@pytest.fixture(autouse=True)
+async def no_leftover_runs():
+    """테스트가 띄운 백그라운드 응답 실행이 다음 테스트로 넘어가지 않게 끝낸다."""
+    from app.conversations import runs
+
+    yield
+    await runs.shutdown_runs()
