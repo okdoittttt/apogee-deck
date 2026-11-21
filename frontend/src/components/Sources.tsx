@@ -164,43 +164,75 @@ function DocumentCard({ source, index }: { source: DocumentSource; index: number
   );
 }
 
+function SourceList({ sources }: { sources: NumberedSource[] }) {
+  return (
+    <ol className="grid gap-2 sm:grid-cols-2">
+      {sources.map(({ n, source }) => (
+        <li key={sourceKey(source)} className="min-w-0">
+          {source.type === "document" ? (
+            <DocumentCard source={source} index={n} />
+          ) : (
+            <WebCard source={source} index={n} />
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 /**
  * 답변 아래에 도구(웹 검색, 프로젝트 문서 검색)가 참고한 출처를 목록으로 보여준다.
  * 모델이 쓴 출처가 아니라 실제 검색 결과라서, 모델이 출처를 빠뜨리거나 지어내도 정확하다.
+ *
+ * `cited` (답변 본문에서 인용한 번호)를 주면, 인용한 출처를 번호 순서로 모두 먼저 보여주고
+ * 인용하지 않은 출처는 "답변에 쓰지 않은 출처" 로 접어 둔다. 인용한 번호가 없거나(번호를 달지 않은 답변,
+ * 예전 메시지) 답변을 만드는 중이면(`cited` 가 null) 모두 순서대로 보여준다.
  */
-export function Sources({ steps }: { steps: Step[] }) {
+export function Sources({ steps, cited = null }: { steps: Step[]; cited?: Set<number> | null }) {
   const [expanded, setExpanded] = useState(false);
   const sources = collectSources(steps);
   if (sources.length === 0) return null;
-  const visible = expanded ? sources : sources.slice(0, INITIAL_COUNT);
-  const hidden = sources.length - visible.length;
+  const used = cited ? sources.filter(({ n }) => cited.has(n)) : [];
+  const split = used.length > 0;
   const onlyDocuments = sources.every(({ source }) => source.type === "document");
+
+  let shown: NumberedSource[];
+  let rest: NumberedSource[];
+  let toggle: string;
+  if (split) {
+    shown = used;
+    rest = sources.filter(({ n }) => !cited?.has(n));
+    toggle = expanded ? "답변에 쓰지 않은 출처 접기" : `답변에 쓰지 않은 출처 ${rest.length}개 보기`;
+  } else {
+    shown = sources.slice(0, INITIAL_COUNT);
+    rest = sources.slice(INITIAL_COUNT);
+    toggle = expanded ? "접기" : `${rest.length}개 더 보기`;
+  }
 
   return (
     <section className="mt-4" aria-label="출처">
       <div className="mb-2 flex items-center gap-1.5 text-xs text-subtle">
         {onlyDocuments ? <FileIcon className="h-3.5 w-3.5" /> : <GlobeIcon className="h-3.5 w-3.5" />}
-        출처 {sources.length}
+        출처 {shown.length}
+        {split && rest.length > 0 && <span className="text-subtle">· 검색 결과 {sources.length}</span>}
       </div>
-      <ol className="grid gap-2 sm:grid-cols-2">
-        {visible.map(({ n, source }) => (
-          <li key={sourceKey(source)} className="min-w-0">
-            {source.type === "document" ? (
-              <DocumentCard source={source} index={n} />
-            ) : (
-              <WebCard source={source} index={n} />
-            )}
-          </li>
-        ))}
-      </ol>
-      {(hidden > 0 || expanded) && sources.length > INITIAL_COUNT && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="mt-2 text-xs text-muted hover:text-fg"
-        >
-          {expanded ? "접기" : `${hidden}개 더 보기`}
-        </button>
+      <SourceList sources={shown} />
+      {rest.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-2 text-xs text-muted hover:text-fg"
+            aria-expanded={expanded}
+          >
+            {toggle}
+          </button>
+          {expanded && (
+            <div className={split ? "mt-2 opacity-75" : "mt-2"}>
+              <SourceList sources={rest} />
+            </div>
+          )}
+        </>
       )}
     </section>
   );

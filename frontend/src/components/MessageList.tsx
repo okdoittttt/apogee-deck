@@ -8,7 +8,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { type ChatMessage, documentFileUrl } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
-import { citationNumber, remarkCitations } from "@/lib/citations";
+import { citationNumber, citedNumbers, remarkCitations } from "@/lib/citations";
 import { normalizeMath } from "@/lib/math";
 import { FileChip } from "./FileChip";
 import { LogoIcon } from "./icons";
@@ -92,6 +92,7 @@ function AssistantMessage({
   const stepInProgress =
     (message.thinking ?? false) || (last?.type === "tool" && last.status === "running");
   const showDots = active && !message.content && !stepInProgress;
+  const cited = useMemo(() => citedNumbers(message.content ?? ""), [message.content]);
   // 답변 속 [3] 을 같은 번호의 출처 카드와 잇는다.
   const components = useMemo<Components>(() => {
     const byNumber = new Map(collectSources(steps).map(({ n, source }) => [n, source]));
@@ -125,7 +126,8 @@ function AssistantMessage({
           </div>
         )}
         {showDots && <TypingDots />}
-        <Sources steps={steps} />
+        {/* 답변이 끝난 뒤에 인용한 출처를 앞으로 정리한다 (만드는 중에는 카드가 움직이지 않게 순서대로) */}
+        <Sources steps={steps} cited={active ? null : cited} />
         {!active && modelLabel && (
           <div className="mt-2 text-[11px] text-subtle" title={message.model ?? undefined}>
             {modelLabel}

@@ -18,14 +18,22 @@ const CITE = /\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]/g;
 // 이 노드 안의 글자는 출처 번호로 바꾸지 않는다.
 const SKIP = new Set(["link", "linkReference", "definition"]);
 
+/** 출처 번호로 볼 수 있는 자리인지: a[1] 같은 첨자와 [0] 은 아니다. 한글 바로 뒤(“입니다[2]”)는 번호로 본다. */
+function isCitation(value: string, start: number, numbers: number[]): boolean {
+  return !(start > 0 && /[A-Za-z0-9_]/.test(value[start - 1])) && numbers.every((n) => n >= 1);
+}
+
+function parseNumbers(group: string): number[] {
+  return group.split(",").map((s) => Number(s.trim()));
+}
+
 function splitText(value: string): MdNode[] | null {
   const parts: MdNode[] = [];
   let last = 0;
   for (const match of value.matchAll(CITE)) {
     const start = match.index ?? 0;
-    const numbers = match[1].split(",").map((s) => Number(s.trim()));
-    // a[1] 같은 배열 첨자와 [0] 은 출처 번호가 아니다. 한글 바로 뒤(“입니다[2]”)는 출처 번호로 본다.
-    if ((start > 0 && /[A-Za-z0-9_]/.test(value[start - 1])) || numbers.some((n) => n < 1)) continue;
+    const numbers = parseNumbers(match[1]);
+    if (!isCitation(value, start, numbers)) continue;
     if (start > last) {
       // 번호 앞 공백은 줄바꿈하지 않는 공백으로: 칩만 다음 줄로 떨어지지 않게 앞 낱말에 붙인다.
       parts.push({ type: "text", value: value.slice(last, start).replace(/\s+$/, "\u00a0") });
@@ -61,6 +69,20 @@ function walk(node: MdNode) {
 /** react-markdown 의 remarkPlugins 에 넣는다. */
 export function remarkCitations() {
   return (tree: MdNode) => walk(tree);
+}
+
+/**
+ * 답변 글자에서 인용한 출처 번호를 모은다 (칩을 만드는 규칙과 같다). 코드 블록·인라인 코드 안의 번호는 뺀다.
+ * 출처 카드를 "답변에 쓴 출처 / 쓰지 않은 출처" 로 나눌 때 쓴다.
+ */
+export function citedNumbers(text: string): Set<number> {
+  const cited = new Set<number>();
+  const prose = text.replace(/```[\s\S]*?(```|$)/g, " ").replace(/`[^`\n]*`/g, " ");
+  for (const match of prose.matchAll(CITE)) {
+    const numbers = parseNumbers(match[1]);
+    if (isCitation(prose, match.index ?? 0, numbers)) numbers.forEach((n) => cited.add(n));
+  }
+  return cited;
 }
 
 /** `#cite-3` 링크면 출처 번호(3), 아니면 null. */
