@@ -45,6 +45,11 @@ export function collectSources(steps: Step[]): NumberedSource[] {
   return sources.sort((a, b) => a.n - b.n);
 }
 
+/** 출처 위치("p.3 · **슬라이드 제목**")에서 Markdown 굵게 표시를 뺀다 (예전에 저장한 출처도 있다). */
+function cleanLocation(location: string): string {
+  return location.replaceAll("**", "").trim();
+}
+
 /** 문서 출처를 문서 보기 패널에 띄울 대상으로 바꾼다. */
 function viewerTarget(source: DocumentSource): ViewerTarget {
   return {
@@ -73,7 +78,7 @@ export function Citation({ n, source }: { n: number; source?: Source }) {
         disabled={!openDocument}
         onClick={() => openDocument?.(viewerTarget(source))}
         className={CITATION_CLASS}
-        title={source.location ? `${source.title} · ${source.location}` : source.title}
+        title={source.location ? `${source.title} · ${cleanLocation(source.location)}` : source.title}
         aria-label={`출처 ${n}: ${source.title}`}
       >
         {n}
@@ -129,7 +134,8 @@ function DocumentCard({ source, index }: { source: DocumentSource; index: number
   const image = source.image_element_id
     ? projectImageUrl(source.project_id, source.image_element_id)
     : null;
-  const label = source.location ? `${source.title} · ${source.location}` : source.title;
+  const location = cleanLocation(source.location);
+  const label = location ? `${source.title} · ${location}` : source.title;
   return (
     <button
       type="button"
@@ -143,7 +149,7 @@ function DocumentCard({ source, index }: { source: DocumentSource; index: number
         <span className="line-clamp-2 text-[13px] leading-snug text-fg">{source.title}</span>
         <span className="mt-0.5 block truncate text-[11px] text-subtle">
           {image ? "그림" : "본문"}
-          {source.location && ` · ${source.location}`}
+          {location && ` · ${location}`}
         </span>
       </span>
       {image && (

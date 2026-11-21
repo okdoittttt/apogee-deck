@@ -26,7 +26,10 @@ function splitText(value: string): MdNode[] | null {
     const numbers = match[1].split(",").map((s) => Number(s.trim()));
     // a[1] 같은 배열 첨자와 [0] 은 출처 번호가 아니다. 한글 바로 뒤(“입니다[2]”)는 출처 번호로 본다.
     if ((start > 0 && /[A-Za-z0-9_]/.test(value[start - 1])) || numbers.some((n) => n < 1)) continue;
-    if (start > last) parts.push({ type: "text", value: value.slice(last, start) });
+    if (start > last) {
+      // 번호 앞 공백은 줄바꿈하지 않는 공백으로: 칩만 다음 줄로 떨어지지 않게 앞 낱말에 붙인다.
+      parts.push({ type: "text", value: value.slice(last, start).replace(/\s+$/, "\u00a0") });
+    }
     for (const n of numbers) {
       parts.push({ type: "link", url: `${CITE_PREFIX}${n}`, children: [{ type: "text", value: String(n) }] });
     }

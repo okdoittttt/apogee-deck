@@ -345,7 +345,8 @@ def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]
                 else f"p.{hit.page_start}-{hit.page_end}"
             )
         if hit.heading:
-            parts.append(hit.heading)
+            # PPTX 슬라이드 제목 등은 제목 경로에 Markdown 굵게 표시(**)가 남아 있다.
+            parts.append(hit.heading.replace("**", "").strip())
         location = " · ".join(parts)
         image = str(hit.image_element_id) if hit.image_element_id else None
         found.append(

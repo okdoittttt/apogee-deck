@@ -238,9 +238,11 @@ def test_sources_are_one_per_hit_and_validated_for_the_screen():
     project_id = uuid.uuid4()
     hit = _hit(image_element_id=uuid.uuid4())
     # 결과 하나가 출처 하나다 (같은 위치라도 합치지 않는다: 모델에게 준 번호와 카드가 맞아야 한다)
-    found = search.sources(project_id, [hit, _hit(page_start=None, heading=None)])
-    assert len(found) == 2
+    bold = _hit(heading="**슬라이드 3 제목** ")
+    found = search.sources(project_id, [hit, _hit(page_start=None, heading=None), bold])
+    assert len(found) == 3
     assert found[0]["location"] == "p.3 · 1장"
+    assert found[2]["location"] == "p.3 · 슬라이드 3 제목"  # Markdown 굵게 표시는 뺀다
     assert found[1]["location"] == ""
 
     shown = tool_sources(
@@ -253,7 +255,7 @@ def test_sources_are_one_per_hit_and_validated_for_the_screen():
             ]
         }
     )
-    assert [s.get("type") for s in shown] == ["document", "document", None]
+    assert [s.get("type") for s in shown] == ["document", "document", "document", None]
     assert shown[0]["image_element_id"] == str(hit.image_element_id)
     assert shown[0]["chunk_id"] == str(hit.chunk_id)  # 문서 보기 패널에서 근거 위치를 강조한다
     # 저장한 단계를 다시 읽을 때 두 종류 모두 스키마를 통과한다
@@ -267,6 +269,7 @@ def test_sources_are_one_per_hit_and_validated_for_the_screen():
         sources=shown,
     )
     assert [type(s).__name__ for s in step.sources] == [
+        "DocumentSource",
         "DocumentSource",
         "DocumentSource",
         "Source",
