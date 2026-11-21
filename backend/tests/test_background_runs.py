@@ -161,6 +161,7 @@ async def test_chat_endpoint_streams_a_background_run(monkeypatch, registry, sav
         chunks.append(chunk)
         if "event: delta" in chunk:
             break
+    assert chunks[0].startswith("id: 1\nevent: meta")  # 이벤트마다 번호가 붙는다
     await response.body_iterator.aclose()  # 연결이 끊긴다
 
     [run] = list(runs._streams.values())
@@ -179,3 +180,85 @@ def _fake_start_turn(registry):
         )
 
     return start_turn
+
+
+# --- 중지와 다시 붙기 ------------------------------------------------------------------------------
+
+
+async def test_stop_saves_partial_releases_and_tells_viewers(monkeypatch, registry, saved):
+    _reply(monkeypatch, TextDelta("멈출 응답"), "hang")
+    cid, run = await _start(registry)
+    seen: list[str] = []
+
+    async def watch():  # 다른 창
+        async for event in run.follow_events():
+            seen.append(event.event)
+
+    viewer = asyncio.create_task(watch())
+    while "delta" not in seen:
+        await asyncio.sleep(0.01)
+
+    assert await turns.stop_reply(cid) is True
+    # 돌려받은 시점에 이미 저장·해제가 끝났다 (화면이 대기 메시지를 바로 보낼 수 있다)
+    assert saved == ["멈출 응답" + turns.INTERRUPTED_SUFFIX]
+    assert not await registry.is_running(str(cid))
+    await asyncio.wait_for(viewer, timeout=5)
+    assert seen[-1] == "stopped"
+    assert await turns.stop_reply(cid) is False  # 이미 끝난 실행
+
+
+async def test_stop_without_a_run_does_nothing(registry):
+    assert await turns.stop_reply(uuid.uuid4()) is False
+
+
+@pytest.fixture
+def owned(monkeypatch):
+    async def get_own(session, conversation_id, user_id):
+        return SimpleNamespace(id=conversation_id, user_id=user_id)
+
+    monkeypatch.setattr(chat_router.service, "get_own", get_own)
+
+
+async def _body(response) -> str:
+    return "".join([chunk async for chunk in response.body_iterator])
+
+
+async def test_stream_endpoint_resumes_after_last_event_id(monkeypatch, registry, saved, owned):
+    _reply(monkeypatch, TextDelta("a"), TextDelta("b"), Finished("ab", "end_turn", "fake"))
+    cid, run = await _start(registry)
+    await run.task
+
+    response = await chat_router.stream_conversation(cid, None, USER, last_event_id="2")
+    body = await _body(response)
+    assert body.startswith('id: 3\nevent: delta\ndata: {"text": "b"}\n\n')
+    assert "id: 4\nevent: done" in body
+    assert "id: 2\n" not in body  # 이미 받은 이벤트는 다시 보내지 않는다
+
+    again = await chat_router.stream_conversation(cid, None, USER, after=3)
+    assert (await _body(again)).startswith("id: 4\nevent: done")
+
+
+async def test_stream_endpoint_without_a_run_is_204(registry, owned):
+    response = await chat_router.stream_conversation(uuid.uuid4(), None, USER)
+    assert response.status_code == 204
+
+
+async def test_stream_and_stop_endpoints_check_ownership(monkeypatch, registry):
+    async def not_mine(session, conversation_id, user_id):
+        raise chat_router.ConversationError(404, "Conversation not found")
+
+    monkeypatch.setattr(chat_router.service, "get_own", not_mine)
+    for call in (chat_router.stream_conversation, chat_router.stop_conversation):
+        with pytest.raises(chat_router.HTTPException) as exc:
+            await call(uuid.uuid4(), None, USER)
+        assert exc.value.status_code == 404
+
+
+async def test_stop_endpoint_stops_the_run(monkeypatch, registry, saved, owned):
+    _reply(monkeypatch, TextDelta("x"), "hang")
+    cid, run = await _start(registry)
+    async for event in run.follow_events():
+        if event.event == "delta":
+            break
+    await chat_router.stop_conversation(cid, None, USER)
+    assert run.done and saved == ["x" + turns.INTERRUPTED_SUFFIX]

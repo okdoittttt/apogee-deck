@@ -141,6 +141,7 @@ class RunStream:
         self.events: list[Any] = []
         self.done = False
         self.task: asyncio.Task[None] | None = None
+        self.stop_event: Any = None  # 사용자가 중지했을 때 기록할 이벤트 (cancel_run 이 넣는다)
         self._changed = asyncio.Event()
 
     def _notify(self) -> None:
@@ -232,7 +233,10 @@ def start_run(
             )
             stream.append(timeout_event)
         except asyncio.CancelledError:
-            raise  # 앱 종료 (shutdown_runs). events 가 중단으로 저장했다
+            # 사용자가 중지했거나(cancel_run) 앱이 종료된다(shutdown_runs). events 가 중단으로 저장했다.
+            if stream.stop_event is not None:
+                stream.append(stream.stop_event)
+            raise
         except (
             Exception
         ):  # events 가 오류를 이벤트로 바꾸므로 여기까지 오면 안 되지만, 작업이 조용히 죽지 않게
@@ -250,6 +254,28 @@ def _forget(stream: RunStream) -> None:
     """끝난 실행의 기록을 지운다 (그 사이 같은 대화의 새 실행이 시작됐으면 그대로 둔다)."""
     if _streams.get(stream.conversation_id) is stream:
         del _streams[stream.conversation_id]
+
+
+async def cancel_run(conversation_id: str, stop_event: Any, wait_seconds: float = 10.0) -> bool:
+    """진행 중인 실행을 멈추고, 저장과 생성 중 표시 해제가 끝날 때까지 기다린다 (사용자가 중지).
+
+    기다리고 돌려주므로, 화면은 이 호출이 끝나면 대기 메시지를 바로 보낼 수 있다.
+
+    Args:
+        conversation_id: 대화 ID.
+        stop_event: 구독자에게 보낼 "중지됨" 이벤트 (다른 창도 중지된 것을 안다).
+        wait_seconds: 정리를 기다릴 최대 시간.
+
+    Returns:
+        멈춘 실행이 있었으면 ``True``.
+    """
+    stream = _streams.get(conversation_id)
+    if stream is None or stream.done or stream.task is None:
+        return False
+    stream.stop_event = stop_event
+    stream.task.cancel()
+    await asyncio.wait({stream.task}, timeout=wait_seconds)
+    return True
 
 
 def get_stream(conversation_id: str) -> RunStream | None:

@@ -225,6 +225,18 @@ def start_reply(
     )
 
 
+async def stop_reply(conversation_id: uuid.UUID) -> bool:
+    """진행 중인 응답을 멈춘다. 그때까지의 응답은 중단 표시와 함께 저장된다.
+
+    Args:
+        conversation_id: 대화 ID.
+
+    Returns:
+        멈춘 응답이 있었으면 ``True``.
+    """
+    return await runs.cancel_run(str(conversation_id), StreamEvent("stopped", {}))
+
+
 async def _agent_context(project_id: uuid.UUID | None) -> dict[str, Any]:
     """에이전트에게 넘길 턴 정보. 프로젝트 대화면 이번 턴 시작 시점의 프로젝트 정보를 담는다."""
     if project_id is None:

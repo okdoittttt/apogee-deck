@@ -8,9 +8,9 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
 from app.api.deps import ApprovedUser, SessionDep
@@ -24,7 +24,7 @@ from app.api.schemas import (
     ModelOut,
     document_out,
 )
-from app.conversations import service, turns
+from app.conversations import runs, service, turns
 from app.conversations.service import ConversationError
 from app.conversations.turns import StreamEvent
 from app.core.config import get_settings
@@ -37,17 +37,35 @@ from app.models import Conversation
 router = APIRouter(prefix="/api")
 
 
-def sse(event: str, data: dict[str, Any]) -> str:
+def sse(event: str, data: dict[str, Any], event_id: int | None = None) -> str:
     """Server-Sent Events 메시지 하나를 만든다.
 
     Args:
         event: 이벤트 이름 (``meta`` / ``delta`` / ``done`` / ``error`` 등).
         data: JSON 으로 보낼 데이터.
+        event_id: 이벤트 번호. 있으면 ``id:`` 줄을 넣는다 (다시 붙을 때 ``Last-Event-ID`` 로 보낸다).
 
     Returns:
-        ``event:`` / ``data:`` 줄과 빈 줄로 끝나는 SSE 문자열.
+        ``id:`` / ``event:`` / ``data:`` 줄과 빈 줄로 끝나는 SSE 문자열.
     """
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    head = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{head}event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def sse_numbered(events: AsyncIterator[tuple[int, StreamEvent]]) -> AsyncIterator[str]:
+    """번호가 붙은 실행 이벤트(``RunStream.follow``)를 ``id:`` 가 있는 SSE 로 바꾼다.
+
+    연결이 끊기면 구독만 닫는다. 실행은 백그라운드에서 계속된다.
+
+    Args:
+        events: ``(번호, 이벤트)``.
+
+    Yields:
+        SSE 메시지 문자열.
+    """
+    async with aclosing(events):
+        async for event_id, e in events:
+            yield sse(e.event, e.data, event_id)
 
 
 async def sse_stream(events: AsyncIterator[StreamEvent]) -> AsyncIterator[str]:
@@ -210,6 +228,72 @@ async def get_conversation_status(
     return ConversationStatus(running=running)
 
 
+@router.get("/conversations/{conversation_id}/stream")
+async def stream_conversation(
+    conversation_id: uuid.UUID,
+    session: SessionDep,
+    user: ApprovedUser,
+    after: int = 0,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> Response:
+    """진행 중인(또는 막 끝난) 응답에 다시 붙는다 (새로고침, 다른 창, 끊긴 연결 다시 잇기).
+
+    이벤트는 ``POST /api/chat`` 과 같고 ``id:`` 로 번호가 붙는다. ``Last-Event-ID`` 헤더(또는 ``after``)의
+    번호 다음부터 보내서, 다시 붙어도 이벤트가 빠지거나 겹치지 않는다.
+
+    Args:
+        conversation_id: 대화 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+        after: 이미 받은 마지막 이벤트 번호.
+        last_event_id: 이미 받은 마지막 이벤트 번호 (브라우저 EventSource 가 보내는 헤더).
+
+    Returns:
+        ``text/event-stream`` 스트리밍 응답. 실행 기록이 없으면(응답 생성 중이 아니고 최근에 끝난 실행도
+        없음, 서버 재시작) 204.
+
+    Raises:
+        HTTPException: 대화가 없거나 내 것이 아니면 404.
+    """
+    try:
+        await service.get_own(session, conversation_id, user.id)
+    except ConversationError as exc:
+        raise _http_error(exc) from exc
+    run = runs.get_stream(str(conversation_id))
+    if run is None:
+        return Response(status_code=204)
+    start = max(after, int(last_event_id) if (last_event_id or "").isdigit() else 0)
+    return StreamingResponse(
+        sse_numbered(run.follow(start)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/conversations/{conversation_id}/stop", status_code=204)
+async def stop_conversation(
+    conversation_id: uuid.UUID, session: SessionDep, user: ApprovedUser
+) -> None:
+    """진행 중인 응답을 멈춘다. 그때까지의 응답은 중단 표시와 함께 저장된다.
+
+    저장과 생성 중 표시 해제가 끝난 뒤에 돌려주므로, 화면은 바로 대기 메시지를 보낼 수 있다.
+    구독 중인 다른 창에는 ``stopped`` 이벤트가 간다. 생성 중이 아니면 아무 일도 하지 않는다.
+
+    Args:
+        conversation_id: 대화 ID.
+        session: DB 세션.
+        user: 승인된 사용자.
+
+    Raises:
+        HTTPException: 대화가 없거나 내 것이 아니면 404.
+    """
+    try:
+        await service.get_own(session, conversation_id, user.id)
+    except ConversationError as exc:
+        raise _http_error(exc) from exc
+    await turns.stop_reply(conversation_id)
+
+
 @router.get("/images/{image_id}")
 async def get_image(image_id: uuid.UUID, session: SessionDep, user: ApprovedUser) -> Response:
     """첨부 이미지 원본을 돌려준다.
@@ -263,7 +347,8 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     """사용자 메시지를 저장하고 에이전트 응답을 SSE 로 스트리밍한다.
 
     SSE 이벤트는 ``meta`` (대화 ID) → 응답 진행 이벤트 (여러 번) → ``done`` (종료 사유, 모델)
-    순서이고, 실패하면 ``error`` 를 보낸다. 응답 진행 이벤트는 ``delta`` (답변 텍스트),
+    순서이고, 실패하면 ``error``, 중지하면 ``stopped`` 를 보낸다. 이벤트마다 ``id:`` 로 번호가 붙는다
+    (끊기면 ``GET /api/conversations/{id}/stream`` 으로 그 다음부터 다시 받는다). 응답 진행 이벤트는 ``delta`` (답변 텍스트),
     ``reasoning`` (추론 과정), ``tool_start`` / ``tool_end`` (도구 호출)이다. 화면에 보여준
     텍스트와 실행 단계는 assistant 메시지로 저장한다 (``turns.run_turn`` 참고). LLM 에 들어가는 대화 이력은
     checkpointer 가 관리하고, ``messages`` 테이블은 화면 표시용이다.
@@ -305,7 +390,7 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
         turn.conversation_id, turn.text, turn.images, turn.model, project_id=turn.project_id
     )
     return StreamingResponse(
-        sse_stream(run.follow_events()),
+        sse_numbered(run.follow()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
