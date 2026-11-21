@@ -144,6 +144,42 @@ async def get_view(
     )
 
 
+async def set_feedback(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    user_id: uuid.UUID,
+    value: int | None,
+    comment: str | None = None,
+) -> Message:
+    """내 대화의 응답에 피드백(👍/👎, 의견)을 저장한다. ``value`` 가 ``None`` 이면 피드백을 지운다.
+
+    Langfuse 점수는 호출하는 쪽이 남긴다 (``tracing.record_feedback``, 메시지의 ``trace_id``).
+
+    Args:
+        session: DB 세션.
+        conversation_id: 대화 ID.
+        message_id: assistant 메시지 ID.
+        user_id: 요청한 사용자 ID.
+        value: 1 (👍), -1 (👎), ``None`` (취소).
+        comment: 남긴 의견. 피드백을 지우면 함께 지운다.
+
+    Returns:
+        저장한 메시지.
+
+    Raises:
+        ConversationError: 대화가 없거나 내 것이 아니거나, 그 대화의 응답 메시지가 아니면 404.
+    """
+    await get_own(session, conversation_id, user_id)
+    message = await session.get(Message, message_id)
+    if message is None or message.conversation_id != conversation_id or message.role != "assistant":
+        raise ConversationError(404, "Message not found")
+    message.feedback = value
+    message.feedback_comment = ((comment or "").strip() or None) if value is not None else None
+    await session.commit()
+    return message
+
+
 async def is_running(session: AsyncSession, conversation_id: uuid.UUID, user_id: uuid.UUID) -> bool:
     """내 대화의 응답이 생성 중인지 돌려준다. 메시지를 불러오지 않아서 가볍다.
 

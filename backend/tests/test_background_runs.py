@@ -26,7 +26,7 @@ def registry(monkeypatch):
 def saved(monkeypatch):
     out: list[str] = []
 
-    async def fake_save(conversation_id, content, steps=None, model=None):
+    async def fake_save(conversation_id, content, steps=None, model=None, trace_id=None):
         out.append(content)
 
     monkeypatch.setattr(turns, "save_assistant_message", fake_save)

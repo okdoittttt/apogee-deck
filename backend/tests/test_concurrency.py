@@ -126,7 +126,7 @@ def _patch_stream(monkeypatch, steps):
             else:
                 yield step
 
-    async def fake_save(conversation_id, content, steps=None, model=None):
+    async def fake_save(conversation_id, content, steps=None, model=None, trace_id=None):
         await asyncio.sleep(0)
 
     monkeypatch.setattr(turns, "stream_reply", fake_stream_reply)
@@ -180,7 +180,7 @@ async def test_disconnect_during_final_save_still_releases(monkeypatch, registry
         yield TextDelta("a")
         yield Finished("a", "end_turn", "fake")
 
-    async def slow_save(conversation_id, content, steps=None, model=None):
+    async def slow_save(conversation_id, content, steps=None, model=None, trace_id=None):
         saving.set()
         await anyio.sleep(0.1)  # 저장 중에 취소가 들어온다
         saved.append(content)

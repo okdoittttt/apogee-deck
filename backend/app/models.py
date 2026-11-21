@@ -10,7 +10,18 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -175,6 +186,10 @@ class Message(Base):
             형식은 ``app.api.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
             없는 응답은 ``None``.
         model: 응답한 모델 ID (``"<provider>:<모델 이름>"``). 사용자 메시지는 ``None``.
+        trace_id: 이 응답의 Langfuse 트레이스 ID (피드백을 그 트레이스의 점수로 남긴다). 트레이싱이 꺼져 있었거나
+            이 열을 추가하기 전의 응답은 ``None``.
+        feedback: 사용자 피드백. 1 (👍), -1 (👎), 없으면 ``None``.
+        feedback_comment: 피드백과 함께 남긴 의견.
         created_at: 생성 시각.
         conversation: 속한 대화.
         images: 사용자가 첨부한 이미지 (첨부 순).
@@ -190,6 +205,9 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text)
     steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    feedback: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    feedback_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

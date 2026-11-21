@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import anyio
 
 from app.conversations import runs
+from app.core import tracing
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.llm import describe_error, is_transient_error
@@ -51,7 +52,8 @@ async def save_assistant_message(
     content: str,
     steps: list[dict[str, Any]] | None,
     model: str | None = None,
-) -> None:
+    trace_id: str | None = None,
+) -> uuid.UUID:
     """Assistant 메시지를 저장한다.
 
     응답 스트리밍 도중이나 끝난 뒤에 호출되므로 요청 스코프와 별개의 세션을 쓴다.
@@ -61,18 +63,23 @@ async def save_assistant_message(
         content: 저장할 답변 텍스트.
         steps: 실행 단계 (추론 과정, 도구 호출). 없으면 ``None``.
         model: 응답한 모델 ID.
+        trace_id: 이 응답의 Langfuse 트레이스 ID (피드백 점수를 남길 곳).
+
+    Returns:
+        저장한 메시지 ID (화면이 피드백을 보낼 때 쓴다).
     """
+    message = Message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content=content,
+        steps=steps,
+        model=model,
+        trace_id=trace_id,
+    )
     async with SessionLocal() as s:
-        s.add(
-            Message(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=content,
-                steps=steps,
-                model=model,
-            )
-        )
+        s.add(message)
         await s.commit()
+    return message.id
 
 
 async def run_turn(
@@ -110,13 +117,16 @@ async def run_turn(
         ``error`` 이벤트.
     """
     run_id = str(conversation_id)
+    trace_id = tracing.new_trace_id()  # 이 응답의 트레이스 (피드백 점수를 여기에 남긴다)
     shown: list[str] = []
     recorder = StepRecorder()
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
     try:
         yield StreamEvent("meta", {"conversation_id": run_id})
         context = await _agent_context(project_id)
-        async for event in stream_reply(run_id, text, images, model=model, context=context):
+        async for event in stream_reply(
+            run_id, text, images, model=model, context=context, trace_id=trace_id
+        ):
             recorder.apply(event)
             if not isinstance(event, Finished):
                 await runs.run_registry.touch(run_id)
@@ -152,12 +162,21 @@ async def run_turn(
                 with anyio.CancelScope(shield=True):
                     outcome = "finished"
                     recorder.finalize("finished")
+                    message_id = None
                     if event.text or recorder.steps:
-                        await save_assistant_message(
-                            conversation_id, event.text, recorder.to_json(), event.model
+                        message_id = await save_assistant_message(
+                            conversation_id, event.text, recorder.to_json(), event.model, trace_id
                         )
                     await runs.run_registry.release(run_id)
-                yield StreamEvent("done", {"stop_reason": event.stop_reason, "model": event.model})
+                yield StreamEvent(
+                    "done",
+                    {
+                        "stop_reason": event.stop_reason,
+                        "model": event.model,
+                        # 화면이 이 응답에 피드백을 보낼 때 쓴다
+                        "message_id": str(message_id) if message_id else None,
+                    },
+                )
     except Exception as e:  # provider 마다 예외 타입이 달라 한 곳에서 처리
         # 예외 원문은 로그에만 남기고, 화면에는 로그에서 찾을 수 있는 오류 ID 를 보낸다.
         error_id = uuid.uuid4().hex[:8]
@@ -165,7 +184,7 @@ async def run_turn(
         with anyio.CancelScope(shield=True):
             outcome = "error"
             recorder.finalize("error")
-            await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX, model)
+            await _save_partial(conversation_id, shown, recorder, ERROR_SUFFIX, model, trace_id)
             await runs.run_registry.release(run_id)
         message = describe_error(e) or "응답을 만드는 중 오류가 발생했습니다."
         yield StreamEvent(
@@ -182,7 +201,9 @@ async def run_turn(
         with anyio.CancelScope(shield=True):
             if outcome == "interrupted":
                 recorder.finalize("interrupted")
-                await _save_partial(conversation_id, shown, recorder, INTERRUPTED_SUFFIX, model)
+                await _save_partial(
+                    conversation_id, shown, recorder, INTERRUPTED_SUFFIX, model, trace_id
+                )
             # 어떤 경로로 끝나든 생성 중 표시는 반드시 해제한다 (이미 해제됐으면 아무 일 없음).
             await runs.run_registry.release(run_id)
 
@@ -255,12 +276,13 @@ async def _save_partial(
     recorder: StepRecorder,
     suffix: str,
     model: str | None,
+    trace_id: str | None = None,
 ) -> None:
     """끝까지 오지 못한 응답을 표시와 함께 저장한다. 보여준 것이 없으면 저장하지 않는다."""
     if not shown and not recorder.steps:
         return
     content = "".join(shown) + suffix if shown else suffix.strip()
     try:
-        await save_assistant_message(conversation_id, content, recorder.to_json(), model)
+        await save_assistant_message(conversation_id, content, recorder.to_json(), model, trace_id)
     except Exception:
         logger.exception("failed to save partial reply for %s", conversation_id)

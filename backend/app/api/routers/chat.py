@@ -4,13 +4,15 @@
 SSE 변환만 한다.
 """
 
+import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
 from app.api.deps import ApprovedUser, SessionDep
@@ -19,6 +21,8 @@ from app.api.schemas import (
     ConversationDetail,
     ConversationOut,
     ConversationStatus,
+    FeedbackIn,
+    FeedbackOut,
     MessageOut,
     ModelList,
     ModelOut,
@@ -27,12 +31,15 @@ from app.api.schemas import (
 from app.conversations import runs, service, turns
 from app.conversations.service import ConversationError
 from app.conversations.turns import StreamEvent
+from app.core import tracing
 from app.core.config import get_settings
 from app.documents.formats import SUPPORTED_EXTENSIONS
 from app.documents.service import AttachError
 from app.llm import model_name
 from app.llm.catalog import available_models, default_model_id
 from app.models import Conversation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -195,6 +202,8 @@ async def get_conversation(
                 steps=m.steps or [],
                 model=m.model,
                 documents=[document_out(d, chars) for d, chars in view.documents.get(m.id, [])],
+                feedback=m.feedback,
+                feedback_comment=m.feedback_comment,
             )
             for m in conv.messages
         ],
@@ -292,6 +301,62 @@ async def stop_conversation(
     except ConversationError as exc:
         raise _http_error(exc) from exc
     await turns.stop_reply(conversation_id)
+
+
+@router.put("/conversations/{conversation_id}/messages/{message_id}/feedback")
+async def put_feedback(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    req: FeedbackIn,
+    session: SessionDep,
+    user: ApprovedUser,
+    background: BackgroundTasks,
+) -> FeedbackOut:
+    """응답에 👍/👎 피드백(과 의견)을 단다. 같은 응답에 다시 보내면 바꾸고, ``value: null`` 이면 지운다.
+
+    DB 에 저장하고, 응답의 Langfuse 트레이스에 ``user_feedback`` 점수(👍 1, 👎 0)로 남긴다. 점수는 응답 뒤에
+    보내서 Langfuse 가 느리거나 실패해도 피드백 저장에는 영향이 없다.
+
+    Args:
+        conversation_id: 대화 ID.
+        message_id: assistant 메시지 ID.
+        req: 피드백.
+        session: DB 세션.
+        user: 승인된 사용자.
+        background: 응답 뒤에 할 일 (Langfuse 점수).
+
+    Returns:
+        저장된 피드백.
+
+    Raises:
+        HTTPException: 대화나 메시지가 없거나 내 것이 아니면 404.
+    """
+    try:
+        message = await service.set_feedback(
+            session, conversation_id, message_id, user.id, req.value, req.comment
+        )
+    except ConversationError as exc:
+        raise _http_error(exc) from exc
+    scored = bool(message.trace_id) and get_settings().tracing_enabled
+    if scored:
+        background.add_task(
+            _record_feedback,
+            message.trace_id,
+            message.id,
+            message.feedback,
+            message.feedback_comment,
+        )
+    return FeedbackOut(feedback=message.feedback, comment=message.feedback_comment, scored=scored)
+
+
+async def _record_feedback(
+    trace_id: str, message_id: uuid.UUID, value: int | None, comment: str | None
+) -> None:
+    """피드백을 Langfuse 점수로 남긴다. 실패해도 기록만 남긴다 (피드백은 DB 에 저장됐다)."""
+    try:
+        await asyncio.to_thread(tracing.record_feedback, trace_id, message_id, value, comment)
+    except Exception:
+        logger.exception("failed to record feedback score for message %s", message_id)
 
 
 @router.get("/images/{image_id}")

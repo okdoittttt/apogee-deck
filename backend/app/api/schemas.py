@@ -205,6 +205,8 @@ class MessageOut(BaseModel):
         steps: assistant 응답의 실행 단계 (일어난 순서).
         model: 응답한 모델 ID. 사용자 메시지와 모델을 기록하기 전의 응답은 ``None``.
         documents: 사용자 메시지에 첨부한 문서 (본문 없이 정보만).
+        feedback: 응답에 단 피드백. 1 (👍), -1 (👎), 없으면 ``None``.
+        feedback_comment: 피드백과 함께 남긴 의견.
     """
 
     id: uuid.UUID
@@ -215,6 +217,8 @@ class MessageOut(BaseModel):
     steps: list[Step] = []
     model: str | None = None
     documents: list["DocumentOut"] = []
+    feedback: int | None = None
+    feedback_comment: str | None = None
 
 
 class ConversationOut(BaseModel):
@@ -245,6 +249,32 @@ class ConversationDetail(ConversationOut):
 
     messages: list[MessageOut]
     running: bool = False
+
+
+class FeedbackIn(BaseModel):
+    """응답에 다는 피드백.
+
+    Attributes:
+        value: 1 (👍), -1 (👎), ``None`` (피드백 취소).
+        comment: 의견 (선택, 2,000자까지).
+    """
+
+    value: Literal[1, -1] | None
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class FeedbackOut(BaseModel):
+    """저장된 피드백.
+
+    Attributes:
+        feedback: 1 (👍), -1 (👎), 없으면 ``None``.
+        comment: 의견.
+        scored: Langfuse 트레이스에 점수로 남기는지 (트레이싱이 꺼져 있었거나 트레이스 ID 가 없는 예전 응답은 ``False``).
+    """
+
+    feedback: int | None
+    comment: str | None = None
+    scored: bool = False
 
 
 class ConversationStatus(BaseModel):

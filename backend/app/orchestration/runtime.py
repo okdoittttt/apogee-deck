@@ -262,6 +262,7 @@ async def stream_reply(
     agent: str | None = None,
     model: str | None = None,
     context: Mapping[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """에이전트를 실행하고 응답과 실행 단계를 스트리밍한다.
 
@@ -283,6 +284,7 @@ async def stream_reply(
         context: 이번 턴에 에이전트에게 넘길 정보 (예: ``{"project": ProjectContext}``). 그래프의 노드와
             도구가 ``config["configurable"]`` 에서 읽는다. 문자열·숫자가 아닌 값은 checkpoint
             메타데이터에 저장되지 않는다.
+        trace_id: Langfuse 트레이스 ID (``tracing.new_trace_id``). 응답에 단 피드백을 이 트레이스에 남긴다.
 
     Yields:
         일어난 순서대로 ``TextDelta`` / ``ReasoningDelta`` / ``ToolStarted`` / ``ToolFinished``,
@@ -299,7 +301,7 @@ async def stream_reply(
     spec = _agents[agent]
     config = {
         "configurable": {**(context or {}), "thread_id": conversation_id},
-        "callbacks": tracing.get_callbacks(),
+        "callbacks": tracing.get_callbacks(trace_id),
         "metadata": {"langfuse_session_id": conversation_id, "agent": agent, "model": used_model},
         "run_name": agent,
         # 모델이 도구를 끝없이 부르지 않게 한 턴의 단계 수를 제한한다 (넘으면 GraphRecursionError).

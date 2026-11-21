@@ -133,7 +133,7 @@ async def test_stream_reply_emits_reasoning_and_tool_events(monkeypatch):
 def capture(monkeypatch):
     saved: list[tuple[str, list | None]] = []
 
-    async def fake_save(conversation_id, content, steps=None, model=None):
+    async def fake_save(conversation_id, content, steps=None, model=None, trace_id=None):
         saved.append((content, steps))
 
     monkeypatch.setattr(turns, "save_assistant_message", fake_save)
