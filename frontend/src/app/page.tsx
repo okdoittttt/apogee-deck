@@ -41,6 +41,7 @@ import {
   getModels,
   listConversations,
   listProjects,
+  stopConversation,
   streamChat,
   uploadDocument,
 } from "@/lib/api";
@@ -153,6 +154,8 @@ function ChatApp({
   const queuedRef = useRef<QueuedMessage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  // 새 대화의 ID 를 받기 전에 중지를 누르면, ID 를 받자마자 중지한다.
+  const stopRequestedRef = useRef(false);
   // 메시지 목록의 스크롤 영역과 그 높이 (보낸 메시지를 맨 위로 올릴 빈 공간을 계산한다)
   const [scrollBox, setScrollBox] = useState<HTMLDivElement | null>(null);
   const [scrollBoxHeight, setScrollBoxHeight] = useState(0);
@@ -485,6 +488,26 @@ function ChatApp({
     return false;
   }
 
+  /**
+   * 응답을 멈춘다. 응답은 서버의 백그라운드 작업이라(새로고침해도 이어진다) 연결을 끊지 않고 중지 API 를 부른다.
+   * 서버가 저장을 마치면 스트림에 stopped 가 오고 스트림이 닫힌다.
+   */
+  async function stopReply() {
+    const id = conversationIdRef.current;
+    if (!id) {
+      stopRequestedRef.current = true; // 새 대화의 ID 를 아직 못 받았다: 받으면 바로 중지한다
+      return;
+    }
+    stopRequestedRef.current = false;
+    try {
+      await stopConversation(id);
+    } catch (e) {
+      // 중지 요청이 실패하면(네트워크 등) 이 창이라도 기다리지 않게 연결을 끊는다.
+      setToast((e as Error).message);
+      abortRef.current?.abort();
+    }
+  }
+
   async function openConversation(id: string, history: HistoryMode = "push") {
     if (history !== "none" && navigationBlocked()) return;
     setError(null);
@@ -681,6 +704,7 @@ function ChatApp({
 
     const controller = new AbortController();
     abortRef.current = controller;
+    stopRequestedRef.current = false;
     const isNew = conversationIdRef.current === null;
     // 응답이 어떻게 끝났는지. done 이벤트 없이 스트림이 닫히면(연결 끊김) "ended".
     // 콜백 안에서 바뀌므로 TS 가 "ended" 로만 좁히지 않게 타입을 명시한다.
@@ -702,6 +726,10 @@ function ChatApp({
             setActiveConversation(conversation_id);
             // 빈 화면이 이 대화가 됐다: 뒤로 가기에 빈 화면이 끼지 않게 주소를 바꾼다.
             setUrl(conversationPath(conversation_id), "replace");
+            if (stopRequestedRef.current) void stopReply();
+          },
+          onStopped: () => {
+            outcome = "aborted";
           },
           onDelta: appendToAssistant,
           onReasoning: appendReasoning,
@@ -858,7 +886,7 @@ function ChatApp({
       documentsEnabled={info?.documents?.enabled ?? false}
       documentExtensions={info?.documents?.extensions ?? []}
       onSend={submit}
-      onStop={() => abortRef.current?.abort()}
+      onStop={() => void stopReply()}
       streaming={streaming}
       queueFull={queued !== null}
       modelPicker={

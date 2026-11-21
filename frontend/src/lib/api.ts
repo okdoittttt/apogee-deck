@@ -252,8 +252,19 @@ export interface StreamHandlers {
    * 잠시 후 다시 보내면 풀릴 수 있는 오류인지 나타낸다.
    */
   onError?: (message: string, info: { transient: boolean }) => void;
+  /** 응답이 중지됨 (이 창이나 다른 창에서 중지 버튼). 그때까지의 응답은 서버가 저장했다. */
+  onStopped?: () => void;
   /** 같은 대화의 응답이 다른 창에서 생성 중이라 거절됨 (409). 메시지는 저장되지 않았다. */
   onBusy?: (detail: string) => void;
+}
+
+/**
+ * 진행 중인 응답을 멈춘다. 서버가 그때까지의 응답을 저장하고 생성 중 표시를 푼 뒤에 돌려준다.
+ * 응답은 서버의 백그라운드 작업이라, 연결을 끊는 것만으로는 멈추지 않는다.
+ */
+export async function stopConversation(id: string): Promise<void> {
+  const res = await apiFetch(`/api/conversations/${id}/stop`, { method: "POST" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `중지 실패 (${res.status})`);
 }
 
 /** POST /api/chat 의 SSE 응답을 읽어 이벤트별 핸들러를 호출한다. */
@@ -330,6 +341,9 @@ export async function streamChat(
           break;
         case "error":
           handlers.onError?.(payload.message, { transient: payload.transient === true });
+          break;
+        case "stopped":
+          handlers.onStopped?.();
           break;
       }
     }
