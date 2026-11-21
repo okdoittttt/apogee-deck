@@ -243,7 +243,12 @@ def _default_compact(message: ToolMessage, args: dict[str, Any]) -> str | None:
         lines = [f"[Earlier {name} result, shortened. Call it again if you need the details.]"]
         if called:
             lines.append(called)
-        for n, source in enumerate(sources, 1):
+        for i, source in enumerate(sources, 1):
+            n = source.get("n") or i
+            if source.get("type") == "document":
+                where = f" · {source['location']}" if source.get("location") else ""
+                lines.append(f"[{n}] {source.get('title', '')}{where}")
+                continue
             date = f" ({source['published_date']})" if source.get("published_date") else ""
             lines.append(f"[{n}] {source.get('title', '')} - {source.get('url', '')}{date}")
         return "\n".join(lines)

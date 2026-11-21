@@ -101,11 +101,13 @@ class Source(BaseModel):
         title: 페이지 제목.
         url: 페이지 주소.
         published_date: 발행일 (``YYYY-MM-DD``). 모르면 ``None``.
+        n: 답변 속 출처 번호 (``[3]``). 한 턴 안에서 이어진다. 예전 출처는 ``None``.
     """
 
     title: str
     url: str
     published_date: str | None = None
+    n: int | None = None
 
 
 class DocumentSource(BaseModel):
@@ -119,6 +121,7 @@ class DocumentSource(BaseModel):
         location: 쪽과 제목 경로 (예: ``"p.3 · 1장 > 1.1"``). 없으면 빈 문자열.
         image_element_id: 그림 결과면 그림 요소 ID (``GET /api/projects/{id}/images/{element_id}``).
         chunk_id: 검색 결과 청크 ID (문서 보기 패널에서 근거 위치를 강조할 때). 예전 출처는 ``None``.
+        n: 답변 속 출처 번호 (``[3]``). 한 턴 안에서 이어진다. 예전 출처는 ``None``.
     """
 
     type: Literal["document"]
@@ -128,6 +131,7 @@ class DocumentSource(BaseModel):
     location: str = ""
     image_element_id: str | None = None
     chunk_id: str | None = None
+    n: int | None = None
 
 
 class ToolStep(BaseModel):

@@ -177,10 +177,13 @@ def test_format_results_for_model():
     text = search.format_results(SearchRequest("기준금리", "news"), results, TODAY)
     assert text.startswith('Web search results for "기준금리" (topic: news).')
     assert (
-        "[1] Title A\nURL: https://a.example\nPublished: 2026-10-22 (28 days ago)\n본문 A" in text
+        "⟦source:1⟧ Title A\nURL: https://a.example\nPublished: 2026-10-22 (28 days ago)\n본문 A"
+        in text
     )
     assert "Today is 2026-11-19." in text
-    assert "[2] Title B\nURL: https://b.example\n본문 B" in text  # 발행일 없으면 줄을 넣지 않는다
+    assert (
+        "⟦source:2⟧ Title B\nURL: https://b.example\n본문 B" in text
+    )  # 발행일 없으면 줄을 넣지 않는다
     assert "Do not write a sources" in text  # 출처 목록은 화면이 보여준다
     assert "may be outdated" in search.format_results(SearchRequest("q"), results, TODAY)
 
@@ -282,8 +285,10 @@ async def test_web_search_result_reaches_model_and_screen(monkeypatch):
             "title": "한은 기준금리 3.00%",
             "url": "https://bok.example",
             "published_date": "2026-10-22",
+            "n": 1,
         }
     ]
+    assert "[1] 한은 기준금리 3.00%" in finished.output  # 자리 표시가 번호로 바뀌었다
     assert isinstance(events[-1], Finished) and "Published: 2026-10-22" in events[-1].text
 
 
@@ -310,7 +315,7 @@ def test_tool_sources_keeps_only_web_urls():
         ]
     }
     assert tool_sources(artifact) == [
-        {"title": "ok", "url": "https://a.example", "published_date": None},
-        {"title": "http://b.example", "url": "http://b.example", "published_date": None},
+        {"title": "ok", "url": "https://a.example", "published_date": None, "n": None},
+        {"title": "http://b.example", "url": "http://b.example", "published_date": None, "n": None},
     ]
     assert tool_sources(None) == [] and tool_sources("text") == []

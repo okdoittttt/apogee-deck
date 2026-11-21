@@ -178,7 +178,8 @@ LONG = Page(
 def test_long_page_is_shown_in_parts():
     first = fetch.format_page(LONG, 0, 1000, TODAY)
     assert (
-        "Page: Guide\nURL: https://docs.example/guide\nPublished: 2026-11-16 (3 days ago)" in first
+        "Page ⟦source:1⟧: Guide\nURL: https://docs.example/guide\nPublished: 2026-11-16 (3 days ago)"
+        in first
     )
     assert "Showing characters 0-" in first and "Call fetch_url again with offset=" in first
     next_offset = int(first.split("offset=")[1].split(" ")[0])
@@ -242,6 +243,13 @@ async def test_fetch_url_result_reaches_model_and_screen(monkeypatch):
     [finished] = [e for e in events if isinstance(e, ToolFinished)]
     assert finished.status == "done"
     assert finished.sources == [
-        {"title": "Guide", "url": "https://docs.example/guide", "published_date": "2026-11-16"}
+        {
+            "title": "Guide",
+            "url": "https://docs.example/guide",
+            "published_date": "2026-11-16",
+            "n": 1,
+        }
     ]
+    # 모델에게 간 결과에는 자리 표시 대신 번호가 들어 있다
+    assert "Page [1]: Guide" in finished.output
     assert isinstance(events[-1], Finished) and "0번째 줄입니다" in events[-1].text

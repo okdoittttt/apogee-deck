@@ -227,16 +227,18 @@ def _hit(**kw):
 
 def test_format_hits_shows_document_location_and_kind():
     text = search.format_hits("서울 매출", [_hit(kind="image", page_end=4)])
-    assert "[1] document: 보고서.pdf (document_id: " in text
+    assert "⟦source:1⟧ document: 보고서.pdf (document_id: " in text
     assert "pages 3-4 | section: 1장 | description of an image" in text
     assert "서울 매출은 120억 원이다." in text
+    assert "only by their numbers" in text  # 문서 이름·쪽으로 따로 적지 않게 한다
     assert "No passages found" in search.format_hits("x", [])
 
 
-def test_sources_are_deduplicated_and_validated_for_the_screen():
+def test_sources_are_one_per_hit_and_validated_for_the_screen():
     project_id = uuid.uuid4()
     hit = _hit(image_element_id=uuid.uuid4())
-    found = search.sources(project_id, [hit, hit, _hit(page_start=None, heading=None)])
+    # 결과 하나가 출처 하나다 (같은 위치라도 합치지 않는다: 모델에게 준 번호와 카드가 맞아야 한다)
+    found = search.sources(project_id, [hit, _hit(page_start=None, heading=None)])
     assert len(found) == 2
     assert found[0]["location"] == "p.3 · 1장"
     assert found[1]["location"] == ""

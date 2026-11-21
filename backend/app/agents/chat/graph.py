@@ -31,6 +31,7 @@ from app.images import resolve_images
 from app.llm import build_chat_model, build_summary_model, with_prompt_cache
 from app.llm.catalog import model_id
 from app.orchestration import summary
+from app.orchestration.citations import number_sources
 from app.orchestration.context import (
     compact_old_tool_results,
     drop_foreign_reasoning,
@@ -207,7 +208,14 @@ def build_graph(settings: Settings, checkpointer: BaseCheckpointSaver) -> Compil
 
     if tools:
         # 도구가 실패해도 응답 전체가 실패하지 않게, 예외를 모델이 읽을 오류 결과로 바꾼다.
-        builder.add_node("tools", ToolNode(tools, handle_tool_errors=handle_tool_error))
+        tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
+
+        async def run_tools(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+            # 출처 번호는 도구가 아니라 여기서 한 턴 단위로 매긴다 (동시에 실행된 도구도 번호가 겹치지 않게).
+            result = await tool_node.ainvoke(state, config)
+            return {"messages": number_sources(state["messages"], result["messages"])}
+
+        builder.add_node("tools", run_tools)
         builder.add_conditional_edges(AGENT_NODE, tools_condition)
         builder.add_edge("tools", AGENT_NODE)
     else:

@@ -20,6 +20,7 @@ from langchain_core.embeddings import Embeddings
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.citations import source_marker
 from app.core.config import Settings
 from app.documents import chunking, keywords
 from app.llm import embeddings
@@ -286,7 +287,8 @@ def format_hits(query: str, hits: list[SearchHit], document: str | None = None) 
         document: 문서 하나로 좁혀 찾았으면 그 문서 이름.
 
     Returns:
-        결과마다 번호, 문서 이름·ID, 쪽, 제목 경로, 종류와 본문을 담은 글.
+        결과마다 번호 자리 표시(``source_marker``), 문서 이름·ID, 쪽, 제목 경로, 종류와 본문을 담은 글.
+        자리 표시는 도구 노드가 끝나면 한 턴 안에서 이어지는 번호로 바뀐다.
     """
     where = f"the project document {document!r}" if document else "the project documents"
     if not hits:
@@ -310,12 +312,20 @@ def format_hits(query: str, hits: list[SearchHit], document: str | None = None) 
             meta.append("description of an image")
         elif hit.kind == "table":
             meta.append("table")
-        lines.append(f"\n[{i}] {' | '.join(meta)}\n{hit.content}")
+        lines.append(f"\n{source_marker(i)} {' | '.join(meta)}\n{hit.content}")
+    # 웹 검색 결과처럼 끝에 인용 방법을 붙인다. 없으면 모델이 문서 이름·쪽(【…】)으로 따로 적는다.
+    lines.append(
+        "\nCite the passages you use only by their numbers, such as [2]. Do not add document "
+        "names or pages to a citation and do not use other citation formats such as 【…】: "
+        "the app shows the document and page next to each number."
+    )
     return "\n".join(lines)
 
 
 def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]]:
-    """검색 결과를 화면의 출처 카드 목록으로 만든다 (도구 artifact). 같은 문서·위치는 한 번만 넣는다.
+    """검색 결과를 화면의 출처 카드 목록으로 만든다 (도구 artifact).
+
+    결과 하나가 출처 하나다 (모델에게 준 번호와 순서가 같아야 답변 속 번호가 카드와 맞는다).
 
     Args:
         project_id: 프로젝트 ID (그림 미리보기 주소에 쓴다).
@@ -323,11 +333,9 @@ def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]
 
     Returns:
         ``{"type": "document", "title", "document_id", "project_id", "location", "image_element_id",
-        "chunk_id"}`` 목록. ``chunk_id`` 는 문서 보기 패널에서 근거 위치를 강조할 때 쓴다
-        (같은 위치의 청크가 여럿이면 가장 앞선 것).
+        "chunk_id"}`` 목록. ``chunk_id`` 는 문서 보기 패널에서 근거 위치를 강조할 때 쓴다.
     """
     found: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str | None]] = set()
     for hit in hits:
         parts = []
         if hit.page_start is not None:
@@ -340,10 +348,6 @@ def sources(project_id: uuid.UUID, hits: list[SearchHit]) -> list[dict[str, Any]
             parts.append(hit.heading)
         location = " · ".join(parts)
         image = str(hit.image_element_id) if hit.image_element_id else None
-        key = (str(hit.document_id), location, image)
-        if key in seen:
-            continue
-        seen.add(key)
         found.append(
             {
                 "type": "document",

@@ -138,7 +138,7 @@ def reasoning_text(message: BaseMessage) -> str:
     return "".join(parts)
 
 
-def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
+def tool_sources(artifact: Any) -> list[dict[str, Any]]:
     """도구 결과의 artifact 에서 화면에 보여줄 출처 목록을 꺼낸다.
 
     출처가 있는 도구는 ``response_format="content_and_artifact"`` 로 선언하고 ``{"sources": [...]}`` 를
@@ -148,6 +148,8 @@ def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
     - 프로젝트 문서 (``"type": "document"``): ``{"title", "document_id", "project_id", "location",
       "image_element_id", "chunk_id"}``. ID 는 UUID 형식만 남긴다.
 
+    두 종류 모두 한 턴 안의 출처 번호 ``n`` 을 함께 남긴다 (``app.orchestration.citations``).
+
     Args:
         artifact: ``ToolMessage.artifact``.
 
@@ -156,7 +158,7 @@ def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
     """
     if not isinstance(artifact, dict):
         return []
-    sources: list[dict[str, str | None]] = []
+    sources: list[dict[str, Any]] = []
     for item in artifact.get("sources") or []:
         if not isinstance(item, dict):
             continue
@@ -172,9 +174,15 @@ def tool_sources(artifact: Any) -> list[dict[str, str | None]]:
                 "title": str(item.get("title") or url),
                 "url": url,
                 "published_date": item.get("published_date"),
+                "n": _number_or_none(item.get("n")),
             }
         )
     return sources
+
+
+def _number_or_none(value: Any) -> int | None:
+    """출처 번호. 양의 정수가 아니면 ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _uuid_or_none(value: Any) -> str | None:
@@ -184,7 +192,7 @@ def _uuid_or_none(value: Any) -> str | None:
         return None
 
 
-def _document_source(item: dict[str, Any]) -> dict[str, str | None] | None:
+def _document_source(item: dict[str, Any]) -> dict[str, Any] | None:
     """프로젝트 문서 출처를 검사해서 화면에 줄 값만 남긴다. 문서·프로젝트 ID 가 없으면 ``None``."""
     document_id = _uuid_or_none(item.get("document_id"))
     project_id = _uuid_or_none(item.get("project_id"))
@@ -198,6 +206,7 @@ def _document_source(item: dict[str, Any]) -> dict[str, str | None] | None:
         "location": str(item.get("location") or ""),
         "image_element_id": _uuid_or_none(item.get("image_element_id")),
         "chunk_id": _uuid_or_none(item.get("chunk_id")),
+        "n": _number_or_none(item.get("n")),
     }
 
 
