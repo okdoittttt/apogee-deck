@@ -1,21 +1,28 @@
 "use client";
 
 import "katex/dist/katex.min.css";
-import ReactMarkdown, { type Options as MarkdownOptions } from "react-markdown";
+import { useMemo } from "react";
+import ReactMarkdown, { type Components, type Options as MarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { type ChatMessage, documentFileUrl } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
+import { citationNumber, remarkCitations } from "@/lib/citations";
 import { normalizeMath } from "@/lib/math";
 import { FileChip } from "./FileChip";
 import { LogoIcon } from "./icons";
-import { Sources } from "./Sources";
+import { Citation, collectSources, Sources } from "./Sources";
 import { Steps } from "./Steps";
 
 // 수식: `$` 한 개는 금액과 헷갈리므로 끈다 (lib/math.ts 가 \( \) 를 $$ $$ 로 바꾼다).
 // 문법이 틀린 수식은 오류 대신 원문을 빨갛게 보여준다.
-const REMARK_PLUGINS: MarkdownOptions["remarkPlugins"] = [remarkGfm, [remarkMath, { singleDollarTextMath: false }]];
+// 출처 번호([3])는 링크로 바꿔 칩으로 그린다 (lib/citations.ts).
+const REMARK_PLUGINS: MarkdownOptions["remarkPlugins"] = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+  remarkCitations,
+];
 const REHYPE_PLUGINS: MarkdownOptions["rehypePlugins"] = [[rehypeKatex, { throwOnError: false }]];
 
 function TypingDots() {
@@ -85,6 +92,21 @@ function AssistantMessage({
   const stepInProgress =
     (message.thinking ?? false) || (last?.type === "tool" && last.status === "running");
   const showDots = active && !message.content && !stepInProgress;
+  // 답변 속 [3] 을 같은 번호의 출처 카드와 잇는다.
+  const components = useMemo<Components>(() => {
+    const byNumber = new Map(collectSources(steps).map(({ n, source }) => [n, source]));
+    return {
+      a: ({ href, children, node: _node, ...rest }) => {
+        const n = citationNumber(href);
+        if (n !== null) return <Citation n={n} source={byNumber.get(n)} />;
+        return (
+          <a href={href} {...rest}>
+            {children}
+          </a>
+        );
+      },
+    };
+  }, [steps]);
 
   return (
     <div className="flex gap-3">
@@ -93,7 +115,11 @@ function AssistantMessage({
         {steps.length > 0 && <Steps steps={steps} thinking={active && (message.thinking ?? false)} />}
         {message.content && (
           <div className="prose prose-neutral max-w-none text-[15px] leading-relaxed text-fg dark:prose-invert prose-p:my-2.5 prose-pre:rounded-xl prose-pre:border prose-pre:border-line prose-code:before:content-none prose-code:after:content-none">
-            <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+            <ReactMarkdown
+              remarkPlugins={REMARK_PLUGINS}
+              rehypePlugins={REHYPE_PLUGINS}
+              components={components}
+            >
               {normalizeMath(message.content)}
             </ReactMarkdown>
           </div>

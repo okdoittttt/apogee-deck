@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { projectImageUrl } from "@/lib/api";
+import type { ViewerTarget } from "./DocumentViewer";
 import type { DocumentSource, Source, Step, WebSource } from "@/lib/api";
 import { pageOfLocation, useOpenDocument } from "./DocumentViewer";
 import { FileIcon, GlobeIcon } from "./icons";
@@ -9,16 +10,27 @@ import { FileIcon, GlobeIcon } from "./icons";
 /** 처음에 보여줄 출처 수. 나머지는 "더 보기" 로 펼친다. */
 const INITIAL_COUNT = 4;
 
+/** 번호가 붙은 출처. 번호는 답변 속 `[3]` 과 같다. */
+export interface NumberedSource {
+  n: number;
+  source: Source;
+}
+
 function sourceKey(source: Source): string {
+  // 번호가 있으면 같은 번호가 같은 출처다 (한 턴에서 다시 나온 출처는 앞의 번호를 쓴다).
+  if (source.n) return `n:${source.n}`;
   return source.type === "document"
     ? `doc:${source.document_id}:${source.location}:${source.image_element_id ?? ""}`
     : `web:${source.url}`;
 }
 
-/** 응답의 도구 단계에서 출처를 모은다. 여러 번 찾았으면 순서대로 합치고 같은 출처는 한 번만 넣는다. */
-function collectSources(steps: Step[]): Source[] {
+/**
+ * 응답의 도구 단계에서 출처를 모은다. 여러 번 찾았으면 합치고 같은 출처는 한 번만 넣는다.
+ * 서버가 매긴 번호(n)가 있으면 그 번호 순서로, 없으면(예전 메시지) 나온 순서대로 번호를 매긴다.
+ */
+export function collectSources(steps: Step[]): NumberedSource[] {
   const seen = new Set<string>();
-  const sources: Source[] = [];
+  const sources: NumberedSource[] = [];
   for (const step of steps) {
     if (step.type !== "tool") continue;
     for (const source of step.sources ?? []) {
@@ -27,10 +39,59 @@ function collectSources(steps: Step[]): Source[] {
       const key = sourceKey(source);
       if (seen.has(key)) continue;
       seen.add(key);
-      sources.push(source);
+      sources.push({ n: source.n ?? sources.length + 1, source });
     }
   }
-  return sources;
+  return sources.sort((a, b) => a.n - b.n);
+}
+
+/** 문서 출처를 문서 보기 패널에 띄울 대상으로 바꾼다. */
+function viewerTarget(source: DocumentSource): ViewerTarget {
+  return {
+    projectId: source.project_id,
+    documentId: source.document_id,
+    title: source.title,
+    chunkId: source.chunk_id ?? null,
+    page: pageOfLocation(source.location),
+  };
+}
+
+const CITATION_CLASS =
+  "mx-0.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-md bg-hover px-1 align-[2px] font-sans text-[10.5px] font-medium leading-none text-muted no-underline hover:bg-active hover:text-fg";
+
+/**
+ * 답변 속 출처 번호 칩. 프로젝트 문서는 문서 보기 패널에서 근거 위치를 열고, 웹은 새 탭에서 연다.
+ * 맞는 출처가 없으면(모델이 없는 번호를 쓴 경우) 글자 그대로 둔다.
+ */
+export function Citation({ n, source }: { n: number; source?: Source }) {
+  const openDocument = useOpenDocument();
+  if (!source) return <>[{n}]</>;
+  if (source.type === "document") {
+    return (
+      <button
+        type="button"
+        disabled={!openDocument}
+        onClick={() => openDocument?.(viewerTarget(source))}
+        className={CITATION_CLASS}
+        title={source.location ? `${source.title} · ${source.location}` : source.title}
+        aria-label={`출처 ${n}: ${source.title}`}
+      >
+        {n}
+      </button>
+    );
+  }
+  return (
+    <a
+      href={source.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={CITATION_CLASS}
+      title={`${source.title}\n${hostname(source.url)}`}
+      aria-label={`출처 ${n}: ${source.title}`}
+    >
+      {n}
+    </a>
+  );
 }
 
 function hostname(url: string): string {
@@ -73,15 +134,7 @@ function DocumentCard({ source, index }: { source: DocumentSource; index: number
     <button
       type="button"
       disabled={!openDocument}
-      onClick={() =>
-        openDocument?.({
-          projectId: source.project_id,
-          documentId: source.document_id,
-          title: source.title,
-          chunkId: source.chunk_id ?? null,
-          page: pageOfLocation(source.location),
-        })
-      }
+      onClick={() => openDocument?.(viewerTarget(source))}
       className="flex h-full w-full gap-2.5 rounded-xl border border-line px-3 py-2 text-left enabled:hover:bg-hover"
       title={`${label}\n눌러서 문서에서 보기`}
     >
@@ -115,7 +168,7 @@ export function Sources({ steps }: { steps: Step[] }) {
   if (sources.length === 0) return null;
   const visible = expanded ? sources : sources.slice(0, INITIAL_COUNT);
   const hidden = sources.length - visible.length;
-  const onlyDocuments = sources.every((s) => s.type === "document");
+  const onlyDocuments = sources.every(({ source }) => source.type === "document");
 
   return (
     <section className="mt-4" aria-label="출처">
@@ -124,12 +177,12 @@ export function Sources({ steps }: { steps: Step[] }) {
         출처 {sources.length}
       </div>
       <ol className="grid gap-2 sm:grid-cols-2">
-        {visible.map((source, i) => (
+        {visible.map(({ n, source }) => (
           <li key={sourceKey(source)} className="min-w-0">
             {source.type === "document" ? (
-              <DocumentCard source={source} index={i + 1} />
+              <DocumentCard source={source} index={n} />
             ) : (
-              <WebCard source={source} index={i + 1} />
+              <WebCard source={source} index={n} />
             )}
           </li>
         ))}

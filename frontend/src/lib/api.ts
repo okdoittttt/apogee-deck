@@ -39,6 +39,7 @@ export interface WebSource {
   title: string;
   url: string;
   published_date: string | null;
+  n?: number | null; // 답변 속 출처 번호 ([3]). 한 턴 안에서 이어진다. 예전 출처에는 없다.
 }
 
 /** 도구가 참고한 프로젝트 문서 위치 (프로젝트 문서 검색 결과). */
@@ -50,6 +51,7 @@ export interface DocumentSource {
   location: string; // 쪽과 제목 경로 (예: "p.3 · 1장 > 1.1"), 없으면 빈 문자열
   image_element_id: string | null; // 그림 결과면 그림 요소 ID (미리보기)
   chunk_id?: string | null; // 검색 결과 청크 ID (문서 보기 패널에서 근거 위치 강조). 예전 출처에는 없다.
+  n?: number | null; // 답변 속 출처 번호 ([3]). 한 턴 안에서 이어진다. 예전 출처에는 없다.
 }
 
 export type Source = WebSource | DocumentSource;
