@@ -572,7 +572,9 @@ def search_docs(query: str) -> str:
 
 # app/tools/registry.py
 TOOLS["search_docs"] = ToolSpec(
-    lambda settings: search_docs, ToolLabel(running="문서를 검색하는 중", done="문서 검색함")
+    lambda settings: search_docs,
+    ToolLabel(running="문서를 검색하는 중", done="문서 검색함"),
+    "documents",  # 도구 그룹 (GROUPS). 도구 결정이 이 단위로 고른다
 )
 
 # app/agents/chat/graph.py
@@ -583,6 +585,36 @@ TOOL_NAMES = ("get_current_time", ..., "search_docs")
 - 도구 안에서 예외가 나도 응답 전체가 실패하지 않습니다. `ToolNode`가 예외를 오류 결과로 바꾸고 화면에는 "실패"로 표시합니다.
   모델에게 알려줄 문구가 있으면 `app.core.errors.ToolError("짧은 영어 문구")`를 던지세요. 그 외 예외는 원문을 로그에만 남기고 일반 문구를 줍니다.
 - 한 턴에 그래프 단계는 16번까지입니다(`tooling.RECURSION_LIMIT`, 도구 호출 약 7번). 넘으면 사용자에게 안내 문구를 보여줍니다.
+- 도구마다 그룹(`time`, `web`, `documents`, `memory`)을 정합니다. 새 그룹을 만들면 `GROUPS`에 결정 모델에게 물을 예/아니오 질문(영어)도 같이 씁니다.
+
+### 도구 결정 (d3)
+도구 정의도 매 요청 프롬프트 토큰입니다. `ENABLE_TOOL_DECISION=true`로 켜면, 본 모델을 부르기 전에 결정 모델
+[d3](https://ollama.com/library/d3)(vLLM Semantic Router 의 open-weight 결정 모델, Ollama 로 서빙)가 턴마다 이번 메시지에 필요한
+도구 그룹을 고르고, 본 모델에게는 그 그룹의 도구만 줍니다. 기본은 꺼짐이고, 끄면 쓸 수 있는 도구를 모두 줍니다.
+
+```bash
+ollama pull d3:2b   # 3.1 GB, Ollama 0.40.9 이상
+```
+
+- **고르는 방법**: 그룹마다 예/아니오 질문을 요청 한 번(`/v1/systemone`)에 묻습니다. d3 는 글을 생성하지 않고 확률만 돌려줘서
+  빠르고 형식 오류가 없습니다. 확률이 `TOOL_DECISION_THRESHOLD` 이상인 그룹을 켜고, 모두 낮으면 도구 없이 답합니다.
+  "두 번째 기사 더 자세히" 같은 이어지는 질문을 판단하도록 직전 메시지 2개를 함께 보냅니다(첨부 문서 본문은 빼고).
+- **누적**: 한 번 켜진 그룹은 그 대화에서 계속 줍니다. 도구 정의는 프롬프트 맨 앞에 있어서 목록이 바뀌면 대화 이력 전체가
+  프롬프트 캐시에서 빠지기 때문입니다. 이미 켜진 그룹은 다시 묻지 않고, 이전에 실제로 부른 도구의 그룹도 켜진 것으로 봅니다.
+- **강제 규칙**: 이번 메시지에 첨부 문서가 있으면 `documents`를 묻지 않고 켭니다. 이번 턴에 쓸 수 없는 그룹(기억을 끈 사용자,
+  프로젝트 밖의 프로젝트 검색)은 묻지 않습니다.
+- **실패**: Ollama 에 연결하지 못하거나, 모델이 없거나, 시간을 넘기면 경고만 남기고 이번 턴은 도구를 모두 줍니다.
+- **관측**: Langfuse 트레이스에 `tool_decision` 단계로 보낸 상태·질문과 그룹별 확률이 남습니다.
+- **비용**: 로컬이라 호출 비용은 없고, 첫 토큰이 약 0.1~0.2초 늦어집니다(M5 Pro 실측, 모델을 처음 불러올 때는 약 0.8초).
+
+| 설정 | 기본값 | 의미 |
+|---|---|---|
+| `ENABLE_TOOL_DECISION` | `false` | 도구 결정 켜기 |
+| `TOOL_DECISION_MODEL` | `d3:2b` | 결정 모델 (Ollama) |
+| `TOOL_DECISION_URL` | (비움) | 결정 모델을 서빙하는 Ollama 주소. 비우면 `OLLAMA_BASE_URL` |
+| `TOOL_DECISION_THRESHOLD` | `0.5` | 그룹을 켜는 확률 기준 |
+| `TOOL_DECISION_TIMEOUT_SECONDS` | `3.0` | 넘으면 이번 턴은 도구를 모두 줍니다 |
+| `TOOL_DECISION_KEEP_ALIVE` | `30m` | 결정 모델을 메모리에 남겨 둘 시간 |
 
 ### 웹 검색 (Tavily)
 `.env`에 `TAVILY_API_KEY`를 넣으면 `web_search` 도구가 켜집니다. 키는 [app.tavily.com](https://app.tavily.com)에서 받으며, 무료 플랜은 매월 1,000크레딧입니다.
