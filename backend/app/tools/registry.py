@@ -15,6 +15,12 @@ from langchain_core.tools import BaseTool
 
 from app.core.config import Settings
 from app.tools.documents import make_read_document, make_search_project
+from app.tools.memory import (
+    make_forget,
+    make_remember,
+    make_search_memories,
+    make_update_profile,
+)
 from app.tools.time import get_current_time
 from app.tools.web import make_fetch_url, make_web_search
 
@@ -67,6 +73,11 @@ def _fetch_url(settings: Settings) -> BaseTool | None:
     return make_fetch_url(settings) if settings.enable_fetch_url else None
 
 
+def _memory_tool(make: Callable[[Settings], BaseTool]) -> Callable[[Settings], BaseTool | None]:
+    # 기억 기능을 끄면 기억 도구를 모두 뺀다.
+    return lambda settings: make(settings) if settings.enable_memory else None
+
+
 TOOLS: dict[str, ToolSpec] = {
     "get_current_time": ToolSpec(
         lambda _: get_current_time, ToolLabel(running="시간을 확인하는 중", done="시간 확인함")
@@ -78,6 +89,19 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "search_project": ToolSpec(
         make_search_project, ToolLabel(running="프로젝트 문서 찾는 중", done="프로젝트 문서 찾음")
+    ),
+    "remember": ToolSpec(
+        _memory_tool(make_remember), ToolLabel(running="기억하는 중", done="기억함")
+    ),
+    "forget": ToolSpec(
+        _memory_tool(make_forget), ToolLabel(running="기억 지우는 중", done="기억 지움")
+    ),
+    "update_profile": ToolSpec(
+        _memory_tool(make_update_profile),
+        ToolLabel(running="프로필 갱신하는 중", done="프로필 갱신함"),
+    ),
+    "search_memories": ToolSpec(
+        _memory_tool(make_search_memories), ToolLabel(running="기억 찾는 중", done="기억 찾음")
     ),
 }
 

@@ -452,7 +452,12 @@ async def chat(req: ChatRequest, session: SessionDep, user: ApprovedUser) -> Str
     # 응답은 백그라운드에서 만든다 (끝나면 assistant 메시지 저장, 생성 중 표시 해제).
     # 이 응답은 그 실행을 구독할 뿐이라, 연결이 끊겨도(새로고침, 탭 닫기) 실행은 끝까지 돈다.
     run = turns.start_reply(
-        turn.conversation_id, turn.text, turn.images, turn.model, project_id=turn.project_id
+        turn.conversation_id,
+        turn.text,
+        turn.images,
+        turn.model,
+        project_id=turn.project_id,
+        user_id=user.id,
     )
     return StreamingResponse(
         sse_numbered(run.follow()),

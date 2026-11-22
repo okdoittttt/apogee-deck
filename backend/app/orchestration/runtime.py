@@ -1,4 +1,4 @@
-"""에이전트 실행 엔진: 에이전트 등록, checkpointer 생명주기, 스트리밍 실행.
+"""에이전트 실행 엔진: 에이전트 등록, checkpointer·기억 Store 생명주기, 스트리밍 실행.
 
 어떤 에이전트가 있는지는 모른다. 앱이 시작할 때 ``startup`` 에 에이전트 목록(``app.agents.AGENTS``)을
 넘겨 등록한다. 대화 서비스는 이 모듈의 ``stream_reply`` 로 에이전트를 실행한다.
@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.store.base import BaseStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -21,6 +22,7 @@ from app import prompts
 from app.core import tracing
 from app.core.config import Settings, get_settings
 from app.llm.catalog import model_id, settings_for
+from app.memory import store as memory_store
 from app.orchestration.events import (
     AgentEvent,
     Finished,
@@ -51,12 +53,13 @@ class AgentSpec:
     """레지스트리에 등록하는 에이전트 정의.
 
     Attributes:
-        build_graph: ``(settings, checkpointer)`` 를 받아 컴파일된 그래프를 만드는 함수.
+        build_graph: ``(settings, checkpointer, store)`` 를 받아 컴파일된 그래프를 만드는 함수.
+            ``store`` 는 장기 기억 Store 이고, 기억 기능을 끄면 ``None`` 이다.
         stream_nodes: 이 노드들이 생성한 토큰만 사용자에게 스트리밍한다.
         tool_labels: 도구 이름 → 화면 표시 문구. 없는 도구는 기본 문구를 쓴다.
     """
 
-    build_graph: Callable[[Settings, BaseCheckpointSaver], CompiledStateGraph]
+    build_graph: Callable[[Settings, BaseCheckpointSaver, BaseStore | None], CompiledStateGraph]
     stream_nodes: frozenset[str]
     tool_labels: Mapping[str, ToolLabel] = field(default_factory=dict)
 
@@ -66,6 +69,7 @@ _agents: dict[str, AgentSpec] = {}
 _default_agent: str | None = None
 _pool: AsyncConnectionPool | None = None
 _checkpointer: BaseCheckpointSaver | None = None
+_store: BaseStore | None = None
 _graphs: dict[str, CompiledStateGraph] = {}
 """그래프 캐시. 기본 모델은 에이전트 이름, 다른 모델은 ``"<에이전트>@<모델 ID>"`` 가 키다."""
 
@@ -105,7 +109,7 @@ async def startup(agents: Mapping[str, AgentSpec], default: str) -> None:
         PromptError: 프롬프트 검증에 실패했을 때.
         ValueError: ``default`` 가 ``agents`` 에 없을 때.
     """
-    global _pool, _checkpointer
+    global _pool, _checkpointer, _store
     register(agents, default)
     settings = get_settings()
     logger.info("prompts ok: %s", prompts.validate_all())
@@ -126,8 +130,11 @@ async def startup(agents: Mapping[str, AgentSpec], default: str) -> None:
     _checkpointer = AsyncPostgresSaver(_pool)
     # checkpoint 테이블은 LangGraph 가 자체 마이그레이션으로 관리한다 (Alembic 관리 대상 아님).
     await _checkpointer.setup()
+    if settings.enable_memory:
+        # 장기 기억 Store 도 같은 풀을 쓴다 (테이블은 LangGraph 가 자체 마이그레이션으로 관리한다).
+        _store = await memory_store.open_store(_pool, settings)
     for name, spec in _agents.items():
-        _graphs[name] = spec.build_graph(settings, _checkpointer)
+        _graphs[name] = spec.build_graph(settings, _checkpointer, _store)
 
 
 def get_graph(agent: str, model: str | None = None) -> tuple[CompiledStateGraph, str]:
@@ -156,13 +163,14 @@ def get_graph(agent: str, model: str | None = None) -> tuple[CompiledStateGraph,
     spec = _agents.get(agent)
     if spec is None or _checkpointer is None:
         raise RuntimeError(f"agent not available: {agent} (runtime not started or unknown)")
-    graph = spec.build_graph(settings_for(settings, model), _checkpointer)
+    graph = spec.build_graph(settings_for(settings, model), _checkpointer, _store)
     _graphs[key] = graph
     return graph, model
 
 
 async def shutdown() -> None:
-    """Checkpointer 연결 풀을 닫고 남은 트레이스를 전송한다."""
+    """Checkpointer·기억 Store 연결 풀을 닫고 남은 트레이스를 전송한다."""
+    memory_store.set_store(None)
     if _pool is not None:
         await _pool.close()
     tracing.shutdown()

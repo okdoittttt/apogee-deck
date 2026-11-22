@@ -154,6 +154,11 @@ async def test_chat_endpoint_streams_a_background_run(monkeypatch, registry, sav
         "start_turn",
         _fake_start_turn(registry),
     )
+
+    async def memory_enabled(user_id):
+        return True
+
+    monkeypatch.setattr(turns, "_memory_enabled", memory_enabled)
     response = await chat_router.chat(ChatRequest(message="hi"), None, USER)
 
     chunks = []

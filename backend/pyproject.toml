@@ -111,7 +111,7 @@ layers = [
     "app.agents",
     "app.orchestration",
     "app.tools",
-    "app.projects : app.documents : app.web : app.auth : app.images",
+    "app.projects : app.documents : app.web : app.auth : app.images : app.memory",
     "app.llm : app.prompts",
     "app.models",
     "app.core",

@@ -9,13 +9,14 @@ from collections.abc import AsyncIterator
 from typing import Any, NamedTuple
 
 import anyio
+from sqlalchemy import select
 
 from app.conversations import runs
 from app.core import tracing
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.llm import describe_error, is_transient_error
-from app.models import Message
+from app.models import Message, User
 from app.orchestration.events import (
     Finished,
     ReasoningDelta,
@@ -88,6 +89,7 @@ async def run_turn(
     images: list[dict[str, Any]],
     model: str | None = None,
     project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """에이전트 응답을 이벤트로 내보내고, 화면에 보여준 텍스트를 저장한다.
 
@@ -111,6 +113,7 @@ async def run_turn(
         images: 이미지 참조 블록 (``app.images.image_ref_block``).
         model: 응답할 모델 ID. ``None`` 이면 설정의 기본 모델.
         project_id: 대화가 속한 프로젝트 ID. 있으면 프로젝트 정보(지시문, 문서 목록)를 에이전트에게 준다.
+        user_id: 대화의 주인. 있으면 에이전트가 그 사용자의 장기 기억을 쓴다 (사용자가 기억을 껐으면 쓰지 않는다).
 
     Yields:
         ``meta`` → ``delta`` / ``reasoning`` / ``tool_start`` / ``tool_end``... → ``done`` 또는
@@ -123,7 +126,7 @@ async def run_turn(
     outcome = "interrupted"  # 정상 종료나 오류로 바뀌지 않은 채 빠져나가면 중단으로 본다
     try:
         yield StreamEvent("meta", {"conversation_id": run_id})
-        context = await _agent_context(project_id)
+        context = await _agent_context(project_id, user_id)
         async for event in stream_reply(
             run_id, text, images, model=model, context=context, trace_id=trace_id
         ):
@@ -214,6 +217,7 @@ def start_reply(
     images: list[dict[str, Any]],
     model: str | None = None,
     project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> runs.RunStream:
     """응답 실행(``run_turn``)을 백그라운드 작업으로 시작한다. 화면 연결이 끊겨도 끝까지 돌고 저장된다.
 
@@ -223,6 +227,7 @@ def start_reply(
         images: 이미지 참조 블록.
         model: 응답할 모델 ID.
         project_id: 대화가 속한 프로젝트 ID.
+        user_id: 대화의 주인 (장기 기억).
 
     Returns:
         실행 기록. 화면은 ``follow`` / ``follow_events`` 로 구독한다.
@@ -240,7 +245,7 @@ def start_reply(
     )
     return runs.start_run(
         str(conversation_id),
-        run_turn(conversation_id, text, images, model, project_id=project_id),
+        run_turn(conversation_id, text, images, model, project_id=project_id, user_id=user_id),
         max_seconds=max_seconds,
         timeout_event=timeout,
     )
@@ -258,16 +263,34 @@ async def stop_reply(conversation_id: uuid.UUID) -> bool:
     return await runs.cancel_run(str(conversation_id), StreamEvent("stopped", {}))
 
 
-async def _agent_context(project_id: uuid.UUID | None) -> dict[str, Any]:
-    """에이전트에게 넘길 턴 정보. 프로젝트 대화면 이번 턴 시작 시점의 프로젝트 정보를 담는다."""
+async def _memory_enabled(user_id: uuid.UUID) -> bool:
+    """사용자가 장기 기억을 켜 두었는지."""
+    async with SessionLocal() as s:
+        return bool(await s.scalar(select(User.memory_enabled).where(User.id == user_id)))
+
+
+async def _agent_context(
+    project_id: uuid.UUID | None, user_id: uuid.UUID | None = None
+) -> dict[str, Any]:
+    """에이전트에게 넘길 턴 정보.
+
+    사용자를 알면 사용자 ID 와 장기 기억 사용 여부(``user_id``, ``memory_enabled``)를, 프로젝트 대화면 이번 턴
+    시작 시점의 프로젝트 정보(``project``)를 담는다.
+    """
+    context: dict[str, Any] = {}
+    if user_id is not None:
+        context["user_id"] = str(user_id)
+        context["memory_enabled"] = await _memory_enabled(user_id)
     if project_id is None:
-        return {}
+        return context
     settings = get_settings()
     # 모델마다 본문을 넣는 기준이 달라서(Ollama 는 작다) 큰 기준까지 본문을 읽어 두고 에이전트가 고른다.
     content_max = max(settings.project_inline_max_tokens, settings.ollama_project_inline_max_tokens)
     async with SessionLocal() as s:
         project = await projects.load_context(s, project_id, content_max)
-    return {"project": project} if project is not None else {}
+    if project is not None:
+        context["project"] = project
+    return context
 
 
 async def _save_partial(

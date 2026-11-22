@@ -124,6 +124,13 @@ class Settings(BaseSettings):
         project_search_top_k: ``search_project`` 가 돌려줄 청크 수.
         project_search_candidates: 하이브리드 검색에서 벡터·키워드 검색이 각각 뽑을 후보 수 (합치기 전).
         project_search_rrf_k: 결과 합치기(RRF)의 상수 ``k``. 클수록 순위 차이를 덜 반영한다.
+        enable_memory: 장기 기억(사용자 프로필과 기억)을 쓸지. 끄면 기억 도구와 기억 주입이 모두 빠진다.
+            사용자마다 끄는 설정은 따로 있다 (``users.memory_enabled``).
+        memory_recall_limit: 턴마다 사용자 메시지와 관련 있는 기억을 최대 몇 개 넣을지.
+        memory_min_score: 기억을 넣을 최소 유사도(코사인). 이보다 덜 관련된 기억은 넣지 않는다.
+            짧은 한국어 문장끼리는 유사도가 낮게 나온다 (text-embedding-3-small 실측: 관련 0.17~0.32,
+            무관 0.08~0.14).
+            임베딩을 쓸 수 없으면(키 없음) 이 기준 없이 최근 기억을 넣는다.
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -258,6 +265,9 @@ class Settings(BaseSettings):
     project_search_top_k: int = 8
     project_search_candidates: int = 30
     project_search_rrf_k: int = 60
+    enable_memory: bool = True
+    memory_recall_limit: int = 5
+    memory_min_score: float = 0.15
 
     # --- Auth ---
     auth_required: bool = True

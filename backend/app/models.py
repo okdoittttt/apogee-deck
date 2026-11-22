@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
+    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -47,6 +48,7 @@ class User(Base):
         approved_at: 승인된 시각.
         last_login_at: 마지막 로그인 시각.
         is_local: 인증을 끈 개발 환경에서 쓰는 로컬 사용자인지.
+        memory_enabled: 장기 기억을 쓸지. 끄면 저장된 기억은 남지만 대화에서 쓰거나 새로 저장하지 않는다.
     """
 
     __tablename__ = "users"
@@ -63,6 +65,7 @@ class User(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_local: Mapped[bool] = mapped_column(Boolean, default=False)
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
 
 
 class UserSession(Base):
