@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.auth.users import is_admin
 from app.core.config import Settings
+from app.memory.service import MAX_MEMORY_CHARS, MAX_PROFILE_CHARS, Category, Memory
 from app.models import Document, Project, User
 
 MAX_IMAGES_PER_MESSAGE = 4
@@ -450,6 +451,123 @@ class ProjectDetail(ProjectOut):
     conversations: list[ConversationOut]
     used_tokens: int
     max_tokens: int
+
+
+MemoryContent = Annotated[str, Field(min_length=1, max_length=MAX_MEMORY_CHARS, pattern=r"\S")]
+
+
+class MemoryOut(BaseModel):
+    """장기 기억 하나.
+
+    Attributes:
+        id: 기억 ID.
+        content: 내용.
+        category: ``preferences`` | ``work`` | ``personal`` | ``other``.
+        created_at: 처음 저장한 시각.
+        updated_at: 마지막으로 고친 시각.
+    """
+
+    id: str
+    content: str
+    category: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProfileOut(BaseModel):
+    """사용자 프로필.
+
+    Attributes:
+        text: 프로필 글. 없으면 빈 문자열.
+        updated_at: 마지막으로 고친 시각.
+    """
+
+    text: str
+    updated_at: datetime | None
+
+
+class MemoryOverview(BaseModel):
+    """``GET /api/memory`` 응답: 기억 관리 화면에 필요한 모든 것.
+
+    Attributes:
+        available: 서버에서 기억 기능을 쓸 수 있는지 (``ENABLE_MEMORY``).
+        enabled: 내가 기억 기능을 켜 두었는지.
+        profile: 프로필.
+        memories: 기억 목록 (최근에 고친 순).
+        max_memories: 가질 수 있는 기억 수.
+        max_memory_chars: 기억 하나의 최대 글자 수.
+        max_profile_chars: 프로필 최대 글자 수.
+    """
+
+    available: bool
+    enabled: bool
+    profile: ProfileOut
+    memories: list[MemoryOut]
+    max_memories: int
+    max_memory_chars: int
+    max_profile_chars: int
+
+
+class MemoryIn(BaseModel):
+    """``POST /api/memory/memories`` 요청.
+
+    Attributes:
+        content: 내용.
+        category: 카테고리.
+    """
+
+    content: MemoryContent
+    category: Category = "other"
+
+
+class MemoryUpdate(BaseModel):
+    """``PATCH /api/memory/memories/{id}`` 요청. 보낸 값만 바꾼다.
+
+    Attributes:
+        content: 새 내용.
+        category: 새 카테고리.
+    """
+
+    content: MemoryContent | None = None
+    category: Category | None = None
+
+
+class ProfileIn(BaseModel):
+    """``PUT /api/memory/profile`` 요청.
+
+    Attributes:
+        text: 새 프로필 글. 비우면 프로필을 지운다.
+    """
+
+    text: Annotated[str, Field(max_length=MAX_PROFILE_CHARS)]
+
+
+class MemorySettingsIn(BaseModel):
+    """``PUT /api/memory/settings`` 요청.
+
+    Attributes:
+        enabled: 기억 기능을 켤지.
+    """
+
+    enabled: bool
+
+
+def memory_out(memory: Memory) -> MemoryOut:
+    """기억을 응답 형식으로 바꾼다.
+
+    Args:
+        memory: 기억.
+
+    Returns:
+        응답용 기억.
+    """
+    return MemoryOut(
+        id=memory.id,
+        content=memory.content,
+        category=memory.category,
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
+    )
 
 
 MessageOut.model_rebuild()

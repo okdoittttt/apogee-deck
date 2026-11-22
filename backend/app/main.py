@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.agents import AGENTS, DEFAULT_AGENT
 from app.api.routers import admin, approvals, auth, chat
 from app.api.routers import documents as documents_router
+from app.api.routers import memory as memory_router
 from app.api.routers import projects as projects_router
 from app.conversations import runs
 from app.core.config import get_settings
@@ -130,6 +131,7 @@ app.include_router(admin.router)
 app.include_router(chat.router)
 app.include_router(documents_router.router)
 app.include_router(projects_router.router)
+app.include_router(memory_router.router)
 
 
 @app.get("/health")

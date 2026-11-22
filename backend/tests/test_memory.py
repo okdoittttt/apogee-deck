@@ -1,20 +1,25 @@
 """장기 기억 검증: 저장·검색 규칙, 사용자 격리, 기억 도구, 그래프의 기억 주입."""
 
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.agents import chat
+from app.api.routers import memory as memory_router
+from app.api.schemas import MemoryIn, MemorySettingsIn, MemoryUpdate, ProfileIn
 from app.conversations import turns
 from app.core.config import Settings
 from app.llm.embeddings import HashingEmbeddings
 from app.llm.fake import EchoChatModel
 from app.memory import service
+from app.memory import store as memory_store
 from app.memory.service import MemoryInputError, MemoryNotFoundError
 from app.tools.memory import NO_USER, make_forget, make_remember
 
@@ -264,6 +269,84 @@ async def test_recall_failure_does_not_break_the_reply(store, monkeypatch):
     monkeypatch.setattr(service, "get_profile", broken)
     graph = chat.build_graph(SETTINGS, InMemorySaver(), store)
     assert (await _ask(graph, "안녕", _config("u1"))).startswith("[echo · turn 1] 안녕")
+
+
+# --- 기억 관리 API ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api_store(store):
+    memory_store.set_store(store)
+    yield store
+    memory_store.set_store(None)
+
+
+def _user(enabled: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(id=uuid.uuid4(), status="approved", memory_enabled=enabled)
+
+
+async def test_api_manages_only_my_memories(api_store):
+    me, other = _user(), _user()
+    created = await memory_router.add_memory(
+        MemoryIn(content="매운 음식을 좋아한다", category="preferences"), me
+    )
+    await memory_router.set_profile(ProfileIn(text="이름: 오케이"), me)
+
+    overview = await memory_router.overview(me)
+    assert overview.available and overview.enabled
+    assert overview.profile.text == "이름: 오케이"
+    assert [(m.id, m.category) for m in overview.memories] == [(created.id, "preferences")]
+    assert (await memory_router.overview(other)).memories == []
+
+    for call in (
+        memory_router.update_memory(created.id, MemoryUpdate(content="남의 것"), other),
+        memory_router.delete_memory(created.id, other),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 404
+
+    updated = await memory_router.update_memory(created.id, MemoryUpdate(category="other"), me)
+    assert (updated.content, updated.category) == ("매운 음식을 좋아한다", "other")
+    await memory_router.delete_memory(created.id, me)
+    await memory_router.delete_all(me)
+    overview = await memory_router.overview(me)
+    assert overview.memories == [] and overview.profile.text == ""
+
+
+async def test_api_rejects_too_many_memories(api_store, monkeypatch):
+    monkeypatch.setattr(service, "MAX_MEMORIES", 1)
+    me = _user()
+    await memory_router.add_memory(MemoryIn(content="하나"), me)
+    with pytest.raises(HTTPException) as exc:
+        await memory_router.add_memory(MemoryIn(content="둘"), me)
+    assert exc.value.status_code == 422
+
+
+async def test_api_without_a_store():
+    memory_store.set_store(None)
+    overview = await memory_router.overview(_user())
+    assert not overview.available
+    with pytest.raises(HTTPException) as exc:
+        await memory_router.add_memory(MemoryIn(content="하나"), _user())
+    assert exc.value.status_code == 503
+
+
+async def test_api_turns_memory_on_and_off():
+    executed = []
+
+    class Session:
+        async def execute(self, statement):
+            executed.append(statement.compile().params)
+
+        async def commit(self):
+            executed.append("commit")
+
+    me = _user()
+    assert await memory_router.set_enabled(MemorySettingsIn(enabled=False), Session(), me) == {
+        "enabled": False
+    }
+    assert executed[0]["memory_enabled"] is False and executed[1] == "commit"
 
 
 async def test_turn_passes_the_user_and_memory_setting_to_the_agent(monkeypatch):
