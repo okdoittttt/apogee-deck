@@ -12,6 +12,9 @@ from app.documents import reading
 from app.documents import service as documents
 from app.projects import search
 
+PROJECT_TOOL_NAMES = frozenset({"search_project"})
+"""프로젝트 안의 대화에서만 모델에게 주는 도구. ``read_document`` 는 일반 대화의 첨부 문서도 읽으므로 넣지 않는다."""
+
 NOT_IN_PROJECT = (
     "This conversation is not in a project, so there are no project documents to search."
 )

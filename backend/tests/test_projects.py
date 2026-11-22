@@ -67,6 +67,34 @@ async def test_conversation_without_project_has_no_project_section(monkeypatch):
     assert "## Project" not in seen[0][0].text
 
 
+def _spy_bound_tools(monkeypatch) -> list[list[str]]:
+    from app.llm.fake import EchoChatModel
+
+    seen: list[list[str]] = []
+    original = EchoChatModel._astream
+
+    def spy(self, messages, *args, **kwargs):
+        seen.append(list(self.tool_names))
+        return original(self, messages, *args, **kwargs)
+
+    monkeypatch.setattr(EchoChatModel, "_astream", spy)
+    return seen
+
+
+async def test_project_search_tool_is_given_only_inside_a_project(monkeypatch):
+    seen = _spy_bound_tools(monkeypatch)
+    graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
+    monkeypatch.setitem(runtime._graphs, "chat", graph)
+
+    _ = [e async for e in runtime.stream_reply("p4", "안녕")]
+    _ = [e async for e in runtime.stream_reply("p5", "안녕", context={"project": PROJECT})]
+
+    outside, inside = seen
+    # 일반 대화에도 첨부 문서가 있을 수 있어서 read_document 는 남는다
+    assert "search_project" not in outside and "read_document" in outside
+    assert "search_project" in inside and "read_document" in inside
+
+
 async def test_empty_project_says_none(monkeypatch):
     seen = _spy_model_input(monkeypatch)
     graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())

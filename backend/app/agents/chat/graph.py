@@ -22,7 +22,7 @@ import logging
 from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -49,6 +49,7 @@ from app.orchestration.context import (
 )
 from app.orchestration.tooling import handle_tool_error
 from app.tools import build_tools
+from app.tools.documents import PROJECT_TOOL_NAMES
 from app.tools.memory import MEMORY_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,29 @@ def memory_user(config: RunnableConfig) -> str | None:
     return str(configurable["user_id"])
 
 
+def hidden_tools(config: RunnableConfig, *, use_memory: bool) -> frozenset[str]:
+    """이번 턴에 모델에게 보여주지 않을 도구 이름.
+
+    도구 정의도 매 요청 프롬프트에 들어가므로 이번 턴에 쓸 수 없는 도구는 빼서, 토큰을 아끼고 모델이 헛되이
+    부르지 않게 한다. 기억을 쓰지 않는 턴이면 기억 도구를, 프로젝트 밖의 대화면 프로젝트 검색 도구를 뺀다.
+    대화의 프로젝트는 바뀌지 않으므로 한 대화 안에서는 (기억 설정을 바꾸지 않는 한) 도구 목록이 같아서
+    프롬프트 캐시가 유지된다.
+
+    Args:
+        config: 실행 설정. 서버가 ``user_id``, ``memory_enabled``, ``project`` 를 넘긴다.
+        use_memory: 그래프가 장기 기억을 쓰는지 (Store 가 있고 ``enable_memory`` 가 켜짐).
+
+    Returns:
+        뺄 도구 이름.
+    """
+    hidden: set[str] = set()
+    if not use_memory or memory_user(config) is None:
+        hidden |= MEMORY_TOOL_NAMES
+    if (config.get("configurable") or {}).get("project") is None:
+        hidden |= PROJECT_TOOL_NAMES
+    return frozenset(hidden)
+
+
 def with_recalled(messages: list[BaseMessage], block: str) -> list[BaseMessage]:
     """마지막 사용자 메시지 앞에 기억 블록을 붙인 복사본을 돌려준다 (원본 메시지는 바꾸지 않는다).
 
@@ -151,11 +175,7 @@ def build_graph(
     tools = build_tools(settings, TOOL_NAMES) if settings.enable_tools else []
     if not use_memory:
         tools = [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
-    # 기억을 끈 사용자에게는 기억 도구를 보여주지 않는다 (도구 정의도 프롬프트 비용이다).
-    base_tools = [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
     chat_model = build_chat_model(settings)
-    model = chat_model.bind_tools(tools) if tools else chat_model
-    base_model = chat_model.bind_tools(base_tools) if base_tools else chat_model
 
     select_context = make_context_selector(settings)
     count_tokens = make_token_counter(settings)
@@ -172,12 +192,21 @@ def build_graph(
         messages = drop_foreign_reasoning(messages, current_model)
         return compact_old_tool_results(messages) if settings.compact_tool_results else messages
 
-    # 모델 호출을 한 단계(chain)로 감싼다. Langfuse 콜백은 이 단계의 metadata 에 있는
-    # langfuse_prompt 를 보고, 그 아래 LLM 호출(generation)을 해당 프롬프트 버전에 연결한다.
-    call_model = RunnableLambda(with_prompt_cache(model, settings).ainvoke, name="call_model")
-    call_base_model = RunnableLambda(
-        with_prompt_cache(base_model, settings).ainvoke, name="call_model"
-    )
+    callers: dict[frozenset[str], Runnable] = {}
+
+    def call_model(hidden: frozenset[str]) -> Runnable:
+        """``hidden`` 을 뺀 도구를 붙인 모델 호출 단계 (조합마다 처음 쓸 때 한 번 만든다).
+
+        모델 호출을 한 단계(chain)로 감싼다. Langfuse 콜백은 이 단계의 metadata 에 있는
+        langfuse_prompt 를 보고, 그 아래 LLM 호출(generation)을 해당 프롬프트 버전에 연결한다.
+        """
+        if hidden not in callers:
+            visible = [t for t in tools if t.name not in hidden]
+            bound = chat_model.bind_tools(visible) if visible else chat_model
+            callers[hidden] = RunnableLambda(
+                with_prompt_cache(bound, settings).ainvoke, name="call_model"
+            )
+        return callers[hidden]
 
     async def recall(
         state: ChatState, config: RunnableConfig, *, store: BaseStore
@@ -225,7 +254,7 @@ def build_graph(
         ``app.projects.service.ProjectContext``). 대화 이력 예산이 있고 요약이 있으면, 요약을
         system 프롬프트 끝에 붙이고 요약 이후의 메시지만 보낸다. 장기 기억을 쓰는 사용자면 기억 지침과
         프로필을 system 프롬프트에 붙이고, 이번 턴의 관련 기억(``recall`` 노드)을 마지막 사용자 메시지 앞에 붙인다.
-        기억을 끈 사용자에게는 기억 도구가 없는 모델로 호출한다.
+        이번 턴에 쓸 수 없는 도구(기억을 끈 사용자의 기억 도구, 프로젝트 밖 대화의 프로젝트 검색)는 빼고 호출한다.
 
         Args:
             state: 그래프 상태 (전체 대화 이력과 요약).
@@ -267,7 +296,7 @@ def build_graph(
         if user_id is not None and state.get("recalled"):
             recalled = await prompts.arender("chat/recalled_memories", memories=state["recalled"])
             context = with_recalled(context, recalled.text)
-        response = await (call_model if user_id is not None else call_base_model).ainvoke(
+        response = await call_model(hidden_tools(config, use_memory=use_memory)).ainvoke(
             [system, *context],
             config={"metadata": prompt.trace_metadata()},
         )

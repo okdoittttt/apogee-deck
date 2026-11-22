@@ -12,6 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.agents import chat
+from app.agents.chat.graph import hidden_tools
 from app.api.routers import memory as memory_router
 from app.api.schemas import MemoryIn, MemorySettingsIn, MemoryUpdate, ProfileIn
 from app.conversations import turns
@@ -21,6 +22,7 @@ from app.llm.fake import EchoChatModel
 from app.memory import service
 from app.memory import store as memory_store
 from app.memory.service import MemoryInputError, MemoryNotFoundError
+from app.tools.memory import MEMORY_TOOL_NAMES as MEMORY
 from app.tools.memory import NO_USER, make_forget, make_remember
 
 DIMS = 256
@@ -253,6 +255,21 @@ async def test_turned_off_memory_is_not_used_or_saved(store):
     assert "<memories>" not in reply
     assert "user_profile" not in inputs.calls[0][0].text
     assert len(await service.list_memories(store, "u1")) == 1
+
+
+@pytest.mark.parametrize(
+    ("use_memory", "configurable", "hidden"),
+    [
+        (True, {"user_id": "u1", "project": object()}, set()),
+        (True, {"user_id": "u1"}, {"search_project"}),
+        (True, {"user_id": "u1", "memory_enabled": False, "project": object()}, MEMORY),
+        (False, {"user_id": "u1"}, MEMORY | {"search_project"}),
+        (True, {}, MEMORY | {"search_project"}),  # 사용자를 모르면 기억 도구도 없다
+    ],
+)
+def test_tools_unavailable_this_turn_are_hidden(use_memory, configurable, hidden):
+    config = {"configurable": configurable}
+    assert hidden_tools(config, use_memory=use_memory) == hidden
 
 
 async def test_without_a_store_the_graph_has_no_memory():
