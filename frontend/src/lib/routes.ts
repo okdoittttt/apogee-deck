@@ -6,13 +6,15 @@
  * - `/c/{id}`      대화 (프로젝트 안의 대화도 같다)
  * - `/p/{id}`      프로젝트 화면
  * - `/p/new`       새 프로젝트 만들기
+ * - `/memory`      기억 관리
  */
 
 export type Route =
   | { kind: "new" }
   | { kind: "conversation"; id: string }
   | { kind: "project"; id: string }
-  | { kind: "newProject" };
+  | { kind: "newProject" }
+  | { kind: "memory" };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -20,6 +22,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function parseRoute(pathname: string): Route {
   const [kind, id, ...rest] = pathname.split("/").filter(Boolean);
   if (rest.length > 0) return { kind: "new" };
+  if (kind === "memory" && !id) return { kind: "memory" };
   if (kind === "c" && id && UUID.test(id)) return { kind: "conversation", id };
   if (kind === "p" && id === "new") return { kind: "newProject" };
   if (kind === "p" && id && UUID.test(id)) return { kind: "project", id };
@@ -35,6 +38,8 @@ export function routePath(route: Route): string {
       return `/p/${route.id}`;
     case "newProject":
       return "/p/new";
+    case "memory":
+      return "/memory";
     default:
       return "/";
   }

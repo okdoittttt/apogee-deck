@@ -12,6 +12,7 @@ import {
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
 import { ModelPicker } from "@/components/ModelPicker";
+import { MemoryView } from "@/components/MemoryView";
 import { NewProjectForm, ProjectView } from "@/components/ProjectView";
 import { Sidebar } from "@/components/Sidebar";
 import {
@@ -152,6 +153,7 @@ function ChatApp({
   const [projectId, setProjectIdState] = useState<string | null>(null);
   const projectIdRef = useRef<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   // 프로젝트 화면에 끌어다 놓은 파일은 입력창이 아니라 프로젝트 문서로 올린다 (ProjectView 가 등록).
   const projectDropRef = useRef<((files: FileList) => void) | null>(null);
   const registerProjectDrop = useCallback((handler: ((files: FileList) => void) | null) => {
@@ -317,9 +319,11 @@ function ChatApp({
         ? projects.find((p) => p.id === projectId)?.name
         : creatingProject
           ? "새 프로젝트"
-          : null;
+          : memoryOpen
+            ? "기억"
+            : null;
     document.title = title ? `${title} - ${APP_TITLE}` : APP_TITLE;
-  }, [conversationId, conversations, projectId, projects, creatingProject]);
+  }, [conversationId, conversations, projectId, projects, creatingProject, memoryOpen]);
 
   // ⌘K / Ctrl+K: 대화 검색
   useEffect(() => {
@@ -512,6 +516,7 @@ function ChatApp({
       jumpToBottomRef.current = true;
       setPinnedId(null);
       setCreatingProject(false);
+      setMemoryOpen(false);
       setProjectId(conv.project_id ?? null);
       setActiveConversation(conv.id);
       setMessages(conv.messages);
@@ -552,6 +557,7 @@ function ChatApp({
     resetToEmpty();
     setProjectId(null);
     setCreatingProject(false);
+    setMemoryOpen(false);
     setHello(greeting());
     setUrl("/", history);
   }
@@ -561,6 +567,7 @@ function ChatApp({
     if (history !== "none" && navigationBlocked()) return;
     resetToEmpty();
     setCreatingProject(false);
+    setMemoryOpen(false);
     setProjectId(id);
     setUrl(projectPath(id), history);
   }
@@ -569,8 +576,19 @@ function ChatApp({
     if (history !== "none" && navigationBlocked()) return;
     resetToEmpty();
     setProjectId(null);
+    setMemoryOpen(false);
     setCreatingProject(true);
     setUrl(routePath({ kind: "newProject" }), history);
+  }
+
+  /** 기억 관리 화면을 연다. */
+  function openMemory(history: HistoryMode = "push") {
+    if (history !== "none" && navigationBlocked()) return;
+    resetToEmpty();
+    setProjectId(null);
+    setCreatingProject(false);
+    setMemoryOpen(true);
+    setUrl(routePath({ kind: "memory" }), history);
   }
 
   function onProjectDeleted() {
@@ -587,6 +605,7 @@ function ChatApp({
     if (route.kind === "conversation") void openConversation(route.id, "none");
     else if (route.kind === "project") openProject(route.id, "none");
     else if (route.kind === "newProject") startNewProject("none");
+    else if (route.kind === "memory") openMemory("none");
     else newConversation("none");
   }
 
@@ -981,7 +1000,7 @@ function ChatApp({
   const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
   const activeProject = projects.find((p) => p.id === projectId);
   // 프로젝트 화면(프로젝트를 열었고 아직 대화를 시작하지 않음)
-  const projectHome = isEmpty && !creatingProject && projectId !== null;
+  const projectHome = isEmpty && !creatingProject && !memoryOpen && projectId !== null;
 
   const composer = (
     <Composer
@@ -1059,6 +1078,8 @@ function ChatApp({
             user={user}
             authRequired={authRequired}
             onLogout={onLogout}
+            memoryActive={memoryOpen}
+            onOpenMemory={() => openMemory()}
           />
         </div>
 
@@ -1127,7 +1148,9 @@ function ChatApp({
             </div>
           )}
 
-          {creatingProject ? (
+          {memoryOpen ? (
+            <MemoryView onToast={setToast} />
+          ) : creatingProject ? (
             <NewProjectForm
               onCreated={(project) => {
                 refreshProjects();

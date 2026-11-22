@@ -562,3 +562,83 @@ export async function deleteProjectDocument(projectId: string, documentId: strin
   });
   if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
 }
+
+// --- 장기 기억 ------------------------------------------------------------------------------------
+
+export type MemoryCategory = "preferences" | "work" | "personal" | "other";
+
+/** AI 가 다른 대화에서도 쓰는 사용자 기억 하나. */
+export interface Memory {
+  id: string;
+  content: string;
+  category: MemoryCategory;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryOverview {
+  available: boolean; // 서버에서 기억 기능을 쓸 수 있는지
+  enabled: boolean; // 내가 기억 기능을 켜 두었는지
+  profile: { text: string; updated_at: string | null };
+  memories: Memory[]; // 최근에 고친 순
+  max_memories: number;
+  max_memory_chars: number;
+  max_profile_chars: number;
+}
+
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+export async function getMemory(): Promise<MemoryOverview> {
+  return json(await apiFetch(`/api/memory`), "기억을 불러오지 못했습니다");
+}
+
+export async function setMemoryEnabled(enabled: boolean): Promise<void> {
+  const res = await apiFetch(`/api/memory/settings`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ enabled }),
+  });
+  await json(res, "설정을 바꾸지 못했습니다");
+}
+
+export async function saveProfile(text: string): Promise<MemoryOverview["profile"]> {
+  const res = await apiFetch(`/api/memory/profile`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ text }),
+  });
+  return json(res, "프로필을 저장하지 못했습니다");
+}
+
+export async function addMemory(content: string, category: MemoryCategory): Promise<Memory> {
+  const res = await apiFetch(`/api/memory/memories`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ content, category }),
+  });
+  return json(res, "기억을 추가하지 못했습니다");
+}
+
+/** 보낸 값만 바꾼다. */
+export async function updateMemory(
+  id: string,
+  body: { content?: string; category?: MemoryCategory },
+): Promise<Memory> {
+  const res = await apiFetch(`/api/memory/memories/${id}`, {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return json(res, "기억을 저장하지 못했습니다");
+}
+
+export async function deleteMemory(id: string): Promise<void> {
+  const res = await apiFetch(`/api/memory/memories/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
+}
+
+/** 프로필과 기억을 모두 지운다. */
+export async function deleteAllMemory(): Promise<void> {
+  const res = await apiFetch(`/api/memory`, { method: "DELETE" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `삭제 실패 (${res.status})`);
+}

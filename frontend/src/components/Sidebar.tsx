@@ -1,6 +1,6 @@
 "use client";
 
-import { conversationPath, isPlainClick, projectPath } from "@/lib/routes";
+import { conversationPath, isPlainClick, projectPath, routePath } from "@/lib/routes";
 import { forwardRef, useMemo, useState } from "react";
 import type { AppInfo, Conversation, Project } from "@/lib/api";
 import type { User } from "@/lib/auth";
@@ -28,6 +28,9 @@ interface SidebarProps {
   /** 로그인을 요구하는 설정인지. 아니면(로컬 사용자) 로그아웃을 숨긴다. */
   authRequired?: boolean;
   onLogout?: () => void;
+  /** 기억 관리 화면을 보고 있는지 */
+  memoryActive?: boolean;
+  onOpenMemory?: () => void;
 }
 
 export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sidebar(
@@ -47,6 +50,8 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
     user,
     authRequired = false,
     onLogout,
+    memoryActive = false,
+    onOpenMemory,
   },
   searchRef,
 ) {
@@ -209,6 +214,20 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm text-fg">{user.name}</div>
               <div className="flex gap-2 text-[11px] text-muted">
+                {onOpenMemory && (
+                  <a
+                    href={routePath({ kind: "memory" })}
+                    onClick={(e) => {
+                      if (!isPlainClick(e)) return;
+                      e.preventDefault();
+                      onOpenMemory();
+                    }}
+                    className={memoryActive ? "text-fg" : "hover:text-fg"}
+                    aria-current={memoryActive ? "page" : undefined}
+                  >
+                    기억
+                  </a>
+                )}
                 {user.is_admin && (
                   <a href="/admin" className="hover:text-fg">
                     관리
