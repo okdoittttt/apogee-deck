@@ -131,6 +131,14 @@ class Settings(BaseSettings):
             짧은 한국어 문장끼리는 유사도가 낮게 나온다 (text-embedding-3-small 실측: 관련 0.17~0.32,
             무관 0.08~0.14).
             임베딩을 쓸 수 없으면(키 없음) 이 기준 없이 최근 기억을 넣는다.
+        enable_tool_decision: 턴마다 결정 모델(d3)이 필요한 도구 그룹을 골라 그 도구만 모델에게 줄지.
+            끄면 쓸 수 있는 도구를 모두 준다. 켜면 Ollama 에 ``tool_decision_model`` 이 있어야 한다.
+        tool_decision_model: 도구 결정에 쓸 Ollama 결정 모델 (``ollama pull d3:2b``).
+        tool_decision_url: 결정 모델을 서빙하는 Ollama 주소. 비우면 ``ollama_base_url``.
+        tool_decision_threshold: 도구 그룹을 켜는 확률 기준. 모든 그룹이 이보다 낮으면 도구 없이 답한다.
+        tool_decision_timeout_seconds: 결정 요청의 시간 제한(초). 넘으면 이번 턴은 도구를 모두 준다.
+            처음 요청할 때는 모델을 불러오는 시간이 더해진다 (M5 Pro 실측: d3:2b 약 0.8초, 이후 약 0.2초).
+        tool_decision_keep_alive: 결정 모델을 메모리에 남겨 둘 시간 (Ollama ``keep_alive``).
         auth_required: 로그인을 요구할지. ``False`` 면 모든 요청을 로컬 사용자 한 명으로 처리한다
             (로그인 화면이 없는 개발 단계용). **다른 사람이 접속하는 환경에서는 반드시 켠다.**
         google_oauth_client_id: Google 로그인 OAuth 클라이언트 ID.
@@ -268,6 +276,12 @@ class Settings(BaseSettings):
     enable_memory: bool = True
     memory_recall_limit: int = 5
     memory_min_score: float = 0.15
+    enable_tool_decision: bool = False
+    tool_decision_model: str = "d3:2b"
+    tool_decision_url: str = ""
+    tool_decision_threshold: float = 0.5
+    tool_decision_timeout_seconds: float = 3.0
+    tool_decision_keep_alive: str = "30m"
 
     # --- Auth ---
     auth_required: bool = True

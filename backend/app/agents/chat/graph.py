@@ -3,10 +3,10 @@
 ::
 
     START ─▶ (recall) ─(요약 필요)─▶ summarize ─┐
-                └─────────────────────────────▶ agent ──(tool_calls 있음)──▶ tools ─┐
-                                                  ▲                                  │
-                                                  └──────────────────────────────────┘
-                                                  └──(tool_calls 없음)──▶ END
+                └─────────────────────────────▶ (decide) ─▶ agent ──(tool_calls 있음)──▶ tools ─┐
+                                                               ▲                                  │
+                                                               └──────────────────────────────────┘
+                                                               └──(tool_calls 없음)──▶ END
 
 대화 상태(messages, 요약)는 checkpointer 가 ``thread_id`` (= conversation_id) 별로 저장한다.
 ``summarize`` 는 대화 이력 예산이 있을 때(Ollama 등)만 그래프에 들어간다.
@@ -15,11 +15,14 @@
 프로필과 이번 메시지에 관련된 기억을 읽고, agent 노드가 프로필은 system 프롬프트에, 기억은 사용자 메시지 앞에
 붙인다. 기억은 모델에 보낼 때만 붙이고 checkpoint 의 메시지는 바꾸지 않는다. 매 턴 달라지는 내용을 system
 프롬프트에 넣으면 그 뒤의 대화 이력 전체가 프롬프트 캐시에서 빠지기 때문이다.
+
+도구 결정(``enable_tool_decision``)을 켜면 ``decide`` 노드가 턴마다 한 번 결정 모델(d3)에게 이번 메시지에 필요한
+도구 그룹을 묻고, agent 는 켜진 그룹의 도구만 모델에게 준다 (``app.orchestration.decision``).
 """
 
 import asyncio
 import logging
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
@@ -37,7 +40,7 @@ from app.images import resolve_images
 from app.llm import build_chat_model, build_summary_model, with_prompt_cache
 from app.llm.catalog import model_id
 from app.memory import service as memory
-from app.orchestration import summary
+from app.orchestration import decision, summary
 from app.orchestration.citations import number_sources
 from app.orchestration.context import (
     compact_old_tool_results,
@@ -48,7 +51,7 @@ from app.orchestration.context import (
     today,
 )
 from app.orchestration.tooling import handle_tool_error
-from app.tools import build_tools
+from app.tools import build_tools, tool_group
 from app.tools.documents import PROJECT_TOOL_NAMES
 from app.tools.memory import MEMORY_TOOL_NAMES
 
@@ -57,6 +60,7 @@ logger = logging.getLogger(__name__)
 AGENT_NODE = "agent"
 SUMMARIZE_NODE = "summarize"
 RECALL_NODE = "recall"
+DECIDE_NODE = "decide"
 SUMMARY_TIMEOUT_SECONDS = 120.0
 """요약이 이보다 오래 걸리면 포기하고 요약 없이 답한다."""
 
@@ -85,12 +89,16 @@ class ChatState(MessagesState):
         summarized_until: 요약에 포함된 마지막 메시지 ID. 이 다음 메시지부터 원문으로 보낸다.
         profile: 이번 턴에 읽은 사용자 프로필 (``recall`` 노드). 장기 기억을 쓰지 않으면 상태에 없다.
         recalled: 이번 턴의 사용자 메시지와 관련 있는 기억 (모델에게 보여줄 줄 목록). 없으면 빈 문자열.
+        tool_groups: 도구 결정으로 이 대화에서 지금까지 켜진 도구 그룹 (누적). 도구 결정을 쓰지 않으면 상태에 없다.
+        active_groups: 이번 턴에 모델에게 줄 도구 그룹 (``decide`` 노드가 매 턴 정한다). ``None`` 이면 도구를 모두 준다.
     """
 
     summary: str
     summarized_until: str | None
     profile: str
     recalled: str
+    tool_groups: list[str]
+    active_groups: list[str] | None
 
 
 def memory_user(config: RunnableConfig) -> str | None:
@@ -168,6 +176,8 @@ def build_graph(
         checkpointer: 대화 상태를 저장할 LangGraph checkpointer.
         store: 장기 기억 Store. 있고 ``enable_memory`` 가 켜져 있으면 ``recall`` 노드와 기억 도구를 추가한다.
 
+    ``enable_tool_decision`` 이 켜져 있고 도구가 있으면 agent 앞에 ``decide`` 노드를 추가한다.
+
     Returns:
         컴파일된 그래프. ``enable_tools`` 가 꺼져 있으면 ``agent → END`` 만 있다.
     """
@@ -176,6 +186,7 @@ def build_graph(
     if not use_memory:
         tools = [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
     chat_model = build_chat_model(settings)
+    use_decision = settings.enable_tool_decision and bool(tools)
 
     select_context = make_context_selector(settings)
     count_tokens = make_token_counter(settings)
@@ -246,6 +257,37 @@ def build_graph(
             "recalled": "\n".join(memory.format_memory(m) for m in found),
         }
 
+    async def ask_decision_model(request: dict[str, Any]) -> dict[str, float]:
+        return await decision.ask_d3(settings, request["state"], request["questions"])
+
+    # Langfuse 트레이스에 결정 모델의 입력(상태, 질문)과 출력(그룹별 확률)이 한 단계로 남게 감싼다.
+    traced_ask = RunnableLambda(ask_decision_model, name="tool_decision")
+
+    async def ask(state: dict[str, Any], questions: dict[str, str]) -> dict[str, float]:
+        return await traced_ask.ainvoke({"state": state, "questions": questions})
+
+    async def decide(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+        """결정 모델에게 이번 턴에 필요한 도구 그룹을 묻는다 (턴마다 한 번, 도구 실행 뒤에는 다시 묻지 않는다).
+
+        이번 턴에 쓸 수 없는 도구(기억을 끈 사용자, 프로젝트 밖)의 그룹은 묻지 않는다.
+
+        Args:
+            state: 그래프 상태 (대화 이력, 누적 그룹).
+            config: 실행 설정.
+
+        Returns:
+            누적 그룹과 이번 턴에 줄 그룹.
+        """
+        hidden = hidden_tools(config, use_memory=use_memory)
+        candidates = {tool_group(t.name) for t in tools if t.name not in hidden}
+        result = await decision.decide(
+            settings, state["messages"], candidates, state.get("tool_groups") or [], ask
+        )
+        return {
+            "tool_groups": list(result.groups),
+            "active_groups": None if result.active is None else list(result.active),
+        }
+
     async def agent(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
         """System 프롬프트 + (프로젝트 정보) + (요약) + 최근 대화로 모델을 호출한다.
 
@@ -254,7 +296,8 @@ def build_graph(
         ``app.projects.service.ProjectContext``). 대화 이력 예산이 있고 요약이 있으면, 요약을
         system 프롬프트 끝에 붙이고 요약 이후의 메시지만 보낸다. 장기 기억을 쓰는 사용자면 기억 지침과
         프로필을 system 프롬프트에 붙이고, 이번 턴의 관련 기억(``recall`` 노드)을 마지막 사용자 메시지 앞에 붙인다.
-        이번 턴에 쓸 수 없는 도구(기억을 끈 사용자의 기억 도구, 프로젝트 밖 대화의 프로젝트 검색)는 빼고 호출한다.
+        이번 턴에 쓸 수 없는 도구(기억을 끈 사용자의 기억 도구, 프로젝트 밖 대화의 프로젝트 검색)와, 도구 결정을
+        쓰면 이번 턴에 켜지지 않은 그룹의 도구는 빼고 호출한다.
 
         Args:
             state: 그래프 상태 (전체 대화 이력과 요약).
@@ -296,20 +339,26 @@ def build_graph(
         if user_id is not None and state.get("recalled"):
             recalled = await prompts.arender("chat/recalled_memories", memories=state["recalled"])
             context = with_recalled(context, recalled.text)
-        response = await call_model(hidden_tools(config, use_memory=use_memory)).ainvoke(
+        hidden = hidden_tools(config, use_memory=use_memory)
+        if use_decision and (active := state.get("active_groups")) is not None:
+            hidden |= {t.name for t in tools if tool_group(t.name) not in active}
+        response = await call_model(hidden).ainvoke(
             [system, *context],
             config={"metadata": prompt.trace_metadata()},
         )
         # 대화 도중 모델을 바꿨을 때 이 응답의 추론을 다른 모델에 보내지 않도록 모델을 기록한다.
         return {"messages": [tag_model(response, current_model)]}
 
-    def route_start(state: ChatState) -> Literal["summarize", "agent"]:
-        """요약이 필요하면 요약 노드로, 아니면 바로 agent 노드로 보낸다."""
+    # agent 로 가는 길목. 도구 결정을 쓰면 agent 앞에 decide 를 거친다 (도구 실행 뒤에는 agent 로 바로 간다).
+    before_agent = DECIDE_NODE if use_decision else AGENT_NODE
+
+    def route_start(state: ChatState) -> str:
+        """요약이 필요하면 요약 노드로, 아니면 바로 agent(또는 decide) 노드로 보낸다."""
         assert budget is not None
         plan = summary.plan_summary(
             model_view(state["messages"]), state.get("summarized_until"), budget, count_tokens
         )
-        return SUMMARIZE_NODE if plan else AGENT_NODE
+        return SUMMARIZE_NODE if plan else before_agent
 
     async def summarize(state: ChatState) -> dict[str, Any]:
         """오래된 대화를 기존 요약에 합쳐서 새 요약을 만든다.
@@ -346,6 +395,9 @@ def build_graph(
 
     builder = StateGraph(ChatState)
     builder.add_node(AGENT_NODE, agent)
+    if use_decision:
+        builder.add_node(DECIDE_NODE, decide)
+        builder.add_edge(DECIDE_NODE, AGENT_NODE)
     first = START
     if use_memory:
         builder.add_node(RECALL_NODE, recall)
@@ -353,10 +405,10 @@ def build_graph(
         first = RECALL_NODE
     if budget is not None:
         builder.add_node(SUMMARIZE_NODE, summarize)
-        builder.add_conditional_edges(first, route_start, [SUMMARIZE_NODE, AGENT_NODE])
-        builder.add_edge(SUMMARIZE_NODE, AGENT_NODE)
+        builder.add_conditional_edges(first, route_start, [SUMMARIZE_NODE, before_agent])
+        builder.add_edge(SUMMARIZE_NODE, before_agent)
     else:
-        builder.add_edge(first, AGENT_NODE)
+        builder.add_edge(first, before_agent)
 
     if tools:
         # 도구가 실패해도 응답 전체가 실패하지 않게, 예외를 모델이 읽을 오류 결과로 바꾼다.
