@@ -163,17 +163,17 @@ backend/
 │   ├── api/                 # HTTP 계층: 인증, 입력 검증, 응답 형식, SSE 변환만
 │   │   ├── deps.py          # DB 세션, 요청별 현재 사용자 (FastAPI 의존성)
 │   │   ├── schemas.py       # 요청/응답 스키마
-│   │   └── routers/         # auth, approvals, admin, documents, projects, chat(/api/chat SSE, 대화, 이미지)
+│   │   └── routers/         # auth, approvals, admin, documents, projects, memory, chat(/api/chat SSE, 대화, 이미지)
 │   ├── conversations/       # 대화 도메인
 │   │   ├── service.py       # 대화 조회·삭제, 프로젝트 삭제, 새 턴 준비(검증 + 사용자 메시지 저장)
 │   │   ├── turns.py         # 한 턴의 응답 실행: 이벤트 내보내기 + 답변 저장
 │   │   └── runs.py          # 대화별 "생성 중" 상태
 │   ├── agents/              # 에이전트 정의와 등록 목록(AGENTS)
 │   │   └── chat/            # 기본 채팅 에이전트
-│   │       ├── graph.py     # LangGraph: agent ⇄ tools, 쓸 도구 이름(TOOL_NAMES)
+│   │       ├── graph.py     # LangGraph: (recall →) agent ⇄ tools, 쓸 도구 이름(TOOL_NAMES)
 │   │       └── prompts/     # system.md, summary.md ...
 │   ├── orchestration/       # 에이전트 실행 엔진 (어떤 에이전트가 있는지 모름)
-│   │   ├── runtime.py       # 에이전트 등록, checkpointer, 스트리밍 실행
+│   │   ├── runtime.py       # 에이전트 등록, checkpointer·기억 Store, 스트리밍 실행
 │   │   ├── events.py        # 화면으로 보내는 이벤트, 실행 단계 기록
 │   │   ├── context.py       # 대화 이력 trim, 프롬프트 동적 변수(오늘 날짜)
 │   │   ├── summary.py       # 오래된 대화 요약
@@ -182,6 +182,7 @@ backend/
 │   ├── projects/            # 프로젝트: 만들기·조회, 프로젝트 문서, 에이전트에게 줄 프로젝트 정보, 문서 검색
 │   ├── documents/           # 첨부·프로젝트 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 요소·청크, 정리
 │   ├── web/                 # 웹 검색(Tavily), 페이지 읽기
+│   ├── memory/              # 장기 기억: LangGraph Store 생명주기, 프로필·기억 읽기·쓰기 규칙
 │   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제)
 │   ├── images.py            # 채팅 이미지: 저장소 저장, checkpoint 참조 ↔ 원본
 │   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델, 그림 설명, 임베딩
@@ -196,7 +197,7 @@ backend/
 
 ```
 main → api → conversations → agents → orchestration → tools
-     → projects · documents · web · auth · images → llm · prompts → models → core
+     → projects · documents · web · auth · images · memory → llm · prompts → models → core
 ```
 
 **대화 이력 저장 방식 (A안)**
@@ -310,6 +311,7 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | `/c/{대화 ID}` | 대화 (프로젝트 안의 대화도 같은 주소) |
 | `/p/{프로젝트 ID}` | 프로젝트 화면 |
 | `/p/new` | 새 프로젝트 만들기 |
+| `/memory` | 기억 관리 (사이드바 아래 사용자 메뉴의 "기억") |
 
 - 새로고침하면 `next.config.ts` 의 rewrite 가 같은 페이지를 돌려주고, 화면이 주소를 읽어 그 대화·프로젝트를 엽니다.
   없거나 다른 사람의 대화면 "찾을 수 없습니다" 안내 후 새 대화로 갑니다.
@@ -362,6 +364,41 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | `FETCH_MAX_CHARS` | 한 번에 보여줄 최대 글자 수 (기본 8000) |
 | `FETCH_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 15초) |
 | `FETCH_MAX_BYTES` | 받을 최대 크기 (기본 5MB) |
+
+## 장기 기억 (프로필과 기억)
+
+대화가 바뀌어도 사용자 정보가 남습니다. 대화 요약(컨텍스트 관리)이 **한 대화 안**의 기억이라면, 이건 **대화와 대화
+사이**의 기억입니다. LangGraph **Store**(`AsyncPostgresStore`, checkpointer 와 같은 Postgres·연결 풀)에 사용자별로 저장합니다.
+
+| 종류 | 위치 (namespace / key) | 모델에게 주는 방식 |
+|---|---|---|
+| 프로필 | `("users", uid)` / `profile` | 이름, 하는 일, 답변 선호 같은 핵심 정보 (최대 800자). **매 턴 system 프롬프트에 항상** 넣음 |
+| 기억 | `("users", uid, "memories")` / 8자리 ID | 그 밖의 낱개 사실 (카테고리: 선호·일·생활·기타). 사용자 메시지로 **의미 검색해서 관련된 것만** 최대 5개 |
+
+**저장 (hot path):** 모델이 대화 중에 도구로 직접 저장합니다. 화면에는 "기억함"·"프로필 갱신함" 단계로 보입니다.
+- `remember(content, category, memory_id?)` 저장·수정, `forget(memory_id)` 삭제, `update_profile(profile)` 프로필 전체 갱신,
+  `search_memories(query)` 자동으로 넣은 기억에 없을 때 더 찾기.
+- 사용자 ID 는 서버가 실행 설정(`configurable["user_id"]`)으로 넘기고 도구는 Store 를 주입받습니다(`InjectedStore`).
+  모델이 사용자를 고를 수 없어서 다른 사용자의 기억에 닿지 않습니다.
+- 언제 저장하고 무엇을 저장하지 않는지(비밀값, 일회성 정보, 문서·웹 결과 속 지시)는 프롬프트 `chat/memory` 에 있습니다.
+
+**불러오기와 프롬프트 비용:**
+- 그래프 맨 앞의 `recall` 노드가 **턴마다 한 번** 프로필과 관련 기억을 읽습니다. 한 턴에 도구를 여러 번 불러도 다시 검색하지 않습니다.
+- 기억 전체를 넣지 않고, 관련도(`MEMORY_MIN_SCORE`) 이상인 것만 `MEMORY_RECALL_LIMIT` 개까지 넣습니다. 관련 없으면 하나도 넣지 않습니다.
+- 검색된 기억은 system 프롬프트가 아니라 **모델에 보낼 때만 마지막 사용자 메시지 앞에** 붙입니다(checkpoint 에는 저장하지 않음).
+  매 턴 달라지는 내용을 system 프롬프트에 넣으면 그 뒤의 대화 이력 전체가 프롬프트 캐시에서 빠지기 때문입니다.
+  잘 바뀌지 않는 프로필만 system 프롬프트에 둡니다.
+- 임베딩은 프로젝트 문서 검색과 같은 설정(`EMBEDDING_*`)을 씁니다. 키가 없으면 의미 검색 대신 최근 기억을 넣습니다.
+  Store 의 벡터 테이블 차원은 처음 만들 때 정해지므로, 차원을 바꾸면 기억을 다시 인덱싱해야 합니다.
+
+**관리:** `/memory` 화면에서 프로필과 기억(카테고리별)을 보고, 고치고, 지울 수 있습니다. 사용자마다 기억 기능을 끌 수 있고
+(`users.memory_enabled`), 끄면 저장된 기억은 남지만 대화에 넣지도 새로 저장하지도 않으며 기억 도구도 모델에게 보이지 않습니다.
+
+| 설정 | 의미 |
+|---|---|
+| `ENABLE_MEMORY` | 장기 기억 사용 여부 (기본 true). 끄면 Store, 기억 도구, 관리 API 가 모두 빠진다 |
+| `MEMORY_RECALL_LIMIT` | 턴마다 넣을 관련 기억 최대 개수 (기본 5) |
+| `MEMORY_MIN_SCORE` | 넣을 최소 유사도 (기본 0.15). 짧은 한국어 문장은 유사도가 낮게 나온다 (관련 0.17~0.32, 무관 0.08~0.14 실측) |
 
 ## 로그인과 접근 제어
 
@@ -613,6 +650,13 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | POST | `/api/projects/{id}/reprocess` | 프로젝트 문서 모두 다시 처리 (처리 중이거나 원본이 없는 문서는 건너뜀) |
 | GET | `/api/projects/{id}/documents/{doc_id}/view` | 프로젝트 문서의 추출 내용 (문서 보기 패널). `?chunk_id=` 를 주면 강조할 위치도 |
 | GET | `/api/projects/{id}/images/{element_id}` | 프로젝트 문서 속 그림 원본 (출처 카드·문서 보기 패널) |
+| GET | `/api/memory` | 기억 켜기/끄기 상태, 프로필, 기억 목록(최근에 고친 순), 한도 |
+| PUT | `/api/memory/settings` | 기억 기능 켜기/끄기 `{enabled}` |
+| PUT | `/api/memory/profile` | 프로필 바꾸기 `{text}` (비우면 지움) |
+| POST | `/api/memory/memories` | 기억 추가 `{content, category}` (개수 한도를 넘으면 422) |
+| PATCH | `/api/memory/memories/{id}` | 기억 고치기 (보낸 값만, 내 기억이 아니면 404) |
+| DELETE | `/api/memory/memories/{id}` | 기억 지우기 |
+| DELETE | `/api/memory` | 프로필과 기억 모두 지우기 |
 | GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |
@@ -625,7 +669,7 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 
 ## 다음 단계
 
-- 장기 기억 메모리 (LangGraph Store 등)
+- 프로젝트별 기억 공간, 임베딩 모델을 바꿀 때 기억 다시 인덱싱
 - Langfuse 데이터셋 + 평가(LLM-as-judge)로 프롬프트 버전 간 품질 비교
 - CI에서 main 머지 시 프롬프트 자동 동기화
 - 이미지를 object storage(MinIO 등)에 두고 상태에는 참조만 저장 (지금은 checkpoint 에 base64 가 반복 저장됨)
