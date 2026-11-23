@@ -4,9 +4,13 @@
 LangChain chat model 만 사용한다.
 """
 
-from langchain_core.language_models import BaseChatModel
+from typing import NamedTuple
 
-from app.config import Settings
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
+
+from app.core.config import Settings
 
 
 def build_chat_model(settings: Settings) -> BaseChatModel:
@@ -140,6 +144,33 @@ def build_summary_model(settings: Settings) -> BaseChatModel:
     return build_chat_model(settings)
 
 
+PROMPT_CACHE = {"type": "ephemeral"}
+"""Anthropic 프롬프트 캐시 설정 (기본 5분 유지)."""
+
+
+def with_prompt_cache(
+    model: Runnable[LanguageModelInput, BaseMessage], settings: Settings
+) -> Runnable[LanguageModelInput, BaseMessage]:
+    """Anthropic 모델이면 요청마다 프롬프트 캐시를 켠다. 다른 provider 는 그대로 돌려준다.
+
+    요청의 최상위 ``cache_control`` 을 쓰면 Anthropic 이 마지막 블록까지(도구 정의, system 프롬프트,
+    대화 이력) 캐시하고, 다음 요청은 같은 앞부분을 캐시에서 읽는다. 프로젝트 문서 본문처럼 매 응답
+    다시 보내는 큰 system 프롬프트와, 한 턴 안에서 도구를 여러 번 부를 때의 입력 비용을 줄인다.
+    캐시에 쓰는 요청은 입력 단가가 1.25배, 읽는 요청은 0.1배다. 너무 짧은 프롬프트는 캐시되지 않는다.
+    OpenAI 와 Gemini 는 같은 앞부분을 자동으로 캐시하므로 따로 켜지 않는다.
+
+    Args:
+        model: chat model (도구를 붙인 것도 된다).
+        settings: 앱 설정 (provider 확인용).
+
+    Returns:
+        모델 호출에 캐시 설정을 붙인 Runnable, 또는 원래 모델.
+    """
+    if settings.llm_provider != "anthropic":
+        return model
+    return model.bind(cache_control=PROMPT_CACHE)
+
+
 def model_name(settings: Settings) -> str:
     """화면과 응답 메타데이터에 표시할 모델 이름.
 
@@ -157,30 +188,27 @@ def model_name(settings: Settings) -> str:
     }.get(settings.llm_provider, settings.llm_provider)
 
 
-def describe_error(error: BaseException) -> str | None:
-    """사용자가 직접 조치할 수 있는 LLM/에이전트 오류를 화면용 문구로 바꾼다.
+class _ErrorTypes(NamedTuple):
+    """provider 별 예외를 성격에 따라 묶은 것."""
 
-    예외 원문에는 내부 주소, 모델 이름, provider 응답이 들어 있을 수 있으므로 화면에 그대로
-    보내지 않는다. 여기서 알아보지 못한 오류는 ``None`` 을 돌려주고, 호출하는 쪽이 일반 문구를 쓴다.
+    timeouts: tuple[type[BaseException], ...]
+    connections: tuple[type[BaseException], ...]
+    auth: tuple[type[BaseException], ...]
+    rate_limits: tuple[type[BaseException], ...]
+    server_errors: tuple[type[BaseException], ...]
 
-    Args:
-        error: LLM 호출이나 에이전트 실행 중 발생한 예외.
 
-    Returns:
-        화면에 보여줄 문구. 알아볼 수 없는 오류면 ``None``.
-    """
+def _error_types() -> _ErrorTypes:
+    """설치된 provider SDK 의 예외 클래스를 성격별로 모은다."""
     import httpx
     from langchain_core.exceptions import (
-        ContextOverflowError,
+        ModelAPIError,
         ModelAuthenticationError,
         ModelConnectionError,
-        ModelInvalidRequestError,
-        ModelNotFoundError,
         ModelPermissionDeniedError,
         ModelRateLimitError,
         ModelTimeoutError,
     )
-    from langgraph.errors import GraphRecursionError
 
     # langchain-core 공통 예외(Google 등 provider 패키지가 HTTP 상태별로 던짐)와
     # 공통 예외를 쓰지 않는 SDK(anthropic, httpx)의 예외를 함께 본다.
@@ -196,6 +224,8 @@ def describe_error(error: BaseException) -> str | None:
     )
     auth: tuple[type[BaseException], ...] = (ModelAuthenticationError, ModelPermissionDeniedError)
     rate_limits: tuple[type[BaseException], ...] = (ModelRateLimitError,)
+    # 5xx: provider 서버가 혼잡하거나 일시적으로 쓸 수 없음 (Google 503 UNAVAILABLE 등).
+    server_errors: tuple[type[BaseException], ...] = (ModelAPIError,)
     try:
         import anthropic
 
@@ -204,6 +234,7 @@ def describe_error(error: BaseException) -> str | None:
         connections += (anthropic.APIConnectionError,)
         auth += (anthropic.AuthenticationError,)
         rate_limits += (anthropic.RateLimitError,)
+        server_errors += (anthropic.InternalServerError, anthropic.OverloadedError)
     except ImportError:
         pass
     try:
@@ -214,31 +245,75 @@ def describe_error(error: BaseException) -> str | None:
         connections += (openai.APIConnectionError,)
         auth += (openai.AuthenticationError, openai.PermissionDeniedError)
         rate_limits += (openai.RateLimitError,)
+        server_errors += (openai.InternalServerError,)
     except ImportError:
         pass
+    return _ErrorTypes(timeouts, connections, auth, rate_limits, server_errors)
 
+
+def describe_error(error: BaseException) -> str | None:
+    """사용자가 직접 조치할 수 있는 LLM/에이전트 오류를 화면용 문구로 바꾼다.
+
+    예외 원문에는 내부 주소, 모델 이름, provider 응답이 들어 있을 수 있으므로 화면에 그대로
+    보내지 않는다. 여기서 알아보지 못한 오류는 ``None`` 을 돌려주고, 호출하는 쪽이 일반 문구를 쓴다.
+
+    Args:
+        error: LLM 호출이나 에이전트 실행 중 발생한 예외.
+
+    Returns:
+        화면에 보여줄 문구. 알아볼 수 없는 오류면 ``None``.
+    """
+    from langchain_core.exceptions import (
+        ContextOverflowError,
+        ModelInvalidRequestError,
+        ModelNotFoundError,
+    )
+    from langgraph.errors import GraphRecursionError
+
+    types = _error_types()
     if _is_openai_out_of_credit(error):
         return "OpenAI 크레딧이 부족합니다. OpenAI 결제 화면에서 잔액을 확인해 주세요."
     if isinstance(error, GraphRecursionError):
         return "도구를 너무 여러 번 호출해서 응답을 중단했습니다. 질문을 나눠서 다시 시도해 주세요."
-    if isinstance(error, rate_limits):
+    if isinstance(error, types.rate_limits):
         return "LLM API 사용 한도를 넘었습니다. 잠시 후 다시 시도해 주세요."
+    if isinstance(error, types.server_errors):
+        return "LLM 서버가 일시적으로 혼잡합니다. 잠시 후 다시 시도해 주세요."
     if isinstance(error, ContextOverflowError):
         return (
             "대화가 모델이 한 번에 읽을 수 있는 길이를 넘었습니다. 새 대화에서 다시 시도해 주세요."
         )
-    if isinstance(error, timeouts):
+    if isinstance(error, types.timeouts):
         return "LLM 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
-    if isinstance(error, connections):
+    if isinstance(error, types.connections):
         return "LLM 서버에 연결할 수 없습니다. 모델 서버가 실행 중인지 확인해 주세요."
     # Gemini API 는 잘못된 키를 401 이 아니라 400(API_KEY_INVALID) 으로 돌려준다.
-    if isinstance(error, auth) or (
+    if isinstance(error, types.auth) or (
         isinstance(error, ModelInvalidRequestError) and "API_KEY_INVALID" in str(error)
     ):
         return "LLM API 키가 올바르지 않습니다. 설정을 확인해 주세요."
     if isinstance(error, ModelNotFoundError):
         return "설정한 LLM 모델을 찾을 수 없습니다. 모델 이름을 확인해 주세요."
     return None
+
+
+def is_transient_error(error: BaseException) -> bool:
+    """잠시 기다렸다 다시 보내면 풀릴 수 있는 오류인지.
+
+    provider 서버 혼잡(5xx), 사용 한도 초과(429), 응답 시간 초과가 해당한다. 화면은 이런 오류를
+    오류 상자 대신 잠깐 떠 있는 알림으로 보여준다. OpenAI 크레딧 부족은 429 로 오지만
+    기다려도 풀리지 않으므로 제외한다.
+
+    Args:
+        error: LLM 호출이나 에이전트 실행 중 발생한 예외.
+
+    Returns:
+        일시적인 오류면 ``True``.
+    """
+    if _is_openai_out_of_credit(error):
+        return False
+    types = _error_types()
+    return isinstance(error, types.server_errors + types.rate_limits + types.timeouts)
 
 
 def _is_openai_out_of_credit(error: BaseException) -> bool:

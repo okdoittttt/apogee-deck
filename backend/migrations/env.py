@@ -4,7 +4,7 @@
 
 1. CLI (``alembic upgrade head``, ``alembic revision --autogenerate`` 등): 여기서 엔진을 만들어
    연결한다.
-2. 앱 시작 시 (``app.db.run_migrations``): 앱이 넘겨준 연결(``config.attributes["connection"]``)을
+2. 앱 시작 시 (``app.core.db.run_migrations``): 앱이 넘겨준 연결(``config.attributes["connection"]``)을
    그대로 쓴다.
 
 같은 DB 에 LangGraph checkpointer 테이블(``checkpoints`` 등)이 있지만, 그 테이블은 LangGraph 가
@@ -21,8 +21,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app import models  # noqa: F401  (모델을 metadata 에 등록)
-from app.config import get_settings
-from app.db import Base
+from app.core.config import get_settings
+from app.core.db import Base
 
 config = context.config
 target_metadata = Base.metadata

@@ -14,17 +14,19 @@ from langchain_core.messages import AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.events import Finished, ReasoningDelta, TextDelta, ToolFinished, ToolStarted
-from app.agents.runtime import _stop_reason
-from app.config import GOOGLE_HISTORY_TOKENS, Settings
+from app.agents import chat
+from app.core.config import GOOGLE_HISTORY_TOKENS, Settings
 from app.llm import (
     GOOGLE_SUMMARY_MAX_TOKENS,
     build_chat_model,
     build_summary_model,
     describe_error,
+    is_transient_error,
     model_name,
 )
+from app.orchestration import runtime
+from app.orchestration.events import Finished, ReasoningDelta, TextDelta, ToolFinished, ToolStarted
+from app.orchestration.runtime import _stop_reason
 
 SETTINGS = Settings(llm_provider="google", google_api_key="test-key", enable_fetch_url=False)
 
@@ -148,6 +150,7 @@ async def test_reasoning_tool_call_and_answer(monkeypatch, fake_google):
     first, second = models.requests
     assert first["config"].system_instruction is not None
     declared = [f.name for t in first["config"].tools for f in t.function_declarations]
+    # 프로젝트 밖의 대화라 search_project 는 보내지 않는다
     assert declared == ["get_current_time", "read_document"]
     # 두 번째 호출에는 도구 호출과 그 결과가 이어서 들어간다
     parts = [p for c in second["contents"] for p in c.parts]
@@ -163,7 +166,12 @@ async def test_image_input_is_sent_as_inline_data(monkeypatch, fake_google):
     monkeypatch.setitem(runtime._graphs, "chat", graph)
 
     png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
-    events = [e async for e in runtime.stream_reply("g2", "이게 뭐야?", [("image/png", png)])]
+    events = [
+        e
+        async for e in runtime.stream_reply(
+            "g2", "이게 뭐야?", [{"type": "image", "base64": png, "mime_type": "image/png"}]
+        )
+    ]
 
     assert events[-1].text == "고양이입니다."
     parts = [p for c in models.requests[0]["contents"] for p in c.parts]
@@ -178,6 +186,40 @@ def _client_error(code: int, status: str, message: str) -> genai_errors.ClientEr
     return genai_errors.ClientError(
         code, {"error": {"code": code, "status": status, "message": message}}
     )
+
+
+async def test_google_unavailable_is_transient(fake_google):
+    """Google 이 503 UNAVAILABLE 을 돌려주면 혼잡 안내를 보내고 일시적 오류로 본다."""
+
+    class FailingModels(FakeModels):
+        async def generate_content_stream(self, **request):
+            async def stream():
+                raise genai_errors.ServerError(
+                    503,
+                    {
+                        "error": {
+                            "code": 503,
+                            "status": "UNAVAILABLE",
+                            "message": "The model is overloaded. Please try again later.",
+                        }
+                    },
+                )
+                yield  # pragma: no cover
+
+            return stream()
+
+    fake = type("FakeAio", (), {"models": FailingModels([])})()
+    model = build_chat_model(SETTINGS)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ChatGoogleGenerativeAI, "async_client", property(lambda self: fake))
+        with pytest.raises(Exception) as exc:
+            async for _ in model.astream("hi"):
+                pass
+
+    described = describe_error(exc.value)
+    assert described is not None and "혼잡" in described
+    assert "overloaded" not in described
+    assert is_transient_error(exc.value)
 
 
 @pytest.mark.parametrize(

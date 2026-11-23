@@ -22,7 +22,7 @@ import httpx
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
-from app.config import Settings
+from app.core.config import Settings
 
 AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"

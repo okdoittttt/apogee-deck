@@ -7,11 +7,12 @@ import httpx
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agents import chat, runtime
-from app.agents.chat.tools import build_tools
-from app.agents.runtime import Finished, ToolFinished
-from app.config import Settings
+from app.agents import chat
+from app.core.config import Settings
 from app.llm.fake import EchoChatModel, _Plan
+from app.orchestration import runtime
+from app.orchestration.runtime import Finished, ToolFinished
+from app.tools import build_tools
 from app.web import fetch
 from app.web.fetch import FetchError, Page
 
@@ -177,7 +178,8 @@ LONG = Page(
 def test_long_page_is_shown_in_parts():
     first = fetch.format_page(LONG, 0, 1000, TODAY)
     assert (
-        "Page: Guide\nURL: https://docs.example/guide\nPublished: 2026-11-16 (3 days ago)" in first
+        "Page ⟦source:1⟧: Guide\nURL: https://docs.example/guide\nPublished: 2026-11-16 (3 days ago)"
+        in first
     )
     assert "Showing characters 0-" in first and "Call fetch_url again with offset=" in first
     next_offset = int(first.split("offset=")[1].split(" ")[0])
@@ -216,9 +218,9 @@ def test_artifact_contains_the_page_as_source():
 
 
 def test_fetch_url_tool_works_without_tavily_key():
-    assert "fetch_url" in [t.name for t in build_tools(NO_KEY)]
+    assert "fetch_url" in [t.name for t in build_tools(NO_KEY, chat.TOOL_NAMES)]
     disabled = NO_KEY.model_copy(update={"enable_fetch_url": False})
-    assert "fetch_url" not in [t.name for t in build_tools(disabled)]
+    assert "fetch_url" not in [t.name for t in build_tools(disabled, chat.TOOL_NAMES)]
 
 
 async def test_fetch_url_result_reaches_model_and_screen(monkeypatch):
@@ -241,6 +243,13 @@ async def test_fetch_url_result_reaches_model_and_screen(monkeypatch):
     [finished] = [e for e in events if isinstance(e, ToolFinished)]
     assert finished.status == "done"
     assert finished.sources == [
-        {"title": "Guide", "url": "https://docs.example/guide", "published_date": "2026-11-16"}
+        {
+            "title": "Guide",
+            "url": "https://docs.example/guide",
+            "published_date": "2026-11-16",
+            "n": 1,
+        }
     ]
+    # 모델에게 간 결과에는 자리 표시 대신 번호가 들어 있다
+    assert "Page [1]: Guide" in finished.output
     assert isinstance(events[-1], Finished) and "0번째 줄입니다" in events[-1].text

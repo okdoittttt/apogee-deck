@@ -17,8 +17,9 @@ import anyio
 import httpx
 import trafilatura
 
-from app.agents.tooling import ToolError
-from app.config import Settings
+from app.core.citations import source_marker
+from app.core.config import Settings
+from app.core.errors import ToolError
 from app.web import safe_http, tavily
 from app.web.safe_http import BlockedAddressError, ResponseTooLargeError
 from app.web.text import age_label, external_note, untag
@@ -231,7 +232,7 @@ def format_page(page: Page, offset: int, max_chars: int, today: date) -> str:
         today: 오늘 날짜 (발행일이 며칠 전인지 계산할 때 쓴다).
 
     Returns:
-        제목, URL, 발행일, 보여준 범위와 이어 읽는 방법, 태그로 감싼 본문.
+        번호 자리 표시와 제목, URL, 발행일, 보여준 범위와 이어 읽는 방법, 태그로 감싼 본문.
     """
     total = len(page.text)
     if offset >= total:
@@ -242,7 +243,7 @@ def format_page(page: Page, offset: int, max_chars: int, today: date) -> str:
         if cut > max_chars // 2:
             chunk = chunk[:cut]
     end = offset + len(chunk)
-    lines = [f"Page: {untag(page.title, PAGE_TAG)}", f"URL: {page.url}"]
+    lines = [f"Page {source_marker(1)}: {untag(page.title, PAGE_TAG)}", f"URL: {page.url}"]
     if page.published_date:
         lines.append(f"Published: {page.published_date}{age_label(page.published_date, today)}")
     progress = f"Showing characters {offset:,}-{end:,} of {total:,}."
@@ -256,7 +257,10 @@ def format_page(page: Page, offset: int, max_chars: int, today: date) -> str:
             "\n".join(lines),
             external_note(PAGE_TAG),
             f"<{PAGE_TAG}>\n{untag(chunk.strip(), PAGE_TAG)}\n</{PAGE_TAG}>",
-            "Do not write a sources or references list: the app shows this page to the user as a link.",
+            (
+                "Cite this page by its number. Do not write a sources or references list: "
+                "the app shows this page to the user as a link."
+            ),
         ]
     )
 

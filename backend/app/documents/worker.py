@@ -27,11 +27,18 @@ class ParseTimeoutError(ParseError):
     """시간 제한 안에 파싱이 끝나지 않았다."""
 
 
-def _child(conn: Connection, data: bytes, kind: str, filename: str, max_pages: int) -> None:
+def _child(
+    conn: Connection,
+    data: bytes,
+    kind: str,
+    filename: str,
+    max_pages: int,
+    structured: bool = False,
+) -> None:
     """파싱 프로세스의 본체. 결과를 파이프로 돌려준다."""
     try:
-        result = parse(data, DocumentKind(kind), filename, max_pages)
-        conn.send(("ok", result.content, result.page_count))
+        result = parse(data, DocumentKind(kind), filename, max_pages, structured)
+        conn.send(("ok", result.content, result.page_count, result.elements))
     except ParseError as exc:
         conn.send(("error", str(exc)))
     except Exception:  # noqa: BLE001 — 어떤 오류든 부모에게 알려야 "비정상 종료" 와 구분된다
@@ -47,6 +54,7 @@ async def parse_in_subprocess(
     *,
     max_pages: int,
     timeout: float,
+    structured: bool = False,
     target: Callable[..., Any] = _child,
 ) -> ParsedDocument:
     """새 프로세스에서 문서를 파싱한다.
@@ -57,6 +65,7 @@ async def parse_in_subprocess(
         filename: 파일 이름.
         max_pages: 최대 쪽 수.
         timeout: 시간 제한(초). 넘으면 프로세스를 강제로 끝낸다.
+        structured: 요소 목록(본문·표·그림)도 만들지 (프로젝트 문서).
         target: 프로세스에서 실행할 함수. 테스트에서만 바꾼다.
 
     Returns:
@@ -69,7 +78,7 @@ async def parse_in_subprocess(
     receiver, sender = _CTX.Pipe(duplex=False)
     proc = _CTX.Process(
         target=target,
-        args=(sender, data, str(kind), filename, max_pages),
+        args=(sender, data, str(kind), filename, max_pages, structured),
         daemon=True,
         name="document-parser",
     )
@@ -94,7 +103,8 @@ async def parse_in_subprocess(
         raise ParseTimeoutError(f"처리 시간이 너무 오래 걸려 중단했습니다 ({timeout:.0f}초 초과).")
     status, *rest = message
     if status == "ok":
-        return ParsedDocument(content=rest[0], page_count=rest[1])
+        elements = rest[2] if len(rest) > 2 else None
+        return ParsedDocument(content=rest[0], page_count=rest[1], elements=elements)
     if status == "error":
         raise ParseError(rest[0])
     logger.error("document parser crashed: %s", rest[0])

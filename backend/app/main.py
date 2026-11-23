@@ -11,14 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from app.agents import runtime
-from app.config import get_settings
-from app.db import SessionLocal, run_migrations
+from app.agents import AGENTS, DEFAULT_AGENT
+from app.api.routers import admin, approvals, auth, chat
+from app.api.routers import documents as documents_router
+from app.api.routers import memory as memory_router
+from app.api.routers import projects as projects_router
+from app.conversations import runs
+from app.core.config import get_settings
+from app.core.db import SessionLocal, run_migrations
+from app.core.storage import get_storage
 from app.documents import service as documents
 from app.models import Conversation
-from app.routers import admin, approvals, auth, chat
-from app.routers import documents as documents_router
-from app.storage import get_storage
+from app.orchestration import runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,7 +50,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     시작 시 DB 마이그레이션 적용 → 첨부 저장소 준비 → 파싱 중이던 문서를 실패로 표시 →
     에이전트 런타임 시작 → UI 대화가 없는 checkpoint 정리 순서로 실행하고, 문서 정리 작업(하루 한 번)을
-    띄운다. 종료 시 정리 작업과 런타임을 정리한다.
+    띄운다. 종료 시 정리 작업, 진행 중인 응답(중단으로 저장), 런타임을 정리한다.
 
     첨부 저장소를 준비하지 못해도 앱은 시작한다 (첨부만 쓸 수 없다).
 
@@ -57,14 +61,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await prepare_storage()
     if interrupted := await documents.mark_interrupted():
         logger.info("marked %d interrupted document parses as failed", interrupted)
-    await runtime.startup()
+    await runtime.startup(AGENTS, DEFAULT_AGENT)
     async with SessionLocal() as session:
         conversation_ids = {str(i) for i in await session.scalars(select(Conversation.id))}
     if pruned := await runtime.prune_orphan_threads(conversation_ids):
         logger.info("pruned %d orphan checkpoint threads", pruned)
     cleanup = asyncio.create_task(documents.cleanup_loop())
+    # 검색 기능 전에 올린 프로젝트 문서의 청크를 만든다 (임베딩이 있어 시간이 걸리므로 뒤에서).
+    backfill = asyncio.create_task(documents.index_missing_documents())
     yield
+    backfill.cancel()
     cleanup.cancel()
+    # 진행 중인 응답을 중단으로 저장한 뒤(checkpointer 를 쓸 수 있을 때) 런타임을 닫는다.
+    await runs.shutdown_runs()
     await runtime.shutdown()
 
 
@@ -86,7 +95,7 @@ async def prepare_storage() -> None:
         )
 
 
-app = FastAPI(title="Agent API", lifespan=lifespan)
+app = FastAPI(title="okdoitttt API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -121,6 +130,8 @@ app.include_router(approvals.router)
 app.include_router(admin.router)
 app.include_router(chat.router)
 app.include_router(documents_router.router)
+app.include_router(projects_router.router)
+app.include_router(memory_router.router)
 
 
 @app.get("/health")

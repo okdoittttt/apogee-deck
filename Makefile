@@ -42,6 +42,8 @@ logs: ## 백엔드 로그 보기 (Ctrl+C 로 종료)
 
 backend: ## 백엔드만 다시 빌드/재시작 (코드·프롬프트 수정 후)
 	@$(COMPOSE) up -d --build backend
+	@# 백엔드 네트워크를 같이 쓰는 Langfuse 미디어 전달기는 백엔드를 다시 만들면 다시 붙여야 한다
+	@if $(COMPOSE) config --services | grep -qx langfuse-media-proxy; then $(COMPOSE) up -d langfuse-media-proxy; fi
 
 frontend: ## 프론트엔드만 다시 빌드/재시작
 	@$(COMPOSE) up -d --build frontend
@@ -80,5 +82,5 @@ test: ## 백엔드 테스트 (LLM 불필요)
 	@cd backend && uv run pytest -q
 
 lint: ## 백엔드 린트·포맷 검사, 프론트엔드 타입 검사·빌드
-	@cd backend && uv run ruff check app tests migrations && uv run ruff format --check app tests migrations
+	@cd backend && uv run ruff check app tests migrations && uv run ruff format --check app tests migrations && uv run lint-imports
 	@cd frontend && npm run build --silent

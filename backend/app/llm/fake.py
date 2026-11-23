@@ -20,6 +20,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from pydantic import Field
 
 FAKE_TOOL = "get_current_time"
+FAKE_MEMORY_TOOL = "remember"
 
 
 @dataclass
@@ -44,6 +45,8 @@ class EchoChatModel(BaseChatModel):
     - ``THINK_MARKER``: 답변 전에 추론 과정을 보낸다 (Ollama 와 같은 ``reasoning_content`` 형식).
     - ``TOOL_MARKER``: 도구가 바인딩되어 있으면 ``get_current_time`` 을 호출하고, 도구 결과를
       받은 다음 호출에서 결과를 담아 답한다.
+    - ``REMEMBER_MARKER``: ``remember`` 도구가 바인딩되어 있으면 표시 뒤의 글을 기억으로 저장한다
+      (카테고리 ``other``).
 
     Attributes:
         stream_delay_seconds: 스트리밍 시 조각 하나마다 기다리는 시간. "응답 생성 중" 상황을
@@ -54,6 +57,7 @@ class EchoChatModel(BaseChatModel):
     FAIL_MARKER: ClassVar[str] = "[[fail]]"
     THINK_MARKER: ClassVar[str] = "[[think]]"
     TOOL_MARKER: ClassVar[str] = "[[tool]]"
+    REMEMBER_MARKER: ClassVar[str] = "[[remember]]"
     stream_delay_seconds: float = 0.0
     tool_names: list[str] = Field(default_factory=list)
 
@@ -96,6 +100,14 @@ class EchoChatModel(BaseChatModel):
                 "args": {"timezone": "Asia/Seoul"},
             }
             return _Plan(reasoning if thinking else "", "시간을 확인해 볼게요.", call)
+        if self.REMEMBER_MARKER in last_human.text and FAKE_MEMORY_TOOL in self.tool_names:
+            content = last_human.text.split(self.REMEMBER_MARKER, 1)[1].strip()
+            call = {
+                "id": f"call_{uuid.uuid4().hex[:12]}",
+                "name": FAKE_MEMORY_TOOL,
+                "args": {"content": content, "category": "other"},
+            }
+            return _Plan("", "기억해 둘게요.", call)
 
         n_images = (
             sum(1 for b in last_human.content if isinstance(b, dict) and b.get("type") == "image")

@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.routers import approvals as approvals_router
 from app.auth import approval, mail
 from app.auth.tokens import hash_token
-from app.config import Settings
+from app.core.config import Settings
 from app.main import _RedactApprovalTokens
 from app.models import ApprovalToken
-from app.routers import approvals as approvals_router
 
 SETTINGS = Settings(
     admin_emails="owner@gmail.com",
@@ -187,7 +187,8 @@ async def test_reject_and_suspend_end_sessions(sent):
         await approval.decide(session, target, decision, SETTINGS)
         assert target.status == end
         assert any("DELETE FROM sessions" in q for q in session.executed)
-    assert [m.subject for m in sent] == ["[Agent] 가입 신청 결과"]  # 정지는 메일을 보내지 않는다
+    # 정지는 메일을 보내지 않는다
+    assert [m.subject for m in sent] == ["[okdoitttt] 가입 신청 결과"]
 
 
 @pytest.mark.parametrize(

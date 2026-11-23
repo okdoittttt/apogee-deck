@@ -8,11 +8,12 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
-from app.agents import chat, runtime, summary
+from app.agents import chat
 from app.agents.chat import graph as chat_graph
-from app.agents.context import compact_old_tool_results, make_token_counter
-from app.agents.runtime import TextDelta
-from app.config import Settings
+from app.core.config import Settings
+from app.orchestration import runtime, summary
+from app.orchestration.context import compact_old_tool_results, make_token_counter
+from app.orchestration.runtime import TextDelta
 
 # qwen3.5:9b 에 실제로 보내서 잰 입력 토큰 수 (prompt_eval_count, chat 템플릿 포함).
 KO_TEXT = (

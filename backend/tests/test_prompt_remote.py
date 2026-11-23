@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from app import prompts
-from app.config import Settings
+from app.core.config import Settings
 from app.prompts import loader, remote
 
 

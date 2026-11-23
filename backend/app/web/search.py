@@ -14,8 +14,9 @@ from typing import Any, Literal
 
 import httpx
 
-from app.agents.tooling import ToolError
-from app.config import Settings
+from app.core.citations import source_marker
+from app.core.config import Settings
+from app.core.errors import ToolError
 from app.web import tavily
 from app.web.text import age_label, external_note, truncate, untag
 
@@ -232,7 +233,7 @@ def format_results(request: SearchRequest, results: list[SearchResult], today: d
         today: 오늘 날짜 (앱 시간대 기준).
 
     Returns:
-        결과마다 번호, 제목, URL, (있으면) 발행일, 본문 조각을 담은 텍스트.
+        결과마다 번호 자리 표시(``source_marker``), 제목, URL, (있으면) 발행일, 본문 조각을 담은 텍스트.
         결과가 없으면 검색어나 기간을 바꿔 보라는 안내.
     """
     period = request.period()
@@ -254,7 +255,7 @@ def format_results(request: SearchRequest, results: list[SearchResult], today: d
         f"<{RESULTS_TAG}>",
     ]
     for i, r in enumerate(results, 1):
-        lines = [f"[{i}] {untag(r.title, RESULTS_TAG)}", f"URL: {r.url}"]
+        lines = [f"{source_marker(i)} {untag(r.title, RESULTS_TAG)}", f"URL: {r.url}"]
         if r.published_date:
             lines.append(f"Published: {r.published_date}{age_label(r.published_date, today)}")
         lines.append(untag(r.content, RESULTS_TAG))
@@ -262,8 +263,8 @@ def format_results(request: SearchRequest, results: list[SearchResult], today: d
     parts.append(f"</{RESULTS_TAG}>")
     # 출처 목록은 화면이 검색 결과로 직접 보여준다. 모델이 따로 쓰면 두 번 나오므로 쓰지 않게 한다.
     parts.append(
-        "Answer from these results only. Do not write a sources or references list: "
-        "the app shows these results to the user as links."
+        "Answer from these results only, and cite them by their numbers. Do not write a sources "
+        "or references list: the app shows these results to the user as links."
     )
     return "\n\n".join(parts)
 

@@ -9,11 +9,27 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    Uuid,
+    func,
+    true,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db import Base
+from app.core.db import Base
+
+EMBEDDING_DIMENSIONS = 1536
+"""청크 임베딩 차원 (OpenAI ``text-embedding-3-small``). 바꾸려면 마이그레이션으로 열을 바꾸고 다시 임베딩한다."""
 
 
 class User(Base):
@@ -32,6 +48,7 @@ class User(Base):
         approved_at: 승인된 시각.
         last_login_at: 마지막 로그인 시각.
         is_local: 인증을 끈 개발 환경에서 쓰는 로컬 사용자인지.
+        memory_enabled: 장기 기억을 쓸지. 끄면 저장된 기억은 남지만 대화에서 쓰거나 새로 저장하지 않는다.
     """
 
     __tablename__ = "users"
@@ -48,6 +65,7 @@ class User(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_local: Mapped[bool] = mapped_column(Boolean, default=False)
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
 
 
 class UserSession(Base):
@@ -98,6 +116,35 @@ class ApprovalToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Project(Base):
+    """프로젝트: 문서 묶음과 지시문, 그 안의 대화들.
+
+    프로젝트 문서는 첨부 문서와 달리 보관 기간이 없다 (사용자가 지울 때까지 둔다). 프로젝트를 지우면
+    그 안의 대화와 문서가 함께 지워진다.
+
+    Attributes:
+        id: 프로젝트 ID.
+        user_id: 프로젝트의 주인.
+        name: 프로젝트 이름.
+        instructions: 이 프로젝트의 대화에서 모델이 따를 지시문 (system 프롬프트에 붙는다).
+        created_at: 만든 시각.
+        updated_at: 이름이나 지시문을 마지막으로 바꾼 시각.
+    """
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    instructions: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Conversation(Base):
     """대화 하나. ``id`` 가 LangGraph checkpointer 의 ``thread_id`` 로도 쓰인다.
 
@@ -105,6 +152,7 @@ class Conversation(Base):
         id: 대화 ID.
         user_id: 대화의 주인. 로그인 기능 전에 만든 대화는 ``None`` 이고, 관리자가 처음 로그인할 때
             관리자에게 옮긴다.
+        project_id: 속한 프로젝트. 프로젝트 밖의 대화는 ``None``.
         title: 사이드바에 보이는 제목 (첫 메시지 앞부분).
         created_at: 생성 시각.
         messages: 대화의 메시지 (생성 순).
@@ -115,6 +163,9 @@ class Conversation(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     title: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -135,9 +186,13 @@ class Message(Base):
         role: ``"user"`` 또는 ``"assistant"``.
         content: 메시지 텍스트. assistant 는 화면에 스트리밍된 텍스트 그대로 저장한다.
         steps: assistant 응답의 실행 단계(추론 과정, 도구 호출)를 일어난 순서대로 담은 JSON.
-            형식은 ``app.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
+            형식은 ``app.api.schemas.ReasoningStep`` / ``ToolStep``. 사용자 메시지와 실행 단계가
             없는 응답은 ``None``.
         model: 응답한 모델 ID (``"<provider>:<모델 이름>"``). 사용자 메시지는 ``None``.
+        trace_id: 이 응답의 Langfuse 트레이스 ID (피드백을 그 트레이스의 점수로 남긴다). 트레이싱이 꺼져 있었거나
+            이 열을 추가하기 전의 응답은 ``None``.
+        feedback: 사용자 피드백. 1 (👍), -1 (👎), 없으면 ``None``.
+        feedback_comment: 피드백과 함께 남긴 의견.
         created_at: 생성 시각.
         conversation: 속한 대화.
         images: 사용자가 첨부한 이미지 (첨부 순).
@@ -153,6 +208,9 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text)
     steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    feedback: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    feedback_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -164,14 +222,14 @@ class Message(Base):
 
 
 class MessageImage(Base):
-    """사용자가 첨부한 이미지 원본 (UI 표시용).
+    """사용자가 첨부한 이미지. 원본은 첨부 저장소(MinIO)에 두고 여기에는 위치만 둔다 (``app.images``).
 
     Attributes:
-        id: 이미지 ID. ``GET /api/images/{id}`` 로 내려준다.
+        id: 이미지 ID. ``GET /api/images/{id}`` 로 내려주고, checkpoint 의 이미지 참조 블록도 이 ID 를 쓴다.
         message_id: 속한 메시지 ID.
         position: 메시지 안에서의 순서.
         mime_type: 이미지 MIME 타입.
-        data: 이미지 바이너리.
+        storage_key: 첨부 저장소의 객체 키 (``images/<ID>``).
         message: 속한 메시지.
     """
 
@@ -183,21 +241,26 @@ class MessageImage(Base):
     )
     position: Mapped[int] = mapped_column(Integer, default=0)
     mime_type: Mapped[str] = mapped_column(String(50))
-    data: Mapped[bytes] = mapped_column(LargeBinary)
+    storage_key: Mapped[str] = mapped_column(String(200))
 
     message: Mapped[Message] = relationship(back_populates="images")
 
 
 class Document(Base):
-    """사용자가 첨부한 문서. 원본은 첨부 저장소(MinIO)에, 파싱한 텍스트는 이 테이블에 둔다.
+    """사용자가 올린 문서. 원본은 첨부 저장소(MinIO)에, 파싱한 텍스트는 이 테이블에 둔다.
 
-    문서는 올리는 순간에는 어느 대화에도 속하지 않는다. 메시지와 함께 보낼 때 대화와 메시지에
-    연결되고, 그 대화 안에서만 읽을 수 있다. 보내지 않은 문서는 정리 작업이 지운다.
+    두 종류가 있다.
+
+    - 대화 첨부: 올리는 순간에는 어느 대화에도 속하지 않는다. 메시지와 함께 보낼 때 대화와 메시지에
+      연결되고, 그 대화 안에서만 읽을 수 있다. 보내지 않은 문서와 보관 기간이 지난 문서는 정리 작업이 지운다.
+    - 프로젝트 문서 (``project_id`` 가 있음): 대화에 붙지 않고, 그 프로젝트의 모든 대화에서 읽을 수 있다.
+      보관 기간 없이 사용자가 지울 때까지 둔다.
 
     Attributes:
         id: 문서 ID.
         user_id: 문서를 올린 사용자. 로그인 기능 전에 올린 문서는 ``None``.
-        conversation_id: 속한 대화 ID. 메시지로 보내기 전에는 ``None``.
+        project_id: 속한 프로젝트 ID. 대화 첨부는 ``None``.
+        conversation_id: 속한 대화 ID. 메시지로 보내기 전이나 프로젝트 문서는 ``None``.
         message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전에는 ``None``.
         filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
         kind: 내용으로 확인한 형식 (``app.documents.formats.DocumentKind``).
@@ -205,10 +268,15 @@ class Document(Base):
         size_bytes: 원본 크기.
         sha256: 원본의 SHA-256 (16진수).
         storage_key: 첨부 저장소의 객체 키.
-        status: ``processing`` (파싱 중) | ``ready`` (준비됨) | ``failed`` (실패).
+        status: ``processing`` (파싱 중) | ``analyzing`` (프로젝트 문서의 그림 설명 중) |
+            ``indexing`` (프로젝트 문서의 검색 준비 중) | ``ready`` (준비됨) |
+            ``failed`` (실패).
         error: 실패 사유 (사용자에게 보여줄 문구).
         page_count: 쪽수 (쪽 구분이 없는 형식은 ``None``).
         content: 파싱한 본문 (Markdown). 준비되기 전에는 ``None``.
+        token_count: 본문과 그림 설명의 추정 토큰 수 (프로젝트 용량 계산에 쓴다). 준비되기 전에는 ``None``.
+        image_count: 설명할 그림 수 (프로젝트 문서만).
+        image_fallback_count: 설명을 만들지 못해 OCR 글자로 대신한 그림 수 (프로젝트 문서만).
         created_at: 올린 시각.
         parsed_at: 파싱이 끝난 시각 (성공·실패 모두).
     """
@@ -218,6 +286,9 @@ class Document(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=True
@@ -235,7 +306,108 @@ class Document(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_fallback_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentElement(Base):
+    """프로젝트 문서의 요소 하나 (본문·표·그림). 검색(RAG)용 청크를 이 요소들로 만든다.
+
+    Attributes:
+        id: 요소 ID.
+        document_id: 속한 문서 ID.
+        position: 문서 안의 순서 (0부터).
+        kind: ``text`` (본문) | ``table`` (Markdown 표) | ``image`` (그림).
+        page: 쪽(슬라이드·시트) 번호. 쪽 구분이 없으면 ``None``.
+        heading: 제목 경로 (예: ``"1장 > 1.1 결과"``). 없으면 ``None``.
+        content: 본문, 표 Markdown, 그림 설명 (설명을 만들지 못했으면 그림 속 OCR 글자).
+        image_key: 그림 원본의 객체 키 (그림 요소만).
+        image_mime: 그림 원본의 MIME 타입 (그림 요소만).
+        image_status: 그림 요소의 설명 상태. ``pending`` (설명 전) | ``described`` | ``fallback`` (OCR 글자로 대신).
+        token_count: ``content`` 의 추정 토큰 수.
+    """
+
+    __tablename__ = "document_elements"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(10))
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    image_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    image_mime: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    image_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class DocumentChunk(Base):
+    """프로젝트 문서의 검색 단위(청크). 요소(``DocumentElement``)를 묶거나 나눠서 만든다.
+
+    작은 본문 요소는 같은 제목 아래에서 목표 크기까지 묶고, 큰 요소는 나눈다. 표와 그림은 따로 청크가 된다.
+    임베딩은 청크 앞에 문서 이름과 제목 경로를 붙인 글자로 만든다.
+
+    Attributes:
+        id: 청크 ID.
+        document_id: 속한 문서 ID.
+        project_id: 속한 프로젝트 ID (검색할 때 프로젝트로 거른다).
+        position: 문서 안의 순서 (0부터).
+        kind: ``text`` | ``table`` | ``image``.
+        page_start: 첫 쪽 번호. 쪽 구분이 없으면 ``None``.
+        page_end: 마지막 쪽 번호.
+        heading: 제목 경로. 없으면 ``None``.
+        content: 청크 본문 (그림은 설명).
+        image_element_id: 그림 청크의 그림 요소 ID (원본 그림을 보여줄 때 쓴다).
+        element_ids: 이 청크를 만든 요소들의 ID (문서 보기 패널에서 근거 위치를 강조할 때 쓴다).
+            이 열을 추가하기 전에 만든 청크는 ``None`` 이다 (다시 처리하면 채워진다).
+        token_count: ``content`` 의 추정 토큰 수.
+        embedding: 임베딩. 아직 만들지 못했으면 ``None`` (검색할 때 다시 만든다).
+        embedding_model: 임베딩을 만든 모델 (``"openai:text-embedding-3-small"``).
+        search_vector: 키워드 검색용 tsvector (``app.documents.keywords`` 토큰, ``simple`` 설정).
+            아직 만들지 못했으면 ``None`` (검색할 때 만든다).
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        # 코사인 거리로 찾는 근사 최근접 이웃 인덱스
+        Index(
+            "ix_document_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        # 키워드 검색 (전문 검색)
+        Index("ix_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(10))
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    image_element_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_elements.id", ondelete="SET NULL"), nullable=True
+    )
+    element_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(Uuid), nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS), nullable=True
+    )
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    search_vector: Mapped[Any | None] = mapped_column(TSVECTOR, nullable=True)

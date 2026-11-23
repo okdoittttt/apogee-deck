@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.config import Settings
+from app.core.config import Settings
 from app.llm import model_name
 
 logger = logging.getLogger(__name__)

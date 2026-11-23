@@ -1,4 +1,4 @@
-# Agent
+# okdoitttt
 
 LangGraph 기반 LLM 에이전트 웹앱. Docker Compose로 실행합니다.
 
@@ -55,7 +55,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 
 | provider | 목록에 나오는 조건 | 모델 |
 |---|---|---|
-| `openai` | `OPENAI_API_KEY` 가 있을 때 | `OPENAI_MODELS` (기본 gpt-6-luna, gpt-5-mini, gpt-6.1-terra) |
+| `openai` | `OPENAI_API_KEY` 가 있을 때 | `OPENAI_MODELS` (기본 gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra) |
 | `google` | `GOOGLE_API_KEY` 가 있을 때 | `GOOGLE_MODELS` (기본 Gemma 4 26B, 31B) |
 | `anthropic` | `ANTHROPIC_API_KEY` 가 있을 때 | `ANTHROPIC_MODELS` (기본 Opus, Sonnet, Haiku) |
 | `ollama` | Ollama 서버가 응답할 때 | 설치된 모델 전체 (`ollama list`). 꺼져 있으면 빠집니다 |
@@ -64,7 +64,7 @@ Langfuse 없이 앱만 띄우려면 `.env`의 `COMPOSE_FILE` 줄을 주석 처�
 - `.env`의 `LLM_PROVIDER`와 `*_MODEL`은 **처음 선택될 기본 모델**입니다. 그 모델을 쓸 수 없으면 목록의 첫 모델이 선택됩니다.
 - 모델 ID는 `"<provider>:<모델 이름>"` 형식입니다(예: `google:gemma-4-26b-a4b-it`, `ollama:qwen3.5:9b`).
 - 모델마다 provider와 컨텍스트 예산이 달라서 그래프를 모델별로 만들어 캐시합니다(`runtime.get_graph`). 대화 상태는 같은 checkpointer에 있습니다.
-- 대화 도중 모델을 바꾸면 이전 답변의 추론 블록은 새 모델에 보내지 않습니다(`agents/context.py`의 `drop_foreign_reasoning`).
+- 대화 도중 모델을 바꾸면 이전 답변의 추론 블록은 새 모델에 보내지 않습니다(`orchestration/context.py`의 `drop_foreign_reasoning`).
   추론 블록에는 만든 provider의 서명이 붙어 있어서, 다른 provider에 보내면 요청이 거절될 수 있기 때문입니다. 답변 텍스트와 도구 호출은 그대로 보냅니다.
 
 ### provider
@@ -109,8 +109,10 @@ make backend
 
 ### 이미지 입력 (VLM)
 채팅 입력창에서 이미지 버튼, 붙여넣기, 드래그 앤 드롭으로 첨부합니다(메시지당 최대 4장).
-- 프론트엔드가 긴 변 1024px로 줄여서 base64로 전송 → 백엔드가 검증(형식, 5MB, 장수) 후 `message_images` 테이블에 저장
-- LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 만들어 그래프에 전달 → Anthropic / Google / Ollama 형식으로 자동 변환
+- 프론트엔드가 긴 변 1024px로 줄여서 base64로 전송 → 백엔드가 검증(형식, 5MB, 장수) 후 원본을 첨부 저장소(MinIO `images/<ID>`)에 저장하고, `message_images` 테이블에는 객체 키만 저장
+- 대화 상태(checkpoint)에는 원본 대신 이미지 ID 만 담은 참조 블록을 저장 → 턴마다 같은 이미지가 다시 쌓이지 않음
+- 모델을 부르기 직전에 참조를 LangChain 표준 이미지 블록(`{"type": "image", "base64", "mime_type"}`)으로 바꿔서 전달 → Anthropic / Google / Ollama 형식으로 자동 변환 (`app/images.py`)
+- 이미지는 문서 원본과 달리 보관 기간으로 지우지 않고, 대화를 지울 때 함께 지움 (첨부 저장소가 없으면 이미지 전송은 503)
 - 화면에서는 `GET /api/images/{id}`로 이미지를 불러옴
 - vision을 지원하지 않는 모델이면 `ENABLE_VISION=false` (이미지 첨부 시 400 응답)
 
@@ -125,13 +127,13 @@ make backend
 
 Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라냅니다**. 그래서 `agent` 노드가 호출 전에
 `trim_messages`로 최근 대화만 예산 안에 맞춥니다. 토큰 수는 글자 수로 추정하는데, 한국어는 영어보다 글자당 토큰이 2배 이상 많아서
-한글 등 ASCII가 아닌 글자는 1.5자당 1토큰으로 따로 셉니다(`agents/context.py`의 `make_token_counter`). checkpointer에 저장된 원본 이력은 그대로 남고,
+한글 등 ASCII가 아닌 글자는 1.5자당 1토큰으로 따로 셉니다(`orchestration/context.py`의 `make_token_counter`). checkpointer에 저장된 원본 이력은 그대로 남고,
 모델에 실제로 들어간 입력은 Langfuse에서 확인할 수 있습니다. (Anthropic은 컨텍스트가 크고 이력을
 자르면 캐시가 깨지므로 기본적으로 자르지 않습니다.)
 
 #### 지난 도구 결과 줄이기
 도구 결과(웹 검색 한 번에 수천 토큰)는 상태에 남아 이후 모든 턴에 다시 입력됩니다. 그래서 모델에 보낼 때
-**마지막 사용자 메시지보다 앞에 있는 도구 결과는 줄여서** 보냅니다(`agents/context.py`의 `compact_old_tool_results`).
+**마지막 사용자 메시지보다 앞에 있는 도구 결과는 줄여서** 보냅니다(`orchestration/context.py`의 `compact_old_tool_results`).
 이번 턴의 결과와 저장된 원본은 그대로입니다.
 
 - 출처가 있는 결과(웹 검색): 호출 인자와 `[번호] 제목 - URL (발행일)` 목록만 남깁니다. 자세한 내용이 다시 필요하면 모델이 다시 검색합니다.
@@ -150,36 +152,52 @@ Ollama는 `num_ctx`를 넘는 입력을 **오류 없이 앞부분부터 잘라�
 - `agent` 노드는 요약을 system 프롬프트 끝에 붙이고(`chat/conversation_summary`), 요약 이후의 메시지만 보냅니다.
 - 요약은 같은 모델로 하되 추론을 끄고 출력은 1024 토큰으로 제한합니다(`chat/summary`). 요약 토큰은 화면에 나가지 않습니다.
 - 요약이 실패하거나 120초를 넘기면 경고 로그만 남기고 기존 방식(잘라내기)으로 답합니다.
-- 비율 같은 값은 `agents/summary.py`의 상수입니다. 요약이 일어나는 것을 직접 보려면 `CONTEXT_MAX_TOKENS=2000`처럼 작게 잡으세요.
+- 비율 같은 값은 `orchestration/summary.py`의 상수입니다. 요약이 일어나는 것을 직접 보려면 `CONTEXT_MAX_TOKENS=2000`처럼 작게 잡으세요.
 
 ## 구조
 
 ```
 backend/
 ├── app/
-│   ├── main.py              # 앱, CORS, lifespan (DB 초기화 + 에이전트 런타임 시작/종료)
-│   ├── config.py            # 환경 변수 기반 설정
-│   ├── db.py / models.py    # SQLAlchemy (UI용 conversations, messages, message_images)
-│   ├── schemas.py
-│   ├── tracing.py           # Langfuse CallbackHandler
-│   ├── storage.py           # 첨부 파일 저장소 (S3 API, 앱 전용 MinIO)
-│   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제), 요청별 현재 사용자
-│   ├── routers/auth.py      # /api/auth (Google 로그인·콜백, 로그아웃, 내 정보)
-│   ├── documents/           # 첨부 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 정리
-│   ├── routers/documents.py # /api/documents (올리기, 상태, 원본 받기, 지우기)
-│   ├── routers/chat.py      # /api/chat (SSE), /api/conversations, /api/images
-│   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델
-│   ├── prompts/             # 프롬프트 로더 + 공용 조각
-│   │   ├── loader.py
-│   │   └── shared/          # language.md, formatting.md ...
-│   └── agents/
-│       ├── runtime.py       # 에이전트 레지스트리, checkpointer, 스트리밍 실행
-│       ├── context.py       # 공용: 대화 이력 trim, 프롬프트 동적 변수(오늘 날짜)
-│       └── chat/            # 기본 채팅 에이전트
-│           ├── graph.py     # LangGraph: agent ⇄ tools
-│           ├── tools.py
-│           └── prompts/system.md
+│   ├── main.py              # 앱, CORS, lifespan (DB 초기화 + 에이전트 등록·런타임 시작/종료)
+│   ├── api/                 # HTTP 계층: 인증, 입력 검증, 응답 형식, SSE 변환만
+│   │   ├── deps.py          # DB 세션, 요청별 현재 사용자 (FastAPI 의존성)
+│   │   ├── schemas.py       # 요청/응답 스키마
+│   │   └── routers/         # auth, approvals, admin, documents, projects, memory, chat(/api/chat SSE, 대화, 이미지)
+│   ├── conversations/       # 대화 도메인
+│   │   ├── service.py       # 대화 조회·삭제, 프로젝트 삭제, 새 턴 준비(검증 + 사용자 메시지 저장)
+│   │   ├── turns.py         # 한 턴의 응답 실행: 이벤트 내보내기 + 답변 저장
+│   │   └── runs.py          # 대화별 "생성 중" 상태
+│   ├── agents/              # 에이전트 정의와 등록 목록(AGENTS)
+│   │   └── chat/            # 기본 채팅 에이전트
+│   │       ├── graph.py     # LangGraph: (recall →) agent ⇄ tools, 쓸 도구 이름(TOOL_NAMES)
+│   │       └── prompts/     # system.md, summary.md ...
+│   ├── orchestration/       # 에이전트 실행 엔진 (어떤 에이전트가 있는지 모름)
+│   │   ├── runtime.py       # 에이전트 등록, checkpointer·기억 Store, 스트리밍 실행
+│   │   ├── events.py        # 화면으로 보내는 이벤트, 실행 단계 기록
+│   │   ├── context.py       # 대화 이력 trim, 프롬프트 동적 변수(오늘 날짜)
+│   │   ├── summary.py       # 오래된 대화 요약
+│   │   └── tooling.py       # 도구 오류 처리, 반복 제한
+│   ├── tools/               # 공용 도구 (registry.py 에 등록, 에이전트가 이름으로 골라 씀)
+│   ├── projects/            # 프로젝트: 만들기·조회, 프로젝트 문서, 에이전트에게 줄 프로젝트 정보, 문서 검색
+│   ├── documents/           # 첨부·프로젝트 문서: 형식 확인, 파싱(xberg + PaddleOCR, 별도 프로세스), 요소·청크, 정리
+│   ├── web/                 # 웹 검색(Tavily), 페이지 읽기
+│   ├── memory/              # 장기 기억: LangGraph Store 생명주기, 프로필·기억 읽기·쓰기 규칙
+│   ├── auth/                # 로그인: Google OAuth, 세션, 사용자 상태(승인제)
+│   ├── images.py            # 채팅 이미지: 저장소 저장, checkpoint 참조 ↔ 원본
+│   ├── llm/                 # provider 별 chat model 생성 (모든 에이전트 공용) + fake 모델, 그림 설명, 임베딩
+│   ├── prompts/             # 프롬프트 로더 + 공용 조각 (shared/language.md, formatting.md ...)
+│   ├── models.py            # SQLAlchemy 모델
+│   └── core/                # 인프라: 설정, DB, 첨부 저장소(S3 API), Langfuse, 공용 예외
 └── tests/                   # make test
+```
+
+**계층 규칙:** 위 계층은 아래 계층을 import 할 수 있지만 반대는 안 됩니다. `make lint`가 `lint-imports`로 검사합니다
+(규칙은 `backend/pyproject.toml`의 `[tool.importlinter]`).
+
+```
+main → api → conversations → agents → orchestration → tools
+     → projects · documents · web · auth · images · memory → llm · prompts → models → core
 ```
 
 **대화 이력 저장 방식 (A안)**
@@ -199,6 +217,7 @@ prompts.render("chat/system", today="2026-11-19 (Thursday)").text
 | 이름 | 파일 |
 |---|---|
 | `chat/system` | `app/agents/chat/prompts/system.md` |
+| `chat/project` | `app/agents/chat/prompts/project.md` (프로젝트 대화일 때 system 프롬프트에 덧붙임) |
 | `shared/language` | `app/prompts/shared/language.md` |
 
 파일 형식은 YAML frontmatter + Jinja2 본문입니다.
@@ -219,6 +238,18 @@ Today's date is {{ today }}.
 - include 대상 파일이 없으면 오류가 납니다.
 
 **잘못된 프롬프트는 배포 후 첫 요청이 아니라 앱 기동 시점에 실패합니다.**
+
+### 응답 피드백 (👍/👎 → Langfuse 점수)
+
+- 응답 한 턴은 Langfuse 트레이스 하나입니다. 트레이스 ID 를 미리 만들어 콜백에 넘기고(`tracing.new_trace_id`) assistant 메시지에도
+  저장합니다(`messages.trace_id`). `done` 이벤트는 저장한 메시지 ID 를 알려 줍니다.
+- 화면의 응답 아래 👍/👎(같은 버튼을 다시 누르면 취소, 👎 는 의견 선택)는 `PUT /api/conversations/{id}/messages/{message_id}/feedback`
+  으로 DB 에 저장되고(`feedback`, `feedback_comment`), 응답 뒤에 그 트레이스에 **`user_feedback` 점수**(BOOLEAN, 👍 1 / 👎 0, 의견은 comment)로
+  남습니다. 점수 ID 는 메시지마다 하나라서 바꾸면 같은 점수를 고치고, 취소하면 지웁니다. Langfuse 가 실패해도 피드백 저장에는 영향이 없습니다.
+- 프롬프트 버전이 그 아래 LLM 호출에 연결되어 있어서, Langfuse 에서 프롬프트 버전별 점수를 비교할 수 있습니다.
+- 이 기능 전의 응답이나 트레이싱이 꺼져 있을 때의 응답은 트레이스 ID 가 없어 DB 에만 저장합니다 (`scored: false`).
+- Langfuse v4(events_only)에서 점수는 `GET /api/public/v3/scores` 로 읽습니다. 의견은 기본 응답에 없고 `fields=core,details` 로 보이며,
+  수정·삭제는 몇 초 뒤에 반영됩니다.
 
 ### Langfuse 프롬프트 관리 연동
 
@@ -264,6 +295,30 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 - 도구의 표시 문구는 `app/agents/<에이전트>/tools.py`의 `TOOL_LABELS`에 둡니다.
   예: `get_current_time` → 실행 중 "시간을 확인하는 중", 완료 "시간 확인함". 없으면 기본 문구를 씁니다.
 - 응답이 중단되거나 오류로 끝나면, 실행 중이던 도구는 "중단됨" / "실패"로 저장됩니다.
+- 끊긴 답은 **모델 기억(checkpoint)에도** 남깁니다. LangGraph 는 노드가 끝나야 checkpoint 를 써서, 그대로 두면 다음 턴에 모델이
+  자기가 한 말을 모릅니다. 실행 엔진(`runtime.stream_reply`)이 아직 저장되지 않은 답(진행 중이던 모델 호출의 글자)만 모아 두었다가,
+  중지·시간 초과·앱 종료·오류로 끊기면 `[This reply was cut off before it was finished.]` 를 붙여 `aupdate_state` 로 넣습니다.
+  도구를 부른 앞 단계처럼 이미 저장된 답은 다시 넣지 않고, 추론 과정은 넣지 않습니다.
+
+## 화면 주소 (URL 라우팅)
+
+화면은 하나(`app/page.tsx`)로 두고 주소만 History API 로 바꿉니다 (`lib/routes.ts`). 페이지를 다시 불러오지 않아서
+대화를 옮겨도 사이드바·모델 선택 같은 상태가 그대로입니다.
+
+| 주소 | 화면 |
+|---|---|
+| `/` | 새 대화 |
+| `/c/{대화 ID}` | 대화 (프로젝트 안의 대화도 같은 주소) |
+| `/p/{프로젝트 ID}` | 프로젝트 화면 |
+| `/p/new` | 새 프로젝트 만들기 |
+| `/memory` | 기억 관리 (사이드바 아래 사용자 메뉴의 "기억") |
+
+- 새로고침하면 `next.config.ts` 의 rewrite 가 같은 페이지를 돌려주고, 화면이 주소를 읽어 그 대화·프로젝트를 엽니다.
+  없거나 다른 사람의 대화면 "찾을 수 없습니다" 안내 후 새 대화로 갑니다.
+- 대화·프로젝트를 옮기면 기록이 쌓여 브라우저 뒤로·앞으로 가기가 됩니다. 첫 메시지로 대화가 만들어지면
+  `/` 를 `/c/{ID}` 로 바꿔서(뒤로 가기에 빈 화면이 끼지 않게) 기록을 하나만 남깁니다.
+- 사이드바와 프로젝트 화면의 대화 목록은 진짜 링크라서 ⌘/Ctrl+클릭하면 새 탭에서 열립니다. 탭 제목은 대화 제목·프로젝트 이름입니다.
+- 생성 중 새로고침하면 그 대화로는 돌아오지만 만들던 응답은 멈춥니다 (응답을 이어 받는 것은 다음 단계).
 
 ## 동시 요청 처리
 
@@ -275,13 +330,18 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | 같은 창에서 응답 생성 중 입력 | **대기열**에 넣음 (1개까지, 그 이상은 거절). 응답이 끝나면 자동 전송 |
 | 응답 중 "중지" | 서버 정리가 끝나면 대기 메시지를 바로 전송 |
 | 응답 중 오류 | 자동 전송을 멈추고 "대기 메시지 보내기" 버튼 표시 |
-| 다른 창에서 같은 대화에 입력 | 서버가 **409로 거절**. 입력 내용은 입력창에 남고, 안내 상자 표시 후 끝나면 자동 갱신 |
+| 다른 창에서 같은 대화에 입력 | 서버가 **409로 거절**. 입력 내용은 입력창에 남고, 그 창의 응답을 **이어서 실시간으로** 보여줌 |
 | 생성 중인 대화 삭제 | 409로 거절 |
-| 응답 중 / 대기 메시지가 있을 때 다른 대화로 이동 | 막음 |
+| 응답 중 다른 대화로 이동 | 허용. 응답은 서버에서 끝까지 만들어지고, 돌아오면 이어서 보임 |
+| 대기 메시지가 있을 때 다른 대화로 이동 | 막음 (브라우저 뒤로 가기도 주소를 되돌리고 안내) |
+| 응답 중 새로고침·탭 닫기·다른 창이나 기기에서 열기 | 응답은 계속 만들어지고, 대화를 열면 **진행 중인 응답에 다시 붙어** 이어서 보임 |
+| 응답을 받다가 연결이 끊김 | 받은 이벤트 번호 다음부터 자동으로 다시 붙음 (최대 5번). 실행이 없으면 저장된 결과를 다시 읽음 |
 
-- 서버는 대화별 "생성 중" 상태를 `app/runs.py`에서 관리합니다. 지금은 메모리에 두고(백엔드 1개 기준),
+- 서버는 대화별 "생성 중" 상태를 `app/conversations/runs.py`에서 관리합니다. 지금은 메모리에 두고(백엔드 1개 기준),
   여러 프로세스로 늘리면 같은 인터페이스로 Redis 구현을 만들어 바꿉니다.
-- 다른 창의 대화는 지금 폴링(`GET /api/conversations/{id}/status`)으로 확인합니다.
+- 응답은 HTTP 요청이 아니라 **백그라운드 작업**에서 만듭니다(`runs.start_run`). 이벤트는 번호(`id:`)를 붙여 쌓고, 화면은 구독만 합니다.
+  `GET /api/conversations/{id}/stream`(`Last-Event-ID`/`after`)으로 다시 붙고, "중지"는 `POST /api/conversations/{id}/stop` 입니다
+  (연결 끊기로는 멈추지 않음). 실행 시간 상한은 `RUN_MAX_SECONDS`(기본 600초)이고, 끝난 실행의 기록은 60초 남깁니다.
 - 다른 창에서 서로 **다른 대화**를 동시에 진행하는 것은 제한하지 않습니다.
 
 ### 웹 페이지 읽기 (fetch_url)
@@ -304,6 +364,41 @@ make prompt-check    # 변경 사항만 확인 (--dry-run)
 | `FETCH_MAX_CHARS` | 한 번에 보여줄 최대 글자 수 (기본 8000) |
 | `FETCH_TIMEOUT_SECONDS` | 요청 타임아웃 (기본 15초) |
 | `FETCH_MAX_BYTES` | 받을 최대 크기 (기본 5MB) |
+
+## 장기 기억 (프로필과 기억)
+
+대화가 바뀌어도 사용자 정보가 남습니다. 대화 요약(컨텍스트 관리)이 **한 대화 안**의 기억이라면, 이건 **대화와 대화
+사이**의 기억입니다. LangGraph **Store**(`AsyncPostgresStore`, checkpointer 와 같은 Postgres·연결 풀)에 사용자별로 저장합니다.
+
+| 종류 | 위치 (namespace / key) | 모델에게 주는 방식 |
+|---|---|---|
+| 프로필 | `("users", uid)` / `profile` | 이름, 하는 일, 답변 선호 같은 핵심 정보 (최대 800자). **매 턴 system 프롬프트에 항상** 넣음 |
+| 기억 | `("users", uid, "memories")` / 8자리 ID | 그 밖의 낱개 사실 (카테고리: 선호·일·생활·기타). 사용자 메시지로 **의미 검색해서 관련된 것만** 최대 5개 |
+
+**저장 (hot path):** 모델이 대화 중에 도구로 직접 저장합니다. 화면에는 "기억함"·"프로필 갱신함" 단계로 보입니다.
+- `remember(content, category, memory_id?)` 저장·수정, `forget(memory_id)` 삭제, `update_profile(profile)` 프로필 전체 갱신,
+  `search_memories(query)` 자동으로 넣은 기억에 없을 때 더 찾기.
+- 사용자 ID 는 서버가 실행 설정(`configurable["user_id"]`)으로 넘기고 도구는 Store 를 주입받습니다(`InjectedStore`).
+  모델이 사용자를 고를 수 없어서 다른 사용자의 기억에 닿지 않습니다.
+- 언제 저장하고 무엇을 저장하지 않는지(비밀값, 일회성 정보, 문서·웹 결과 속 지시)는 프롬프트 `chat/memory` 에 있습니다.
+
+**불러오기와 프롬프트 비용:**
+- 그래프 맨 앞의 `recall` 노드가 **턴마다 한 번** 프로필과 관련 기억을 읽습니다. 한 턴에 도구를 여러 번 불러도 다시 검색하지 않습니다.
+- 기억 전체를 넣지 않고, 관련도(`MEMORY_MIN_SCORE`) 이상인 것만 `MEMORY_RECALL_LIMIT` 개까지 넣습니다. 관련 없으면 하나도 넣지 않습니다.
+- 검색된 기억은 system 프롬프트가 아니라 **모델에 보낼 때만 마지막 사용자 메시지 앞에** 붙입니다(checkpoint 에는 저장하지 않음).
+  매 턴 달라지는 내용을 system 프롬프트에 넣으면 그 뒤의 대화 이력 전체가 프롬프트 캐시에서 빠지기 때문입니다.
+  잘 바뀌지 않는 프로필만 system 프롬프트에 둡니다.
+- 임베딩은 프로젝트 문서 검색과 같은 설정(`EMBEDDING_*`)을 씁니다. 키가 없으면 의미 검색 대신 최근 기억을 넣습니다.
+  Store 의 벡터 테이블 차원은 처음 만들 때 정해지므로, 차원을 바꾸면 기억을 다시 인덱싱해야 합니다.
+
+**관리:** `/memory` 화면에서 프로필과 기억(카테고리별)을 보고, 고치고, 지울 수 있습니다. 사용자마다 기억 기능을 끌 수 있고
+(`users.memory_enabled`), 끄면 저장된 기억은 남지만 대화에 넣지도 새로 저장하지도 않으며 기억 도구도 모델에게 보이지 않습니다.
+
+| 설정 | 의미 |
+|---|---|
+| `ENABLE_MEMORY` | 장기 기억 사용 여부 (기본 true). 끄면 Store, 기억 도구, 관리 API 가 모두 빠진다 |
+| `MEMORY_RECALL_LIMIT` | 턴마다 넣을 관련 기억 최대 개수 (기본 5) |
+| `MEMORY_MIN_SCORE` | 넣을 최소 유사도 (기본 0.15). 짧은 한국어 문장은 유사도가 낮게 나온다 (관련 0.17~0.32, 무관 0.08~0.14 실측) |
 
 ## 로그인과 접근 제어
 
@@ -329,7 +424,8 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 첨부 원본은 앱 전용 MinIO(`minio` 서비스)에 저장합니다.
 
 - Langfuse 용 MinIO 와 계정·볼륨을 나눴습니다. Langfuse 없이도 동작하고, Langfuse 를 초기화해도 첨부 원본은 남습니다.
-- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일)을 만듭니다.
+- 백엔드가 시작할 때 버킷(`S3_BUCKET`, 기본 `attachments`)과 보관 기간 규칙(`ATTACHMENT_RETENTION_DAYS`, 기본 30일, 대화 첨부 원본 `documents/` 에만 적용)을 만듭니다.
+  프로젝트 문서 원본(`projects/`)과 채팅 이미지(`images/`)는 보관 기간 없이 지울 때까지 둡니다.
   MinIO 에 연결하지 못해도 앱은 시작하고, 첨부만 쓸 수 없습니다.
 - 코드는 MinIO 전용 API 가 아니라 S3 API(boto3)만 씁니다. `S3_ENDPOINT_URL`과 키만 바꾸면 AWS S3, Cloudflare R2 등으로 옮길 수 있습니다.
 
@@ -341,7 +437,13 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 
 - **형식**: PDF, DOCX, XLSX, PPTX, HWP, HWPX, TXT, MD, CSV. 확장자가 아니라 파일 내용으로 형식을 확인하고, 압축 폭탄을 막습니다.
 - **파싱**: [xberg](https://github.com/kreuzberg-dev/kreuzberg)(Kreuzberg 후속, MIT) + PaddleOCR 한국어 모델.
-  - PDF: 텍스트 레이어를 쓰고, 글자가 없는 쪽(스캔본)과 큰 그림이 섞인 쪽은 쪽 전체를 OCR 합니다.
+  - PDF: 본문은 텍스트 레이어이고, 글자가 거의 없는 쪽(스캔본)만 쪽 전체를 OCR 합니다.
+    **그림 속 글자는 남길 그림만 하나씩 OCR** 해서 본문과 섞지 않습니다. 쪽 전체 OCR 을 본문과 합치면 차트의 눈금·범례가
+    문장 사이에 끼어서, 모델이 눈금 값(예: 세로축 최대 4.6)을 데이터로 읽는 오답이 났기 때문입니다. 그림 속 글자는 프로젝트 문서면
+    그림 요소에(그림 설명의 참고 자료와 대체 글자), 대화 첨부면 쪽 끝에 `[그림 속 글자 (OCR, …)]` 표시를 붙여 넣습니다.
+    텍스트 레이어는 [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)(Apache-2.0/BSD)로 뽑습니다. xberg 기본 추출은
+    "칸 이름 | 값" 이 나란한 표 같은 배치를 여러 단으로 읽어서 줄 순서가 뒤섞였기 때문입니다(회의록의 회의 내용이 섞임).
+    그림·표 목록과 OCR 은 xberg 를 씁니다.
   - Office·한글: 문서 안 그림을 OCR 해서 제자리에 넣습니다. 표는 Markdown 표로 남습니다.
   - XML 로 된 `.hwp`(국가법령정보센터 등의 HWPML)는 앱이 본문만 직접 뽑습니다.
 - **실행**: 문서마다 새 프로세스에서 시간 제한(`DOCUMENT_PARSE_TIMEOUT_SECONDS`, 기본 3분)을 걸고 파싱합니다.
@@ -356,6 +458,79 @@ Google 계정으로 로그인하고, **관리자가 승인한 사람만** 쓸 �
 - 짧은 문서(추정 2,000토큰 이하, `DOCUMENT_INLINE_MAX_TOKENS`)는 본문까지 바로 넣어서 도구 호출을 아낍니다.
 - 긴 문서는 `read_document(document_id, offset)` 도구로 8,000자(`DOCUMENT_READ_MAX_CHARS`)씩 나눠 읽습니다. 다른 대화의 문서 ID 를 넣으면 찾을 수 없다고 답합니다.
 - 문서 본문은 `<document_content>` 태그로 감싸 지시가 아닌 참고 자료로 표시합니다 (웹 페이지 읽기와 같은 프롬프트 인젝션 방어).
+
+### 프로젝트
+
+문서를 모아 두고 그 안에서 여러 대화를 하는 기능입니다 (Claude 의 프로젝트와 비슷). 사이드바의 "프로젝트"에서 만듭니다.
+
+- 프로젝트 = 이름 + **지시문** + **문서** + 그 안의 **대화들**. 프로젝트 화면에서 보낸 메시지는 그 프로젝트 안의 새 대화가 됩니다.
+- 지시문과 문서 목록은 매 응답마다 system 프롬프트 끝에 붙입니다 (`chat/project`). 지시문을 고치면 다음 응답부터 적용됩니다.
+  checkpoint 에는 저장하지 않습니다 (실행 설정 `configurable["project"]` 로 넘김).
+- **작은 프로젝트**: 문서 합계가 추정 2만 토큰 이하(`PROJECT_INLINE_MAX_TOKENS`, Ollama 는 1만 `OLLAMA_PROJECT_INLINE_MAX_TOKENS`)면
+  본문을 모두 system 프롬프트에 넣어 도구 없이 바로 답합니다. 넘으면 목록만 주고 `search_project` 로 찾고 `read_document` 로 읽게 합니다.
+- 모델은 `search_project` 로 프로젝트 문서를 검색하고 `read_document` 로 읽습니다. 대상 프로젝트는 서버가 정하므로,
+  모델이 다른 프로젝트의 문서 ID 를 넣어도 읽지 못합니다. 프로젝트 밖의 대화에는 `search_project` 를 아예 주지 않습니다
+  (도구 정의도 매 요청 프롬프트 토큰이고, 쓸 수 없는 도구를 헛되이 부르지 않게). `read_document` 는 일반 대화의 첨부 문서도
+  읽으므로 항상 줍니다.
+- **보관**: 프로젝트 문서는 30일 정리를 받지 않고 지울 때까지 둡니다. 메시지에 첨부할 수는 없습니다.
+  프로젝트를 지우면 그 안의 대화·문서·이미지·checkpoint 가 모두 지워집니다 (응답 생성 중인 대화가 있으면 409).
+- **용량**: 문서 수는 제한하지 않고, 준비된 문서의 추정 토큰 수 합계로 제한합니다 (`PROJECT_MAX_TOKENS`, 기본 100만).
+  꽉 찬 프로젝트에는 올릴 수 없고, 파싱해 보니 넘치는 문서는 "용량 초과" 로 실패 처리합니다.
+- **입력 비용**: 문서 본문을 매 응답마다 다시 보내므로, Claude 는 프롬프트 캐시를 켭니다 (요청 최상위 `cache_control`, 5분 유지).
+  같은 앞부분(도구 정의, system 프롬프트, 대화 이력)을 다시 보내면 캐시에서 읽어 입력 단가가 0.1배가 됩니다.
+  OpenAI 와 Gemini 는 같은 앞부분을 자동으로 캐시합니다.
+- **구조화 적재**: 프로젝트 문서는 본문과 함께 **요소**(본문·표·그림, 쪽 번호와 제목 경로 포함)로 나눠
+  `document_elements` 에 저장합니다 (`app/documents/elements.py`). 검색(RAG)용 청크를 이 요소로 만듭니다.
+  - Office·한글: xberg 문서 구조 트리로 제목 경로를 따라가며 단락·표·그림을 순서대로 모읍니다. PPTX 발표자 노트도 넣습니다.
+  - PDF: 본문은 쪽마다(텍스트 레이어, 그림 속 글자는 넣지 않음), 표는 쪽별 표 추출 결과로 만들고, 쪽을 넘는 표에는 앞 표의 머리글을 이어 붙입니다.
+    **본문은 문단과 제목으로 나눕니다** (`app/documents/pdf_layout.py`): pdfium 의 줄마다 위치와 글자 크기를 보고, 줄 간격이 문단 안의
+    간격의 1.5배(본문 글자 크기 이하)를 넘거나 글자 크기가 달라지면 새 문단으로 나눕니다. 본문보다 1.15배 이상 크고 짧은(2줄·80자 이하)
+    문단은 **제목**으로 보고, 크기 순으로 단계를 매겨 뒤따르는 문단의 제목 경로(`보고서 제목 > 1. 요약`)로 씁니다(쪽을 넘어 이어짐).
+    그래서 청크가 절 경계에서 나뉘고 임베딩 앞에 제목이 붙으며, 비슷한 내용(회의록의 여러 회의 등)을 구분하기 쉬워집니다.
+    **그림은 쪽 안의 제자리**(그림의 세로 가운데보다 아래에 있는 첫 문단 앞)에 넣습니다. xberg 그림과는 같은 쪽·같은 픽셀 크기로 짝을
+    짓고, 위치를 모르면(스캔 쪽 등) 쪽 끝에 둡니다. 스캔 쪽은 OCR 본문 하나로 두고 앞 쪽의 제목 경로를 이어받습니다.
+  - 그림: 아이콘·로고·장식과 작은 그림, **빈 그림**(거의 한 가지 색이라 아주 작게 압축된 것)은 버립니다. PDF 는 투명한 부분이
+    있는 그림을 컬러 그림과 회색조 마스크로 나눠 저장하는데 xberg 가 둘 다 돌려주므로, 같은 쪽·같은 크기의 컬러 그림이 있는
+    회색조 그림도 마스크로 보고 버립니다. 나머지(문서당 최대 50장, `VISION_MAX_IMAGES_PER_DOCUMENT`)는
+    원본을 `projects/<프로젝트>/images/` 에 저장한 뒤 OpenAI vision 모델(`VISION_MODEL`, 기본 `gpt-6-luna`, 낮은 해상도)로
+    **한국어 설명**을 만듭니다. 그림 속 OCR 글자를 함께 넘겨서 낮은 해상도에서 놓치기 쉬운 작은 숫자·라벨을 정확히 읽게 하고,
+    설명에 실패한 그림은 그림 속 OCR 글자로 대신합니다(문서는 그대로 준비됩니다).
+  - **문서 본문은 요소로 다시 만듭니다** (`elements.compose_content`): 쪽 안의 순서대로 본문과 `[그림] 설명` 이 들어가고, PDF 는 표 내용이
+    본문에 이미 있어서 표 요소는 넣지 않습니다. 그래서 `read_document`, 작은 프로젝트의 본문 넣기, 검색이 모두 같은 내용을 봅니다.
+  - **다시 처리**: 프로젝트 화면의 "다시 처리" / "모두 다시 처리"(`POST /api/projects/{id}/documents/{doc}/reprocess`,
+    `POST /api/projects/{id}/reprocess`)는 저장된 원본으로 처음부터 다시 적재합니다. 파서를 고친 뒤 다시 올리지 않아도 됩니다.
+  - 문서 상태는 `processing`(읽는 중) → `analyzing`(그림 분석 중) → `indexing`(검색 준비 중) → `ready` 입니다.
+    그림 설명도 용량에 들어갑니다.
+  - 대화 첨부 문서는 올리는 시간이 길어지지 않도록 요소를 만들지 않고 그림도 설명하지 않습니다.
+- **검색 (RAG)**: 요소를 **청크**로 묶거나 나눠 OpenAI 임베딩(`EMBEDDING_MODEL`, 기본 `text-embedding-3-small`, 1536차원)과 함께
+  `document_chunks` 에 저장합니다 (`app/documents/chunking.py`, `app/projects/search.py`).
+  - **하이브리드 검색**: 벡터 검색(pgvector HNSW, 코사인 거리)과 키워드 검색(Postgres 전문 검색, GIN)에서 각각 후보 30개
+    (`PROJECT_SEARCH_CANDIDATES`)를 뽑고, 순위를 RRF(`1 / (k + 순위)` 의 합, `PROJECT_SEARCH_RRF_K=60`)로 합쳐 상위 8개를 돌려줍니다.
+    벡터는 뜻이 비슷한 글을, 키워드는 코드명·숫자·고유명사처럼 글자가 같아야 하는 것을 잘 찾습니다.
+  - 키워드 토큰(`app/documents/keywords.py`): 기본 전문 검색은 "부산의" 와 "부산" 을 다른 단어로 봐서, 한글 낱말은 낱말과
+    **두 글자 조각**("부산의" → 부산의, 부산, 산의)으로 나눠 `to_tsvector('simple', ...)` 에 넣습니다. 형태소 분석기나 확장이 필요 없습니다.
+  - 청크: 같은 제목 아래의 작은 본문은 목표 500 토큰까지 묶고, 800 토큰이 넘는 본문은 문단 → 줄 → 문장 순으로 나눠 80 토큰씩 겹칩니다.
+    표는 행 단위로 나누며 조각마다 머리글을 붙이고, 그림은 설명 하나가 청크 하나입니다 (`CHUNK_*` 설정).
+    청크는 문서 본문·문서 보기와 같은 규칙으로 요소를 고릅니다. 그래서 **PDF 는 표 청크를 만들지 않습니다**: 표 내용이 본문
+    (텍스트 레이어) 청크에 이미 있어서, 넣으면 같은 내용이 검색 결과 두 자리를 차지했습니다.
+  - **문서 하나로 좁혀 찾기**: `search_project` 의 `document_id`(선택)를 넣으면 그 문서 안에서만 찾습니다. "설계서에서 ~" 처럼
+    한 문서를 묻는 질문에 씁니다. 프로젝트 조건은 그대로라 다른 프로젝트의 문서 ID 는 찾지 못하고, 목록에 없는 ID 면 안내를 돌려줍니다.
+  - 임베딩 입력 앞에는 "문서 이름 | 제목 경로 | 쪽" 을 붙여 맥락을 줍니다. 결과는 문서 이름·쪽·제목 경로와 함께 모델에게 주고,
+    화면에는 답변 아래 **출처 카드**로 보여줍니다 (그림 결과는 미리보기, `GET /api/projects/{id}/images/{element_id}`).
+  - **문서 보기 패널**: 출처 카드를 누르면 오른쪽 패널에 문서의 추출 내용을 보여주고 근거가 된 부분으로 스크롤해 강조합니다
+    (`GET /api/projects/{id}/documents/{doc}/view?chunk_id=…`, `components/DocumentViewer.tsx`). 프로젝트 화면의 문서 칩을 눌러도
+    같은 패널이 열립니다(원본은 패널 위 "원본 받기"). 원본 모양이 아니라 **모델이 읽은 내용**(문서 본문과 같은 규칙으로 고른 요소,
+    그림은 미리보기와 설명)이라서 답이 정말 거기서 나왔는지 바로 확인할 수 있고, 형식과 관계없이 같은 화면입니다.
+    청크는 자기를 만든 요소 ID(`element_ids`)를 기억해서 그 블록을 강조하고, 긴 본문을 나눈 조각이면 블록 안의 그 부분을
+    형광펜(CSS Custom Highlight API)으로 한 번 더 표시합니다. 이 기능 전에 만든 청크는 같은 쪽에서 내용이 겹치는 블록을 찾고,
+    청크 ID 가 없는 예전 출처 카드는 그 쪽으로만 이동합니다. PDF 표 청크는 표가 본문에 들어 있어 따로 보이지 않으므로 그 쪽으로 이동합니다.
+  - 임베딩에 실패하면 청크만 저장하고 문서는 준비됩니다. 빠졌거나 다른 모델로 만든 임베딩은 검색할 때 다시 만듭니다
+    (모델을 바꿔도 자동으로 다시 임베딩). 빠진 키워드 토큰도 검색할 때 채웁니다. 검색 기능 전에 올린 프로젝트 문서는
+    앱이 시작할 때 청크를 만듭니다.
+  - OpenAI 키가 없거나 임베딩 요청이 실패하면 키워드 검색만 씁니다. `EMBEDDING_PROVIDER=fake` 는 네트워크 없이 도는
+    글자 조각 해시 임베딩입니다 (테스트·개발용).
+  - Postgres 는 `postgres:17-alpine` 에 pgvector 를 빌드해 넣은 이미지를 씁니다 (`docker/postgres/Dockerfile`). 공식 pgvector 이미지는
+    Debian(glibc) 기반이라 기존 alpine(musl) 데이터 디렉터리에 붙이면 문자열 정렬 규칙이 달라질 수 있어서입니다.
 
 ## DB 마이그레이션 (Alembic)
 
@@ -381,8 +556,9 @@ make backend                                      # 재시작하면 자동 적�
 
 ## 에이전트 / 도구 추가하기
 
-**도구:** `app/agents/chat/tools.py`에 함수를 추가하고 `build_tools`가 돌려주게 하면 그래프에 자동으로 연결됩니다.
-API 키처럼 설정이 필요한 도구는 `build_tools` 안에서 설정을 보고 만듭니다(키가 없으면 넣지 않음).
+**도구:** `app/tools/<주제>.py`에 도구를 만들고 `app/tools/registry.py`의 `TOOLS`에 등록한 뒤,
+쓸 에이전트의 `TOOL_NAMES`(예: `app/agents/chat/graph.py`)에 이름을 넣으면 그래프에 연결됩니다.
+API 키처럼 설정이 필요한 도구는 등록할 때 만드는 함수가 설정을 보고 `None`을 돌려주면 빠집니다(키가 없으면 넣지 않음).
 
 ```python
 @tool(parse_docstring=True)
@@ -394,17 +570,51 @@ def search_docs(query: str) -> str:
     """
     ...
 
-def build_tools(settings: Settings) -> list[BaseTool]:
-    tools = [get_current_time, search_docs]
-    ...
+# app/tools/registry.py
+TOOLS["search_docs"] = ToolSpec(
+    lambda settings: search_docs,
+    ToolLabel(running="문서를 검색하는 중", done="문서 검색함"),
+    "documents",  # 도구 그룹 (GROUPS). 도구 결정이 이 단위로 고른다
+)
 
-TOOL_LABELS["search_docs"] = ToolLabel(running="문서를 검색하는 중", done="문서 검색함")
+# app/agents/chat/graph.py
+TOOL_NAMES = ("get_current_time", ..., "search_docs")
 ```
 
 - 도구의 docstring(영어)은 모델에게 도구 설명으로 전달됩니다. 언제 쓰고 언제 쓰지 말아야 하는지까지 적으세요.
 - 도구 안에서 예외가 나도 응답 전체가 실패하지 않습니다. `ToolNode`가 예외를 오류 결과로 바꾸고 화면에는 "실패"로 표시합니다.
-  모델에게 알려줄 문구가 있으면 `app.agents.tooling.ToolError("짧은 영어 문구")`를 던지세요. 그 외 예외는 원문을 로그에만 남기고 일반 문구를 줍니다.
+  모델에게 알려줄 문구가 있으면 `app.core.errors.ToolError("짧은 영어 문구")`를 던지세요. 그 외 예외는 원문을 로그에만 남기고 일반 문구를 줍니다.
 - 한 턴에 그래프 단계는 16번까지입니다(`tooling.RECURSION_LIMIT`, 도구 호출 약 7번). 넘으면 사용자에게 안내 문구를 보여줍니다.
+- 도구마다 그룹(`time`, `web`, `documents`, `memory`)을 정합니다. 새 그룹을 만들면 `GROUPS`에 결정 모델에게 물을 예/아니오 질문(영어)도 같이 씁니다.
+
+### 도구 결정 (d3)
+도구 정의도 매 요청 프롬프트 토큰입니다. `ENABLE_TOOL_DECISION=true`로 켜면, 본 모델을 부르기 전에 결정 모델
+[d3](https://ollama.com/library/d3)(vLLM Semantic Router 의 open-weight 결정 모델, Ollama 로 서빙)가 턴마다 이번 메시지에 필요한
+도구 그룹을 고르고, 본 모델에게는 그 그룹의 도구만 줍니다. 기본은 꺼짐이고, 끄면 쓸 수 있는 도구를 모두 줍니다.
+
+```bash
+ollama pull d3:2b   # 3.1 GB, Ollama 0.40.9 이상
+```
+
+- **고르는 방법**: 그룹마다 예/아니오 질문을 요청 한 번(`/v1/systemone`)에 묻습니다. d3 는 글을 생성하지 않고 확률만 돌려줘서
+  빠르고 형식 오류가 없습니다. 확률이 `TOOL_DECISION_THRESHOLD` 이상인 그룹을 켜고, 모두 낮으면 도구 없이 답합니다.
+  "두 번째 기사 더 자세히" 같은 이어지는 질문을 판단하도록 직전 메시지 2개를 함께 보냅니다(첨부 문서 본문은 빼고).
+- **누적**: 한 번 켜진 그룹은 그 대화에서 계속 줍니다. 도구 정의는 프롬프트 맨 앞에 있어서 목록이 바뀌면 대화 이력 전체가
+  프롬프트 캐시에서 빠지기 때문입니다. 이미 켜진 그룹은 다시 묻지 않고, 이전에 실제로 부른 도구의 그룹도 켜진 것으로 봅니다.
+- **강제 규칙**: 이번 메시지에 첨부 문서가 있으면 `documents`를 묻지 않고 켭니다. 이번 턴에 쓸 수 없는 그룹(기억을 끈 사용자,
+  프로젝트 밖의 프로젝트 검색)은 묻지 않습니다.
+- **실패**: Ollama 에 연결하지 못하거나, 모델이 없거나, 시간을 넘기면 경고만 남기고 이번 턴은 도구를 모두 줍니다.
+- **관측**: Langfuse 트레이스에 `tool_decision` 단계로 보낸 상태·질문과 그룹별 확률이 남습니다.
+- **비용**: 로컬이라 호출 비용은 없고, 첫 토큰이 약 0.1~0.2초 늦어집니다(M5 Pro 실측, 모델을 처음 불러올 때는 약 0.8초).
+
+| 설정 | 기본값 | 의미 |
+|---|---|---|
+| `ENABLE_TOOL_DECISION` | `false` | 도구 결정 켜기 |
+| `TOOL_DECISION_MODEL` | `d3:2b` | 결정 모델 (Ollama) |
+| `TOOL_DECISION_URL` | (비움) | 결정 모델을 서빙하는 Ollama 주소. 비우면 `OLLAMA_BASE_URL` |
+| `TOOL_DECISION_THRESHOLD` | `0.5` | 그룹을 켜는 확률 기준 |
+| `TOOL_DECISION_TIMEOUT_SECONDS` | `3.0` | 넘으면 이번 턴은 도구를 모두 줍니다 |
+| `TOOL_DECISION_KEEP_ALIVE` | `30m` | 결정 모델을 메모리에 남겨 둘 시간 |
 
 ### 웹 검색 (Tavily)
 `.env`에 `TAVILY_API_KEY`를 넣으면 `web_search` 도구가 켜집니다. 키는 [app.tavily.com](https://app.tavily.com)에서 받으며, 무료 플랜은 매월 1,000크레딧입니다.
@@ -421,6 +631,13 @@ TOOL_LABELS["search_docs"] = ToolLabel(running="문서를 검색하는 중", don
   Tavily는 기간을 정해도 **최신순이 아니라 관련도순**이라, "내일 날씨"처럼 매일 같은 제목이 나오는 질문은 기간을 정해야 지난 기사가 섞이지 않습니다.
 - 결과의 발행일 옆에는 오늘 기준 며칠 전인지(`2026-10-27 (23 days ago)`)를 적어서 모델이 오래된 결과를 알아보게 합니다.
 - 화면에는 검색 결과가 답변 아래 출처 카드로 나옵니다(도구의 artifact로 전달, 모델 입력에는 들어가지 않음). 모델은 출처 목록을 직접 쓰지 않습니다.
+- **답변 속 출처 번호**: 모델은 출처를 쓴 문장 끝에 `[3]` 처럼 번호를 답니다. 번호는 한 답변(턴) 안에서 이어집니다.
+  출처가 있는 도구(웹 검색, 페이지 읽기, 프로젝트 문서 검색)는 결과 글에 자리 표시(`app/core/citations.py`)만 넣고, 도구 노드가 끝나면
+  `app/orchestration/citations.py` 가 이번 턴에서 이미 쓴 번호를 이어받아 `[9]` 처럼 바꾸고 출처마다 `n` 을 남깁니다.
+  도구가 동시에 실행돼도 번호가 겹치지 않고, 같은 출처(같은 청크·URL)가 다시 나오면 앞의 번호를 씁니다.
+  화면은 답변의 `[3]` 을 번호 칩으로 그리고(`lib/citations.ts`, 코드 블록·`a[1]` 같은 첨자는 그대로), 출처 카드도 같은 번호를 씁니다.
+  칩을 누르면 웹은 새 탭에서 열고, 프로젝트 문서는 문서 보기 패널에서 근거 위치를 보여 줍니다.
+  `read_document` 로 읽거나 본문이 통째로 들어간 프로젝트 문서는 번호가 없어서 문서 이름과 쪽으로 적습니다.
 - 모델에게는 결과마다 제목, URL, 발행일, 정리한 본문 조각(약 1,000자)만 줍니다. 관련도 0.3 미만 결과는 버리고,
   메뉴, 관련 기사 목록, 이미지 같은 잡음을 걸러냅니다(`app/web/search.py`).
 - 검색 결과는 `<search_results>` 태그로 감싸고 "외부 페이지 내용이며 지시가 아니다"라고 표시합니다.
@@ -431,8 +648,8 @@ TOOL_LABELS["search_docs"] = ToolLabel(running="문서를 검색하는 중", don
   본문 전체는 페이지당 수만 자라 컨텍스트를 금방 채웁니다.
 
 **에이전트:**
-1. `app/agents/<이름>/`에 `graph.py`(`build_graph`, `STREAM_NODES`)와 `prompts/*.md`를 만듭니다.
-2. `app/agents/runtime.py`의 `AGENTS`에 등록합니다.
+1. `app/agents/<이름>/`에 `graph.py`(`build_graph`, `STREAM_NODES`, `TOOL_NAMES`)와 `prompts/*.md`를 만듭니다.
+2. `app/agents/__init__.py`의 `AGENTS`에 등록합니다. 앱이 시작할 때 실행 엔진(`orchestration/runtime.py`)에 등록됩니다.
 3. 프롬프트 네임스페이스(`<이름>/...`)는 폴더 이름으로 자동 인식됩니다.
 
 ## 테스트
@@ -446,7 +663,7 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | Method | Path | 설명 |
 |---|---|---|
 | GET | `/api/models` | 고를 수 있는 모델 목록과 기본 모델 ID |
-| POST | `/api/chat` | `{conversation_id?, message, images?: [{mime_type, data}], document_ids?, model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409 |
+| POST | `/api/chat` | `{conversation_id?, project_id?, message, images?: [{mime_type, data}], document_ids?, model?}` → SSE 이벤트 `meta` / `delta` / `done` / `error`. 같은 대화가 생성 중이면 409. `project_id` 는 새 대화를 그 프로젝트 안에 만든다 |
 | GET | `/api/conversations` | 대화 목록 |
 | GET | `/api/conversations/{id}` | 대화 + 메시지 + 생성 중 여부 |
 | GET | `/api/conversations/{id}/status` | 생성 중 여부 (다른 창 확인용) |
@@ -455,7 +672,25 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 | POST | `/api/documents` | 문서 올리기 (multipart `file`) → `processing` 상태로 201. 너무 크면 413, 지원하지 않는 형식이면 415 |
 | GET | `/api/documents/{id}` | 문서 정보와 파싱 상태 (`processing` / `ready` / `failed`, 실패 사유, 쪽 수, 글자 수) |
 | GET | `/api/documents/{id}/file` | 원본 내려받기 (보관 기간이 지났으면 410) |
-| DELETE | `/api/documents/{id}` | 보내지 않은 문서 지우기 (이미 보낸 문서면 409) |
+| DELETE | `/api/documents/{id}` | 보내지 않은 첨부 문서 지우기 (이미 보낸 문서나 프로젝트 문서면 409) |
+| GET | `/api/projects` | 프로젝트 목록 |
+| POST | `/api/projects` | 프로젝트 만들기 `{name, instructions?}` |
+| GET | `/api/projects/{id}` | 프로젝트 + 문서 + 대화 + 용량(`used_tokens`, `max_tokens`) |
+| PATCH | `/api/projects/{id}` | 이름·지시문 바꾸기 (보낸 값만) |
+| DELETE | `/api/projects/{id}` | 프로젝트와 그 안의 대화·문서 삭제 (생성 중인 대화가 있으면 409) |
+| POST | `/api/projects/{id}/documents` | 프로젝트 문서 올리기 (multipart `file`). 용량이 꽉 찼으면 409 |
+| DELETE | `/api/projects/{id}/documents/{doc_id}` | 프로젝트 문서 지우기 |
+| POST | `/api/projects/{id}/documents/{doc_id}/reprocess` | 프로젝트 문서 다시 처리 (처리 중이면 409) |
+| POST | `/api/projects/{id}/reprocess` | 프로젝트 문서 모두 다시 처리 (처리 중이거나 원본이 없는 문서는 건너뜀) |
+| GET | `/api/projects/{id}/documents/{doc_id}/view` | 프로젝트 문서의 추출 내용 (문서 보기 패널). `?chunk_id=` 를 주면 강조할 위치도 |
+| GET | `/api/projects/{id}/images/{element_id}` | 프로젝트 문서 속 그림 원본 (출처 카드·문서 보기 패널) |
+| GET | `/api/memory` | 기억 켜기/끄기 상태, 프로필, 기억 목록(최근에 고친 순), 한도 |
+| PUT | `/api/memory/settings` | 기억 기능 켜기/끄기 `{enabled}` |
+| PUT | `/api/memory/profile` | 프로필 바꾸기 `{text}` (비우면 지움) |
+| POST | `/api/memory/memories` | 기억 추가 `{content, category}` (개수 한도를 넘으면 422) |
+| PATCH | `/api/memory/memories/{id}` | 기억 고치기 (보낸 값만, 내 기억이 아니면 404) |
+| DELETE | `/api/memory/memories/{id}` | 기억 지우기 |
+| DELETE | `/api/memory` | 프로필과 기억 모두 지우기 |
 | GET | `/api/auth/me` | 로그인 설정과 내 정보 (로그인 전에도 200, `user: null`) |
 | GET | `/api/auth/google/login` | Google 로그인 시작 (리디렉션) |
 | GET | `/api/auth/google/callback` | Google 로그인 콜백 → 세션 쿠키 → 화면으로 |
@@ -468,7 +703,7 @@ make test     # LLM 없이(fake 모델) 프롬프트, 그래프, 대화 기억, 
 
 ## 다음 단계
 
-- 장기 기억 메모리 (LangGraph Store 등)
+- 프로젝트별 기억 공간, 임베딩 모델을 바꿀 때 기억 다시 인덱싱
 - Langfuse 데이터셋 + 평가(LLM-as-judge)로 프롬프트 버전 간 품질 비교
 - CI에서 main 머지 시 프롬프트 자동 동기화
 - 이미지를 object storage(MinIO 등)에 두고 상태에는 참조만 저장 (지금은 checkpoint 에 base64 가 반복 저장됨)

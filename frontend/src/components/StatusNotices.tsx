@@ -4,7 +4,7 @@ import type { DocumentInfo } from "@/lib/api";
 import { documentMeta } from "@/lib/documents";
 import type { Attachment } from "@/lib/images";
 import { FileChip } from "./FileChip";
-import { ClockIcon, CloseIcon, InfoIcon } from "./icons";
+import { ClockIcon, CloseIcon } from "./icons";
 
 export interface QueuedMessage {
   id: string;
@@ -81,18 +81,6 @@ export function QueuedMessageBubble({
           <span>대기 중 · 응답이 끝나면 보냅니다</span>
         )}
       </div>
-    </div>
-  );
-}
-
-/** 다른 창에서 이 대화의 응답을 생성 중일 때 보여주는 안내. */
-export function RemoteRunningNotice() {
-  return (
-    <div className="mt-7 flex items-center gap-3 rounded-xl border border-line px-4 py-3 text-sm text-muted">
-      <InfoIcon className="h-4 w-4 shrink-0" />
-      <span>
-        다른 창에서 이 대화의 응답을 생성하고 있습니다. 완료되면 여기에 표시됩니다.
-      </span>
     </div>
   );
 }

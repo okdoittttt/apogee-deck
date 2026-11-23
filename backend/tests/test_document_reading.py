@@ -7,8 +7,11 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.agents.chat import tools
-from app.config import Settings
+from app.agents import chat
+from app.api.routers import chat as chat_router
+from app.api.schemas import ChatRequest
+from app.conversations import service as conversations
+from app.core.config import Settings
 from app.documents import service
 from app.documents.reading import (
     DOCUMENT_TAG,
@@ -19,8 +22,8 @@ from app.documents.reading import (
     max_inline_chars,
     with_attachments,
 )
-from app.routers import chat as chat_router
-from app.schemas import ChatRequest
+from app.tools import build_tools
+from app.tools import documents as document_tools
 
 USER = SimpleNamespace(id=uuid.uuid4(), status="approved")
 DOC = AttachedDocument(id="d1", filename="보고서.pdf", kind="pdf", page_count=3, char_count=12000)
@@ -103,14 +106,14 @@ def test_format_chunk_end_and_past_end():
 async def test_read_document_tool_uses_current_conversation(monkeypatch):
     calls = []
 
-    async def fake_read_chunk(document_id, conversation_id, offset, max_chars):
+    async def fake_read_chunk(document_id, conversation_id, offset, max_chars, project_id=None):
         calls.append((document_id, conversation_id, offset, max_chars))
         if document_id != "d1":
             return None
         return DOC, "본문 일부", 12000
 
-    monkeypatch.setattr(tools.documents, "read_chunk", fake_read_chunk)
-    tool = tools.make_read_document(Settings(document_read_max_chars=100))
+    monkeypatch.setattr(document_tools.documents, "read_chunk", fake_read_chunk)
+    tool = document_tools.make_read_document(Settings(document_read_max_chars=100))
     config = {"configurable": {"thread_id": "conv-1"}}
 
     out = await tool.ainvoke({"document_id": "d1", "offset": -5}, config=config)
@@ -118,14 +121,14 @@ async def test_read_document_tool_uses_current_conversation(monkeypatch):
     assert calls[0] == ("d1", "conv-1", 0, 100)
 
     missing = await tool.ainvoke({"document_id": "other"}, config=config)
-    assert "No readable attached document" in missing
+    assert "No readable document" in missing
     assert "config" not in tool.tool_call_schema.model_json_schema()["properties"]
 
 
 def test_read_document_is_registered_with_label():
-    names = [t.name for t in tools.build_tools(Settings(tavily_api_key=""))]
+    names = [t.name for t in build_tools(Settings(tavily_api_key=""), chat.TOOL_NAMES)]
     assert "read_document" in names
-    assert tools.TOOL_LABELS["read_document"].running == "문서 읽는 중"
+    assert chat.TOOL_LABELS["read_document"].running == "문서 읽는 중"
 
 
 # --- 채팅 요청 ----------------------------------------------------------------------------------
@@ -141,7 +144,7 @@ def test_chat_request_accepts_documents_only_and_dedupes():
 
 async def test_chat_rejects_too_many_documents(monkeypatch):
     monkeypatch.setattr(
-        chat_router,
+        conversations,
         "get_settings",
         lambda: Settings(llm_provider="fake", max_documents_per_message=2),
     )
@@ -155,8 +158,8 @@ async def test_chat_maps_attach_errors(monkeypatch):
     async def not_ready(session, ids, user_id):
         raise service.AttachError(409, "아직 문서를 읽는 중입니다: a.pdf")
 
-    monkeypatch.setattr(chat_router, "get_settings", lambda: Settings(llm_provider="fake"))
-    monkeypatch.setattr(chat_router.documents, "check_attachable", not_ready)
+    monkeypatch.setattr(conversations, "get_settings", lambda: Settings(llm_provider="fake"))
+    monkeypatch.setattr(conversations.documents, "check_attachable", not_ready)
     with pytest.raises(HTTPException) as exc:
         await chat_router.chat(ChatRequest(document_ids=[uuid.uuid4()]), None, USER)
     assert (exc.value.status_code, exc.value.detail) == (409, "아직 문서를 읽는 중입니다: a.pdf")

@@ -9,16 +9,18 @@ from types import SimpleNamespace
 import pytest
 import subprocess_targets
 from fastapi import HTTPException
-from pdf_fixture import text_pdf
+from pdf_fixture import MEETING_LAYOUT, layout_pdf, text_pdf
 from starlette.datastructures import Headers, UploadFile
 
-from app.config import Settings
+from app.api.routers import documents as documents_router
+from app.core.config import Settings
+from app.documents import elements as el
 from app.documents import formats, service
+from app.documents import parser as parser_module
 from app.documents.formats import DocumentKind, UnsupportedDocumentError, detect, safe_filename
 from app.documents.parser import ParseError, hwpml_to_text, parse
 from app.documents.worker import ParseTimeoutError, parse_in_subprocess
 from app.models import Document
-from app.routers import documents as documents_router
 
 
 def make_zip(files: dict[str, bytes], compress: bool = True) -> bytes:
@@ -160,6 +162,99 @@ def test_parse_text_pdf_with_page_markers():
     assert result.content.index("Hello page one") < result.content.index("Second page")
 
 
+def test_pdf_side_by_side_layout_keeps_reading_order():
+    # 회의록처럼 "칸 이름 | 값" 이 나란한 배치. xberg 기본 추출은 이를 여러 단으로 읽어서
+    # 첫 회의의 장소·안건이 결정 문장 뒤로 밀렸다. 그린 순서(읽는 순서)를 지켜야 한다.
+    content = parse(layout_pdf(MEETING_LAYOUT), DocumentKind.PDF, "m.pdf", 10).content
+    expected = [
+        "Meeting 1 notes",
+        "Date",
+        "Nov 3 10AM",
+        "Room",
+        "A",
+        "People",
+        "Kim, Lee",
+        "Topic",
+        "Launch date",
+        "Decision: launch moves",
+        "Meeting 2 notes",
+        "Nov 10 10AM",
+        "Easy pay",
+        "Decision: easy pay",
+    ]
+    positions = []
+    start = 0
+    for text in expected:
+        start = content.index(text, start)
+        positions.append(start)
+    assert positions == sorted(positions)
+    # 같은 줄의 칸 이름과 값은 붙어 있다
+    assert "Date Nov 3 10AM Room A" in " ".join(content.split())
+
+
+def test_soft_mask_companions_are_dropped():
+    def img(page, w, h, colorspace):
+        return SimpleNamespace(page_number=page, width=w, height=h, colorspace=colorspace)
+
+    chart, mask = img(1, 856, 490, "DeviceRGB"), img(1, 856, 490, "DeviceGray")
+    gray_photo = img(2, 640, 480, "DeviceGray")  # 같은 크기의 컬러 그림이 없으면 마스크가 아니다
+    other_page = img(2, 856, 490, "DeviceGray")  # 다른 쪽이면 짝이 아니다
+    masks = parser_module._soft_masks([chart, mask, gray_photo, other_page])
+    assert masks == {id(mask)}
+
+
+def _figure(page=1, w=856, h=490, colorspace="DeviceRGB", size=12_446, kind=None):
+    return SimpleNamespace(
+        page_number=page,
+        width=w,
+        height=h,
+        colorspace=colorspace,
+        data=b"x" * size,
+        format="webp",
+        image_kind=kind,
+        ocr_result=None,
+    )
+
+
+def test_pdf_figures_keep_only_real_figures():
+    chart = _figure()
+    figures = parser_module._pdf_figures(
+        [
+            chart,
+            _figure(colorspace="DeviceGray", size=244),  # 투명도 마스크
+            _figure(page=2, w=60, h=60, size=900),  # 작은 아이콘
+            _figure(page=2, size=200),  # 빈 그림
+            _figure(page=2, kind="logo"),
+        ]
+    )
+    assert figures == [chart]
+
+
+def test_pdf_elements_attach_figure_ocr_to_images():
+    chart = _figure()
+    scan = SimpleNamespace(pages=[SimpleNamespace(page_number=1, tables=[])])
+    elements = parser_module._pdf_elements(
+        scan, {1: [el.PdfBlock("본문 문장")]}, [chart], {id(chart): "그림 1. 만족도\n4.6\n-6"}
+    )
+    assert [(e.kind, e.content) for e in elements] == [
+        ("text", "본문 문장"),
+        ("image", "그림 1. 만족도\n4.6\n-6"),
+    ]
+    assert elements[1].image.ocr_text == "그림 1. 만족도\n4.6\n-6"
+    assert "4.6" not in elements[0].content  # 그림 속 글자는 본문에 섞이지 않는다
+
+
+def test_pdf_content_marks_figure_text_for_attachments():
+    content = parser_module._pdf_content(
+        {1: "본문 문장", 2: "둘째 쪽"}, {1: ["그림 1. 만족도\n4.6\n모바일 앱"]}
+    )
+    assert content == (
+        "<!-- PAGE 1 -->\n\n본문 문장\n\n"
+        f"{parser_module.FIGURE_TEXT_LABEL} 그림 1. 만족도 / 4.6 / 모바일 앱\n\n"
+        "<!-- PAGE 2 -->\n\n둘째 쪽"
+    )
+
+
 def test_parse_pdf_page_limit_and_broken_pdf():
     with pytest.raises(ParseError, match="쪽 수"):
         parse(text_pdf(["a", "b", "c"]), DocumentKind.PDF, "a.pdf", 2)
@@ -187,6 +282,20 @@ async def test_subprocess_passes_arguments():
         target=subprocess_targets.echo_size,
     )
     assert (result.content, result.page_count) == ("pdf:f.pdf:3", 7)
+    assert result.elements is None
+
+
+async def test_subprocess_passes_structured_flag():
+    result = await parse_in_subprocess(
+        b"abc",
+        DocumentKind.PDF,
+        "f.pdf",
+        max_pages=7,
+        timeout=60,
+        structured=True,
+        target=subprocess_targets.echo_size,
+    )
+    assert result.elements == ["structured"]
 
 
 async def test_subprocess_reports_parse_error():
