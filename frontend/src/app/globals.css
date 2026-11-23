@@ -15,7 +15,11 @@
   --color-muted: #6f6c65;
   --color-subtle: #9a978f;
 
-  --font-display: var(--font-serif-kr), ui-serif, Georgia, serif;
+  /* 글꼴: 본문·제목·코드 모두 Pretendard (layout.tsx 에서 불러온다). */
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui,
+    "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --font-display: var(--font-sans);
+  --font-mono: var(--font-sans);
 }
 
 @media (prefers-color-scheme: dark) {
