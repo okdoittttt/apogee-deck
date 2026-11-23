@@ -1,0 +1,10 @@
+{
+  "name": "docs-tools",
+  "private": true,
+  "description": "docs/ 검사 도구 (make docs-check)",
+  "type": "module",
+  "dependencies": {
+    "jsdom": "25.0.1",
+    "mermaid": "11.4.1"
+  }
+}

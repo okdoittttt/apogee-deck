@@ -26,6 +26,8 @@
 | `make db-status` | 현재 리비전과 이력 |
 | `make test` | 백엔드 테스트. LLM 없이 돈다 |
 | `make lint` | 백엔드 `ruff check`, `ruff format --check`, 계층 검사(`lint-imports`), 프론트엔드 빌드 |
+| `make docs-check` | 문서 검사: mermaid 문법, 상대 링크와 앵커, ERD 가 `models.py` 와 같은지 |
+| `make docs-erd` | `models.py` 로 `docs/data/erd.md` 의 ERD 를 다시 만든다 |
 
 `make` 는 현재 커밋 해시를 `GIT_COMMIT` 으로 모든 `docker compose` 명령에 넘깁니다. 커밋하지 않은 변경이 있으면 `-dirty` 가 붙습니다.
 Langfuse 의 프롬프트 버전에 어떤 코드에서 나왔는지가 이 값으로 남습니다. `docker compose` 를 직접 쓰면 값이 비므로 `make` 를 쓰세요.
@@ -130,6 +132,20 @@ make lint   # ruff, import 계층 검사, 프론트엔드 빌드
 - 파일 하나만 돌리려면 `cd backend && uv run pytest -q tests/test_tools.py` 처럼 씁니다.
 - `make lint` 의 계층 검사는 `backend/pyproject.toml` 의 `[tool.importlinter]` 규칙을 씁니다. 규칙은 [계층 규칙](../architecture/layers.md)에 있습니다.
 - DB 스키마를 바꿨으면 `make db-check` 도 돌립니다.
+
+## 문서 검사
+
+`docs/` 나 `README.md` 를 고쳤으면 `make docs-check` 를 돌립니다. 세 가지를 검사합니다.
+
+| 검사 | 도구 | 잡는 것 |
+|---|---|---|
+| mermaid 문법 | `docs/tools/check_mermaid.mjs` (mermaid 11.4.1 을 jsdom 위에서 parse) | GitHub 에서 오류 상자로 보일 그림. 예약어 노드 ID(`end`, `graph`, `call`) 같은 실수 |
+| 링크 | `docs/tools/check_links.py` | 없는 파일, 없는 `#앵커` (GitHub 방식으로 앵커를 만듦) |
+| ERD | `backend/scripts/gen_erd.py --check` | `docs/data/erd.md` 의 ERD 가 `models.py` 와 다름 |
+
+- 처음 돌릴 때 `docs/tools/` 에 `npm ci` 로 검사 도구를 설치합니다. 버전은 `package-lock.json` 에 고정되어 있습니다.
+- 모델을 바꿨으면 `make docs-erd` 로 ERD 를 다시 만듭니다. `erd.md` 의 `<!-- erd:영역 -->` 사이만 바뀌고 설명 글은 그대로입니다.
+- 새 테이블을 만들면 `gen_erd.py` 의 `GROUPS` 에 영역을 정해야 합니다. 정하지 않으면 검사가 실패합니다.
 
 ## 이미지 빌드 메모
 

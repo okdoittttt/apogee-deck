@@ -6,7 +6,8 @@
 LangGraph 가 만드는 checkpointer 테이블과 Store 테이블은 같은 DB 에 있지만 여기서는 다루지 않습니다.
 그 테이블과 MinIO 의 객체는 [데이터 저장 위치](storage-map.md)에 정리했습니다.
 
-그림은 `app/models.py` 의 SQLAlchemy 메타데이터에서 생성했습니다 (2026-11-23 기준). 모델을 바꾸면 그림도 다시 만드세요.
+ERD 그림은 `app/models.py` 의 SQLAlchemy 메타데이터에서 생성합니다(`backend/scripts/gen_erd.py`). 손으로 고치지 말고,
+모델을 바꾸면 `make docs-erd` 로 다시 만드세요. `make docs-check` 가 그림과 모델이 다르면 실패합니다.
 
 ## 표기
 
@@ -21,25 +22,26 @@ LangGraph 가 만드는 checkpointer 테이블과 Store 테이블은 같은 DB �
 
 ## 전체 관계
 
+<!-- erd:overview -->
 ```mermaid
 erDiagram
-    users ||--o{ sessions : "user_id"
     users ||--o{ approval_tokens : "user_id"
     users ||--o{ projects : "user_id"
-    users o|--o{ conversations : "user_id"
-    users o|--o{ documents : "user_id"
+    users ||--o{ sessions : "user_id"
     projects o|--o{ conversations : "project_id"
-    projects o|--o{ documents : "project_id"
-    projects ||--o{ document_chunks : "project_id"
+    users o|--o{ conversations : "user_id"
     conversations ||--o{ messages : "conversation_id"
     conversations o|--o{ documents : "conversation_id"
-    messages ||--o{ message_images : "message_id"
     messages o|--o{ documents : "message_id"
+    projects o|--o{ documents : "project_id"
+    users o|--o{ documents : "user_id"
+    messages ||--o{ message_images : "message_id"
     documents ||--o{ document_elements : "document_id"
     documents ||--o{ document_chunks : "document_id"
     document_elements o|--o{ document_chunks : "image_element_id"
+    projects ||--o{ document_chunks : "project_id"
 ```
-
+<!-- /erd:overview -->
 세 영역으로 나눠 볼 수 있습니다.
 
 | 영역 | 테이블 | 설명 |
@@ -50,10 +52,11 @@ erDiagram
 
 ## 1. 사용자·인증
 
+<!-- erd:auth -->
 ```mermaid
 erDiagram
-    users ||--o{ sessions : "user_id"
     users ||--o{ approval_tokens : "user_id"
+    users ||--o{ sessions : "user_id"
     users {
         uuid id PK
         varchar_255 google_sub UK "nullable"
@@ -69,13 +72,6 @@ erDiagram
         bool is_local
         bool memory_enabled
     }
-    sessions {
-        varchar_64 token_hash PK
-        uuid user_id FK
-        timestamptz created_at
-        timestamptz expires_at
-        timestamptz last_seen_at
-    }
     approval_tokens {
         varchar_64 token_hash PK
         uuid user_id FK
@@ -84,8 +80,15 @@ erDiagram
         timestamptz used_at "nullable"
         timestamptz created_at
     }
+    sessions {
+        varchar_64 token_hash PK
+        uuid user_id FK
+        timestamptz created_at
+        timestamptz expires_at
+        timestamptz last_seen_at
+    }
 ```
-
+<!-- /erd:auth -->
 | 테이블 | 한 행 | 알아 둘 점 |
 |---|---|---|
 | `users` | 사용자 한 명 | `google_sub` 로 사용자를 찾습니다(이메일은 바뀔 수 있음). `status` 는 `pending` · `approved` · `rejected` · `suspended`. `is_local` 은 `AUTH_REQUIRED=false` 일 때 쓰는 로컬 사용자 |
@@ -94,11 +97,12 @@ erDiagram
 
 ## 2. 대화
 
+<!-- erd:conversation -->
 ```mermaid
 erDiagram
     users ||--o{ projects : "user_id"
-    users o|--o{ conversations : "user_id"
     projects o|--o{ conversations : "project_id"
+    users o|--o{ conversations : "user_id"
     conversations ||--o{ messages : "conversation_id"
     messages ||--o{ message_images : "message_id"
     users {
@@ -139,7 +143,7 @@ erDiagram
         varchar_200 storage_key
     }
 ```
-
+<!-- /erd:conversation -->
 | 테이블 | 한 행 | 알아 둘 점 |
 |---|---|---|
 | `projects` | 프로젝트 하나 | `instructions` 는 이 프로젝트 대화의 system 프롬프트 끝에 붙는 지시문 |
@@ -149,16 +153,17 @@ erDiagram
 
 ## 3. 문서
 
+<!-- erd:document -->
 ```mermaid
 erDiagram
-    users o|--o{ documents : "user_id"
-    projects o|--o{ documents : "project_id"
     conversations o|--o{ documents : "conversation_id"
     messages o|--o{ documents : "message_id"
+    projects o|--o{ documents : "project_id"
+    users o|--o{ documents : "user_id"
     documents ||--o{ document_elements : "document_id"
     documents ||--o{ document_chunks : "document_id"
-    projects ||--o{ document_chunks : "project_id"
     document_elements o|--o{ document_chunks : "image_element_id"
+    projects ||--o{ document_chunks : "project_id"
     users {
         uuid id PK
     }
@@ -224,7 +229,7 @@ erDiagram
         tsvector search_vector "nullable"
     }
 ```
-
+<!-- /erd:document -->
 `documents` 한 테이블에 두 종류의 문서가 있습니다. 어느 FK 가 채워졌는지로 구분합니다.
 
 | 종류 | `project_id` | `conversation_id`, `message_id` | 요소·청크 | 보관 |
