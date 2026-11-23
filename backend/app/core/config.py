@@ -6,10 +6,13 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 GOOGLE_HISTORY_TOKENS = 32000
-"""Google provider 의 기본 대화 이력 예산. 넘으면 앞부분을 요약한다 (``CONTEXT_MAX_TOKENS`` 로 바꿀 수 있다)."""
+"""Google provider 의 기본 대화 이력 예산."""
 
 OPENAI_HISTORY_TOKENS = 32000
-"""OpenAI provider 의 기본 대화 이력 예산. 매 턴 보내는 입력이 곧 비용이라 제한한다."""
+"""OpenAI provider 의 기본 대화 이력 예산."""
+
+ANTHROPIC_HISTORY_TOKENS = 150_000
+"""Anthropic provider 의 기본 대화 이력 예산."""
 
 
 class Settings(BaseSettings):
@@ -328,9 +331,9 @@ class Settings(BaseSettings):
 
         ``context_max_tokens`` 가 있으면 그 값을 쓴다. 없으면 Ollama 는
         ``num_ctx - num_predict - 256``, Google 은 ``GOOGLE_HISTORY_TOKENS``,
-        OpenAI 는 ``OPENAI_HISTORY_TOKENS`` 이고,
-        Anthropic 은 trim 하지 않는다(``None``).
-        Claude 는 컨텍스트가 크고, 이력을 자르면 프롬프트 캐시와 thinking 연속성이 깨진다.
+        OpenAI 는 ``OPENAI_HISTORY_TOKENS``, Anthropic 은 ``ANTHROPIC_HISTORY_TOKENS`` 이다.
+        그 밖의 provider(테스트용 ``fake``)는 자르지 않는다(``None``).
+        Claude 는 이력을 바꾸면 프롬프트 캐시가 깨지므로, 요약이 드물게 일어나도록 예산을 크게 잡는다.
         Google 은 컨텍스트는 크지만 무료 티어의 분당 토큰 한도가 있어서 매 턴 보내는 양을 제한한다.
         """
         if self.context_max_tokens is not None:
@@ -341,6 +344,8 @@ class Settings(BaseSettings):
             return GOOGLE_HISTORY_TOKENS
         if self.llm_provider == "openai":
             return OPENAI_HISTORY_TOKENS
+        if self.llm_provider == "anthropic":
+            return ANTHROPIC_HISTORY_TOKENS
         return None
 
     @property

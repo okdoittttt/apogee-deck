@@ -190,10 +190,12 @@ async def test_summary_failure_falls_back_to_trimming(monkeypatch, caplog):
 
 
 def test_no_summary_node_without_budget():
+    graph = chat.build_graph(Settings(llm_provider="fake"), InMemorySaver())
+    assert chat_graph.SUMMARIZE_NODE not in graph.nodes
     graph = chat.build_graph(
         Settings(llm_provider="anthropic", anthropic_api_key="x"), InMemorySaver()
     )
-    assert chat_graph.SUMMARIZE_NODE not in graph.nodes
+    assert chat_graph.SUMMARIZE_NODE in graph.nodes  # Claude 도 기본 예산이 있어 요약한다
     graph = chat.build_graph(
         Settings(llm_provider="fake", context_max_tokens=1500), InMemorySaver()
     )
