@@ -35,7 +35,7 @@ okdoitttt 의 구조와 동작을 그림과 함께 정리한 문서입니다. �
 | 참고 | [api.md](api.md) | HTTP API 와 SSE 이벤트 | 작성됨 |
 | 가이드 | [setup.md](guides/setup.md) | 실행 환경 설정: LLM, 로그인, 선택 기능, 외부 접속 | 작성됨 |
 | | [development.md](guides/development.md) | 개발: 명령, 마이그레이션, 도구·에이전트 추가, 테스트 | 작성됨 |
-| 결정 | [decisions/](decisions/README.md) | 설계 결정 기록 (ADR) | 진행 중 |
+| 결정 | [decisions/](decisions/README.md) | 설계 결정 기록 (ADR) 11개 | 작성됨 |
 
 ## 작성 규칙
 
@@ -78,3 +78,5 @@ okdoitttt 의 구조와 동작을 그림과 함께 정리한 문서입니다. �
 - `end`, `graph`, `call`, `class`, `style`, `subgraph` 같은 mermaid 예약어는 노드 ID 로 쓰지 않습니다.
 
 **코드와 맞추기.** 문서 맨 위의 "관련 코드" 줄에 코드 경로를 적습니다. 그 코드를 고칠 때 이 문서도 함께 고칩니다.
+
+**검사.** 문서를 고친 뒤 `make docs-check` 를 돌립니다. mermaid 문법, 링크와 앵커, ERD 가 모델과 같은지 검사합니다.

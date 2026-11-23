@@ -7,6 +7,16 @@
 | 번호 | 결정 | 상태 |
 |---|---|---|
 | [0001](0001-history-in-checkpointer.md) | 모델 입력 이력은 checkpointer 에, 화면 이력은 messages 테이블에 | 채택 |
+| [0002](0002-background-runs.md) | 응답은 백그라운드 실행에서 만들고, 대화당 실행은 하나만 허용한다 | 채택 |
+| [0003](0003-graph-per-model.md) | 모델마다 그래프를 따로 컴파일해 캐시하고, checkpointer 와 Store 는 공유한다 | 채택 |
+| [0004](0004-accumulate-tool-groups.md) | 도구 결정으로 켠 그룹은 대화 동안 누적하고, 이전에 부른 도구의 그룹도 켠다 | 채택 |
+| [0005](0005-recalled-memories-before-user-message.md) | 검색된 기억은 마지막 사용자 메시지 앞에 모델 호출 때만 붙이고, 프로필만 system 프롬프트에 둔다 | 채택 |
+| [0006](0006-parse-in-subprocess.md) | 문서 파싱은 문서마다 새 spawn 프로세스에서 시간 제한과 함께 실행한다 | 채택 |
+| [0007](0007-chat-images-in-object-storage.md) | 채팅 이미지 원본은 첨부 저장소에, checkpoint 에는 이미지 ID 참조만 | 채택 |
+| [0008](0008-hybrid-search-rrf.md) | 프로젝트 문서 검색은 벡터 + 키워드 하이브리드로 하고 RRF 로 합친다 | 채택 |
+| [0009](0009-prompts-git-source-langfuse-copy.md) | 프롬프트 원본은 git, Langfuse 는 동기화 사본 | 채택 |
+| [0010](0010-ssrf-check-at-connect.md) | 웹 페이지 읽기의 SSRF 방어는 접속하는 순간에 IP 를 검사한다 | 채택 |
+| [0011](0011-auxiliary-steps-fail-open.md) | 보조 단계는 실패해도 경고만 남기고 답을 막지 않는다 | 채택 |
 
 ## 언제 쓰나
 
