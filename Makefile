@@ -16,7 +16,7 @@ HOST_DATABASE_URL = postgresql+asyncpg://$(call ENV,POSTGRES_USER,agent):$(call 
 ALEMBIC = cd backend && DATABASE_URL=$(HOST_DATABASE_URL) uv run alembic
 
 .DEFAULT_GOAL := help
-.PHONY: help up down ps logs backend frontend prompt-sync prompt-check db-revision db-upgrade db-downgrade db-check db-status test lint
+.PHONY: help up down ps logs backend frontend prompt-sync prompt-check db-revision db-upgrade db-downgrade db-check db-status test lint docs-check docs-erd
 
 help: ## 명령 목록
 	@echo "사용법: make <명령>   (현재 GIT_COMMIT=$(GIT_COMMIT))"
@@ -84,3 +84,16 @@ test: ## 백엔드 테스트 (LLM 불필요)
 lint: ## 백엔드 린트·포맷 검사, 프론트엔드 타입 검사·빌드
 	@cd backend && uv run ruff check app tests migrations && uv run ruff format --check app tests migrations && uv run lint-imports
 	@cd frontend && npm run build --silent
+
+# --- 문서 ---------------------------------------------------------------------------------------
+
+DOCS_MD = README.md $(shell find docs -name '*.md' -not -path '*/node_modules/*')
+
+docs-check: ## 문서 검사: mermaid 문법, 링크·앵커, ERD 가 models.py 와 같은지
+	@test -d docs/tools/node_modules || (cd docs/tools && npm ci --silent)
+	@node docs/tools/check_mermaid.mjs $(DOCS_MD)
+	@python3 docs/tools/check_links.py $(DOCS_MD)
+	@cd backend && uv run python scripts/gen_erd.py --check
+
+docs-erd: ## models.py 로 docs/data/erd.md 의 ERD 다시 만들기
+	@cd backend && uv run python scripts/gen_erd.py

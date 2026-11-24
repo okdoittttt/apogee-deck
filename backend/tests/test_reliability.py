@@ -67,7 +67,7 @@ def test_selector_repairs_before_trimming():
         AIMessage("", tool_calls=[_tool_call("t1")]),
         HumanMessage("next"),
     ]
-    for provider in ("anthropic", "ollama"):  # 자르지 않는 경우 / 자르는 경우 모두
+    for provider in ("fake", "ollama"):  # 자르지 않는 경우 / 자르는 경우 모두
         selected = make_context_selector(Settings(llm_provider=provider))(
             SystemMessage("sys"), history
         )
