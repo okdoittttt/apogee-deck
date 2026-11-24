@@ -7,7 +7,8 @@ r"""텍스트 형식(TXT·MD·CSV)의 수정 로직.
 - 줄바꿈이 ``\r\n`` 과 ``\n`` 으로 섞인 파일은 수정하지 않는다. 하나로 맞춰 저장하면 고치지 않은 줄의
   바이트까지 바뀌기 때문이다.
 - 수정(``Edit``)은 ``old_text`` 가 정확히 한 번 나올 때만 적용한다 (``replace_all`` 이면 모두).
-  여러 수정 중 하나라도 실패하면 아무것도 적용하지 않는다.
+  적용할 수 없는 수정은 건너뛰고 이유를 돌려준다 (``apply_some``). ``apply_edits`` 는 하나라도 실패하면
+  아무것도 적용하지 않는다.
 - CSV 는 고친 뒤 다시 읽어 따옴표 짝과 열 수가 어긋나지 않았는지 확인한다.
 
 오류 메시지는 에이전트(LLM)에게 도구 결과로 그대로 전달되므로 영어로 쓴다.
@@ -66,21 +67,51 @@ class TextShape:
     newline: Literal["\n", "\r\n"]
 
 
+EDIT_OPS = frozenset(
+    {
+        "replace",
+        "merge",
+        "insert_paragraph",
+        "delete_paragraph",
+        "move_paragraph",
+        "insert_row",
+        "delete_row",
+        "set_style",
+    }
+)
+"""수정 종류. 텍스트 형식은 ``replace`` 만, 나머지는 DOCX 에서만 쓴다."""
+
+
 @dataclass(frozen=True)
 class Edit:
-    """수정 하나.
+    r"""수정 하나.
+
+    ``op`` 마다 쓰는 필드가 다르다 (``works/02.docx-advencement.md`` 9.1절).
 
     Attributes:
         old_text: 바꿀 글자. ``replace_all`` 이 아니면 문서 안에서 정확히 한 번 나와야 한다.
-        new_text: 바꿔 넣을 글자. 빈 글자면 ``old_text`` 를 지운다.
+        new_text: 바꿔 넣을 글자. 빈 글자면 ``old_text`` 를 지운다. DOCX 에서는 ``\n`` 에서 문단을 나누고,
+            ``insert_paragraph`` 에서는 넣을 문단의 글자다.
         replace_all: ``old_text`` 가 나오는 곳을 모두 바꿀지.
-        paragraph: DOCX 에서 찾을 문단 (예: ``"p12"``). 텍스트 형식에서는 쓰지 않는다 (무시한다).
+        paragraph: DOCX 에서 수정할(또는 기준이 되는) 문단 (예: ``"p12"``). 텍스트 형식에서는 무시한다.
+        op: 수정 종류 (``EDIT_OPS``). 기본은 글자 바꾸기.
+        position: ``insert_paragraph``·``move_paragraph``·``insert_row`` 에서 기준의 앞(``"before"``)인지
+            뒤(``"after"``)인지.
+        target: ``move_paragraph`` 에서 옮겨 갈 자리의 기준 문단 (예: ``"p3"``).
+        style: ``insert_paragraph`` 에서 새 문단의 스타일 (예: ``"제목 2"``, 없으면 기준 문단을 따른다).
+            ``set_style`` 에서 문단에 줄 스타일이나 목록 수준 (예: ``"본문"``, ``"목록 2수준"``).
+        cells: ``insert_row`` 에서 새 행의 칸 값 (왼쪽부터).
     """
 
-    old_text: str
-    new_text: str
+    old_text: str = ""
+    new_text: str = ""
     replace_all: bool = False
     paragraph: str | None = None
+    op: str = "replace"
+    position: str = "after"
+    target: str | None = None
+    style: str | None = None
+    cells: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +124,9 @@ class Change:
         count: 바꾼 횟수 (``replace_all`` 이 아니면 1).
         before: 바뀌기 전 글자 (``SNIPPET_CHARS`` 까지).
         after: 바뀐 뒤 글자 (``SNIPPET_CHARS`` 까지).
+        kind: 수정 종류 (``Edit.op``).
+        note: 결과에 덧붙일 설명 (영어). 글자 바꾸기가 아니면 바뀐 내용을 이 한 줄로 설명한다
+            (예: ``"deleted paragraph p7: '…'"``).
     """
 
     index: int
@@ -100,6 +134,8 @@ class Change:
     count: int
     before: str
     after: str
+    kind: str = "replace"
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,11 +219,72 @@ def _not_found(index: int, old: str) -> EditError:
     return EditError(message, index)
 
 
+def _apply_one(text: str, index: int, edit: Edit) -> tuple[str, Change]:
+    if edit.op != "replace":
+        raise EditError(
+            f"Edit {index}: op {edit.op!r} only works for Word documents. Text files can only "
+            "be changed with replace (old_text and new_text).",
+            index,
+        )
+    old, new = _normalize(edit.old_text), _normalize(edit.new_text)
+    if not old:
+        raise EditError(f"Edit {index}: old_text is empty.", index)
+    if old == new:
+        raise EditError(f"Edit {index}: old_text and new_text are the same.", index)
+    first = text.find(old)
+    if first < 0:
+        raise _not_found(index, old)
+    line = text.count("\n", 0, first) + 1
+    if edit.replace_all:
+        count = text.count(old)
+        text = text.replace(old, new)
+    elif text.find(old, first + 1) >= 0:
+        raise EditError(
+            f"Edit {index}: old_text appears more than once in the document. Include "
+            "more surrounding text so that it matches exactly one place, or set "
+            "replace_all to change every occurrence.",
+            index,
+        )
+    else:
+        count = 1
+        text = text[:first] + new + text[first + len(old) :]
+    return text, Change(index, line, count, _shorten(old), _shorten(new))
+
+
+def apply_some(text: str, edits: Sequence[Edit]) -> tuple[str, list[Change], list[EditError]]:
+    r"""수정을 순서대로 적용하고, 적용할 수 없는 수정은 건너뛴다.
+
+    뒤의 수정은 앞의 (성공한) 수정을 적용한 글자에서 찾는다. 겹쳐서 나오는 경우(``"aa"`` 가 ``"aaa"``
+    안에)도 두 번 나온 것으로 본다.
+
+    Args:
+        text: ``\n`` 기준 글자.
+        edits: 적용할 수정 (1개 이상).
+
+    Returns:
+        ``(수정한 글자, 성공한 수정의 바뀐 곳 요약, 실패한 수정의 오류)``.
+
+    Raises:
+        EditError: 수정이 없거나, 결과가 빈 문서일 때 (이때는 아무것도 적용하지 않는다).
+    """
+    if not edits:
+        raise EditError("No edits were given.")
+    changes: list[Change] = []
+    failures: list[EditError] = []
+    for index, edit in enumerate(edits, 1):
+        try:
+            text, change = _apply_one(text, index, edit)
+        except EditError as exc:
+            failures.append(exc)
+        else:
+            changes.append(change)
+    if changes and not text.strip():
+        raise EditError("These edits would leave the document empty.")
+    return text, changes, failures
+
+
 def apply_edits(text: str, edits: Sequence[Edit]) -> tuple[str, list[Change]]:
     r"""수정을 순서대로 적용한다. 하나라도 실패하면 아무것도 적용하지 않는다.
-
-    뒤의 수정은 앞의 수정을 적용한 글자에서 찾는다. 겹쳐서 나오는 경우(``"aa"`` 가 ``"aaa"`` 안에)도
-    두 번 나온 것으로 본다.
 
     Args:
         text: ``\n`` 기준 글자.
@@ -197,39 +294,28 @@ def apply_edits(text: str, edits: Sequence[Edit]) -> tuple[str, list[Change]]:
         ``(수정한 글자, 바뀐 곳 요약)``.
 
     Raises:
-        EditError: 수정이 없거나, ``old_text`` 가 비었거나 ``new_text`` 와 같거나, 찾지 못했거나,
-            ``replace_all`` 없이 두 번 이상 나오거나, 결과가 빈 문서일 때.
+        EditError: 수정이 없거나, 어느 수정이든 적용할 수 없거나(``old_text`` 가 비었거나 ``new_text`` 와
+            같거나, 찾지 못했거나, ``replace_all`` 없이 두 번 이상 나옴), 결과가 빈 문서일 때.
     """
-    if not edits:
-        raise EditError("No edits were given.")
-    changes: list[Change] = []
-    for index, edit in enumerate(edits, 1):
-        old, new = _normalize(edit.old_text), _normalize(edit.new_text)
-        if not old:
-            raise EditError(f"Edit {index}: old_text is empty.", index)
-        if old == new:
-            raise EditError(f"Edit {index}: old_text and new_text are the same.", index)
-        first = text.find(old)
-        if first < 0:
-            raise _not_found(index, old)
-        line = text.count("\n", 0, first) + 1
-        if edit.replace_all:
-            count = text.count(old)
-            text = text.replace(old, new)
-        elif text.find(old, first + 1) >= 0:
-            raise EditError(
-                f"Edit {index}: old_text appears more than once in the document. Include "
-                "more surrounding text so that it matches exactly one place, or set "
-                "replace_all to change every occurrence.",
-                index,
-            )
-        else:
-            count = 1
-            text = text[:first] + new + text[first + len(old) :]
-        changes.append(Change(index, line, count, _shorten(old), _shorten(new)))
-    if not text.strip():
-        raise EditError("These edits would leave the document empty.")
-    return text, changes
+    edited, changes, failures = apply_some(text, edits)
+    if failures:
+        raise failures[0]
+    return edited, changes
+
+
+def combine_failures(failures: Sequence[EditError]) -> EditError:
+    """모든 수정이 실패했을 때 에이전트에게 돌려줄 오류 하나로 합친다.
+
+    Args:
+        failures: 실패한 수정의 오류 (1개 이상).
+
+    Returns:
+        하나면 그 오류, 여럿이면 메시지를 줄마다 이은 오류.
+    """
+    if len(failures) == 1:
+        return failures[0]
+    joined = "\n".join(str(f) for f in failures)
+    return EditError(f"None of the edits could be applied:\n{joined}", failures[0].index)
 
 
 def _csv_rows(text: str, *, strict: bool) -> list[tuple[int, int]]:

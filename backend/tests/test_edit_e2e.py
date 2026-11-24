@@ -168,3 +168,28 @@ async def test_docx_edit_touching_image_is_refused(monkeypatch):
     finished = next(e for e in events if isinstance(e, ToolFinished))
     assert finished.status == "error" and "image" in finished.output
     assert session.added == []
+
+
+async def test_docx_structure_edit_request(monkeypatch):
+    # 실제 사용에서 막혔던 요청: "덩어리진 문단을 나눠 줘" + 표에 행 추가 + 일부 실패.
+    source, session, storage = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {"old_text": "원으로 전년보다", "new_text": "원으로\n전년보다"},
+            {"op": "insert_row", "paragraph": "p16", "cells": ["광주", "9억", "정하늘"]},
+            {"op": "delete_row", "paragraph": "p99"},
+        ],
+    }
+    events, steps = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done"
+    assert "Not applied" in finished.output and "Edit 3:" in finished.output
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    texts = [x.text for x in revised.paragraphs]
+    assert texts[1:3] == ["매출은 120억 원으로", "전년보다 8% 늘었다."]
+    assert "(표1 5행 1열) 광주" in revised.view(1, 100).text
+    (step,) = [s for s in steps if s["type"] == "tool"]
+    assert ToolStep.model_validate(step).documents[0].document_id == str(doc.id)

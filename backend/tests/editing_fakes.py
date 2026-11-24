@@ -30,12 +30,14 @@ class FakeSession:
     """조회하면 ``found`` 를 돌려주고, 추가한 행과 commit 횟수를 기록한다.
 
     ``later`` 를 주면 두 번째 조회부터 그 값을 차례로 돌려준다 (예: 수정본 파싱 뒤 상태 조회).
+    더 새 수정본 조회(``source_document_id`` 로 찾기)는 따로 ``children`` 에서 차례로 돌려준다 (없으면 ``None``).
     ``async with SessionLocal() as session`` 처럼 쓸 수 있게 자기 자신을 돌려준다.
     """
 
-    def __init__(self, found=None, later=()):
+    def __init__(self, found=None, later=(), children=()):
         self.found = found
         self.later = list(later)
+        self.children = list(children)
         self.queries = []
         self.added = []
         self.commits = 0
@@ -47,6 +49,8 @@ class FakeSession:
         return False
 
     async def scalar(self, query):
+        if "WHERE documents.source_document_id =" in str(query):
+            return self.children.pop(0) if self.children else None
         self.queries.append(query)
         if len(self.queries) > 1 and self.later:
             return self.later.pop(0)

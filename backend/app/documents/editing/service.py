@@ -21,7 +21,7 @@ import hashlib
 import re
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -72,6 +72,7 @@ class Revision:
         changes: 바뀐 곳 요약 (수정 순서대로). DOCX 면 ``line`` 이 문단 번호다.
         status: 수정본 상태. 텍스트 형식은 늘 ``ready``. DOCX 는 파싱을 기다린 결과
             (``ready`` | ``processing`` 시간 안에 못 끝남 | ``failed``).
+        failures: 적용하지 못한 수정의 이유 (영어, 수정 순서대로). 나머지 수정만 수정본에 들어갔다.
     """
 
     id: uuid.UUID
@@ -82,6 +83,7 @@ class Revision:
     size_bytes: int
     changes: list[Change]
     status: str = "ready"
+    failures: list[str] = field(default_factory=list)
 
 
 def revision_filename(filename: str, revision: int) -> str:
@@ -210,6 +212,38 @@ async def load_editable(
     return EditableText(source, decoded, shape)
 
 
+async def latest_revision(session: AsyncSession, source: Document) -> Document | None:
+    """``source`` 를 원본으로 이어진 수정본 사슬(원본 → v2 → v3)의 마지막 수정본.
+
+    같은 대화 안에서 ``source_document_id`` 를 따라간다. 한 문서에서 수정본이 여럿 갈라졌으면 가장 최근 것을
+    따른다.
+
+    Args:
+        session: DB 세션.
+        source: 기준 문서.
+
+    Returns:
+        더 새 수정본. 없으면 ``None``.
+    """
+    latest = None
+    current = source.id
+    for _ in range(1000):  # 사슬이 끝없이 이어지는 일은 없지만 안전하게 끊는다
+        child = await session.scalar(
+            select(Document)
+            .options(defer(Document.content))
+            .where(
+                Document.source_document_id == current,
+                Document.conversation_id == source.conversation_id,
+            )
+            .order_by(Document.created_at.desc())
+            .limit(1)
+        )
+        if child is None:
+            break
+        latest, current = child, child.id
+    return latest
+
+
 async def _wait_for_parse(
     session: AsyncSession, doc_id: uuid.UUID, task: asyncio.Task, wait: float
 ) -> str:
@@ -235,8 +269,12 @@ async def create_revision(
 ) -> Revision:
     """문서에 수정을 적용해 수정본을 만든다. 원본은 바꾸지 않는다.
 
-    고칠 수 있는 문서인지는 ``load_editable`` 과 같은 규칙으로 확인한다. 수정본 원본을 저장소에 먼저 올리고
+    고칠 수 있는 문서인지는 ``load_editable`` 과 같은 규칙으로 확인한다. 이 문서로 만든 더 새 수정본이 있으면
+    고치지 않는다 (예전 버전을 고치면 그 뒤의 수정이 빠진 갈래가 생긴다). 수정본 원본을 저장소에 먼저 올리고
     DB 에 기록한다. 기록이 실패해서 남은 객체는 보관 기간 규칙이 지운다.
+
+    적용할 수 없는 수정은 건너뛰고 이유를 ``Revision.failures`` 에 담는다. 하나도 적용하지 못하면 수정본을
+    만들지 않고 오류를 올린다.
 
     텍스트 형식은 바로 ``ready`` 로 기록한다. DOCX 는 ``processing`` 으로 기록하고 업로드와 같은 파싱을
     시작해서 ``parse_wait`` 초까지 기다린다.
@@ -254,21 +292,33 @@ async def create_revision(
         만든 수정본.
 
     Raises:
-        EditError: 고칠 수 있는 문서가 아니거나(``load_editable`` 참고), 수정을 적용할 수 없거나,
-            수정본이 너무 클 때.
+        EditError: 고칠 수 있는 문서가 아니거나(``load_editable`` 참고), 더 새 수정본이 있거나, 수정을
+            하나도 적용할 수 없거나,
+            CSV 가 깨지거나 문서가 비게 되거나, 수정본이 너무 클 때.
     """
     loaded = await load_editable(
         session, storage, document_id=document_id, conversation_id=conversation_id
     )
     source = loaded.source
+    newer = await latest_revision(session, source)
+    if newer is not None:
+        raise EditError(
+            f"A newer version of this document exists: {newer.filename} (document_id: "
+            f"{newer.id}, revision {newer.revision}). Edit that version instead, so that earlier "
+            "changes are not lost; look at it with view_document_for_edit first."
+        )
     content: str | None
     if isinstance(loaded, EditableDocx):
-        changes = loaded.document.apply_edits(edits)
+        changes, failures = loaded.document.apply_some(edits)
+        if not changes:
+            raise text.combine_failures(failures)
         new_data = loaded.document.to_bytes()
         content, status = None, "processing"
     else:
         before, shape = loaded.text, loaded.shape
-        content, changes = text.apply_edits(before, edits)
+        content, changes, failures = text.apply_some(before, edits)
+        if not changes:
+            raise text.combine_failures(failures)
         if source.kind == DocumentKind.CSV:
             text.check_csv(before, content)
         new_data = text.encode(content, shape)
@@ -312,6 +362,7 @@ async def create_revision(
         size_bytes=doc.size_bytes,
         changes=changes,
         status=status,
+        failures=[str(f) for f in failures],
     )
 
 

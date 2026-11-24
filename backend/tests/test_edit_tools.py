@@ -158,7 +158,18 @@ def test_edit_schema_describes_edits():
     schema = document_tools.make_edit_document(Settings()).tool_call_schema.model_json_schema()
     assert set(schema["properties"]) == {"document_id", "edits"}
     edit = schema["$defs"]["DocumentEdit"]
-    assert set(edit["properties"]) == {"old_text", "new_text", "replace_all", "paragraph"}
+    assert set(edit["properties"]) == {
+        "op",
+        "old_text",
+        "new_text",
+        "replace_all",
+        "paragraph",
+        "position",
+        "target",
+        "style",
+        "cells",
+    }
+    assert "merge" in edit["properties"]["op"]["enum"]
     assert "[L12]" in edit["properties"]["old_text"]["description"]
     assert '"p12"' in edit["properties"]["paragraph"]["description"]
 
@@ -297,3 +308,52 @@ async def test_edit_docx_failure_explains(monkeypatch):
     message = await failure(tool, args)
     assert "more than one paragraph" in message and message.endswith("No changes were saved.")
     assert session.added == []
+
+
+async def test_edit_docx_structure_ops_and_partial_failure(monkeypatch):
+    source, session, storage = install_docx(monkeypatch)
+    tool = document_tools.make_edit_document(Settings())
+    message = await tool.ainvoke(
+        call(
+            "edit_document",
+            {
+                "document_id": str(source.id),
+                "edits": [
+                    {"old_text": "원으로 전년보다", "new_text": "원으로\n전년보다"},
+                    {"op": "insert_row", "paragraph": "p16", "cells": ["광주", "9억", "정하늘"]},
+                    {"op": "delete_paragraph", "paragraph": "p19"},
+                    {"op": "move_paragraph", "paragraph": "p99", "target": "p1"},
+                    {"op": "set_style", "paragraph": "p3", "style": "제목 2"},
+                ],
+            },
+        ),
+        config=CONFIG,
+    )
+    content = message.content
+    assert "(split into 2 paragraphs)" in content
+    assert "2. inserted a table row after 표1 4행: '광주 | 9억 | 정하늘'" in content
+    assert "3. deleted paragraph p19: '자세한 내용은 영업팀 위키를 참고한다.'" in content
+    assert "Not applied" in content and "- Edit 4: paragraph p99 does not exist" in content
+    assert "5. changed paragraph p3 to 제목 2" in content
+    assert "Paragraph numbers changed" in content and "Tell the user which changes" in content
+    (doc,) = session.added
+    texts = [x.text for x in DocxDocument.from_bytes(storage.objects[doc.storage_key]).paragraphs]
+    assert "광주" in texts and "자세한 내용은 영업팀 위키를 참고한다." not in texts
+
+
+async def test_view_docx_shows_empty_table_cells(monkeypatch):
+    source, session, storage = install_docx(monkeypatch)
+    edit_tool = document_tools.make_edit_document(Settings())
+    await edit_tool.ainvoke(
+        call(
+            "edit_document",
+            {
+                "document_id": str(source.id),
+                "edits": [{"op": "insert_row", "paragraph": "p16", "cells": ["광주"]}],
+            },
+        ),
+        config=CONFIG,
+    )
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    assert "[p18] (표1 5행 2열) (빈 칸)" in revised.view(1, 100).text

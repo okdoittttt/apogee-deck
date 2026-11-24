@@ -9,6 +9,7 @@ from app.documents.editing.text import (
     EditError,
     TextShape,
     apply_edits,
+    apply_some,
     check_csv,
     decode,
     encode,
@@ -283,3 +284,17 @@ def test_edit_error_is_tool_error():
     from app.core.errors import ToolError
 
     assert issubclass(EditError, ToolError)
+
+
+def test_apply_some_skips_failed_edits():
+    edited, changes, failures = apply_some(
+        "a b c", [Edit("a", "A"), Edit("z", "Z"), Edit("c", "C")]
+    )
+    assert edited == "A b C"
+    assert [c.index for c in changes] == [1, 3]
+    assert [f.index for f in failures] == [2]
+
+
+def test_other_ops_only_for_word():
+    _, changes, (failure,) = apply_some("a", [Edit(op="delete_paragraph", paragraph="p1")])
+    assert changes == [] and "only works for Word documents" in str(failure)

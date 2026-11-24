@@ -141,21 +141,43 @@ async def test_too_large():
         await revise(source_doc(), b"short\n", [Edit("short", "much longer text")], max_bytes=10)
 
 
-async def test_failed_edit_saves_nothing():
+async def test_all_edits_failing_saves_nothing():
     source = source_doc()
     storage = FakeStorage({source.storage_key: b"a\n"})
     session = FakeSession(source)
-    with pytest.raises(EditError, match="not found"):
+    with pytest.raises(EditError, match="None of the edits could be applied") as caught:
         await create_revision(
             session,
             storage,
             document_id=str(source.id),
             conversation_id=str(CONVERSATION),
-            edits=[Edit("a", "b"), Edit("zzz", "y")],
+            edits=[Edit("zzz", "b"), Edit("yyy", "y")],
             max_bytes=MAX_BYTES,
         )
+    assert "Edit 1:" in str(caught.value) and "Edit 2:" in str(caught.value)
     assert session.added == [] and session.commits == 0
     assert list(storage.objects) == [source.storage_key]
+
+
+async def test_some_edits_failing_saves_the_rest():
+    source = source_doc()
+    revision, _, storage = await revise(
+        source, b"a b\n", [Edit("a", "A"), Edit("zzz", "y"), Edit("b", "B")]
+    )
+    assert storage.objects[f"documents/{revision.id}"] == b"A B\n"
+    assert [c.index for c in revision.changes] == [1, 3]
+    (failure,) = revision.failures
+    assert failure.startswith("Edit 2: old_text was not found")
+
+
+async def test_one_failed_edit_keeps_its_own_message():
+    with pytest.raises(EditError, match=r"^Edit 1: old_text was not found"):
+        await revise(source_doc(), b"a\n", [Edit("zzz", "b")])
+
+
+async def test_csv_check_runs_after_all_edits():
+    with pytest.raises(EditError, match="columns"):
+        await revise(source_doc(kind="csv"), b"a,b\n1,2\n", [Edit("1,2", "1,2,3"), Edit("a", "A")])
 
 
 async def test_mixed_newlines_rejected():
@@ -283,3 +305,25 @@ async def test_docx_edit_error_saves_nothing(monkeypatch):
     with pytest.raises(EditError, match="image"):
         await revise_docx(docx_source(), [Edit("로고: ￼", "로고:")])
     assert calls == []
+
+
+# --- 최신 수정본 확인 (묶음 1, C4) ----------------------------------------------------------------
+
+
+async def test_editing_an_older_version_is_refused():
+    source = source_doc()
+    v2 = source_doc(revision=2, filename="notes (수정 2).txt")
+    v3 = source_doc(revision=3, filename="notes (수정 3).txt")
+    storage = FakeStorage({source.storage_key: b"a\n"})
+    session = FakeSession(source, children=[v2, v3])
+    with pytest.raises(EditError, match="newer version") as caught:
+        await create_revision(
+            session,
+            storage,
+            document_id=str(source.id),
+            conversation_id=str(CONVERSATION),
+            edits=[Edit("a", "b")],
+            max_bytes=MAX_BYTES,
+        )
+    assert str(v3.id) in str(caught.value) and "revision 3" in str(caught.value)
+    assert session.added == []
