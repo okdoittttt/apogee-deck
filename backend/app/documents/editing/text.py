@@ -91,6 +91,8 @@ EDIT_OPS = frozenset(
         "accept_changes",
         "reject_changes",
         "comment",
+        "resolve_comment",
+        "delete_comment",
         "format",
     }
 )
@@ -144,6 +146,9 @@ class Edit:
         cells: ``insert_row`` 에서 새 행의 칸 값 (왼쪽부터), ``insert_column`` 에서 새 열의 칸 값 (위부터).
         format: ``format`` 에서 바꿀 글자 서식.
         whole_section: ``delete_paragraph``·``move_paragraph`` 에서 제목 문단부터 그 섹션 끝까지 다룰지.
+        author: ``accept_changes``·``reject_changes`` 에서 이 사람이 남긴 기록만 다룬다.
+        comment: 메모 id (예: ``"c3"``). ``comment`` 에서는 그 메모에 답글을 달고,
+            ``resolve_comment``·``delete_comment`` 에서는 다룰 메모다.
     """
 
     old_text: str = ""
@@ -157,6 +162,8 @@ class Edit:
     cells: tuple[str, ...] | None = None
     format: TextFormat | None = None
     whole_section: bool = False
+    author: str | None = None
+    comment: str | None = None
 
 
 @dataclass(frozen=True)

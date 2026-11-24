@@ -644,14 +644,6 @@ def test_whole_section_refusals():
     assert "directly in the document body" in str(failures[2])
 
 
-def test_whole_section_delete_refused_in_tracking_mode():
-    doc = DocxDocument.from_bytes(chapters())
-    with pytest.raises(EditError, match="tracked"):
-        doc.apply_edits(
-            [Edit(op="delete_paragraph", paragraph="p7", whole_section=True)], track=True
-        )
-
-
 def test_section_with_comment_reaching_outside_is_refused():
     body = (
         h(1, "1장")

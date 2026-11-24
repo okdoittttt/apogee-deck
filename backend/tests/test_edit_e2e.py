@@ -13,6 +13,7 @@ from app.api.schemas import ToolStep
 from app.core.config import Settings
 from app.documents.editing import service as editing
 from app.documents.editing.docx import DocxDocument, W
+from app.documents.editing.text import Edit
 from app.orchestration import runtime
 from app.orchestration.events import Finished, StepRecorder, ToolFinished, ToolStarted
 from app.tools import documents as document_tools
@@ -288,3 +289,47 @@ async def test_docx_bundle5_structure_request(monkeypatch):
     assert "(표1 2행 1열) 준비" in view
     assert "(표2 1행 3열) 목표" in view and "(표2 2행 3열) 55억" in view
     assert "문의: 영업기획팀 김민수⏎(내선 1234)" in view
+
+
+async def test_docx_bundle6_tracked_structure_request(monkeypatch):
+    # "변경 추적으로: 다음 분기 계획 섹션은 빼고, 표에 광주 행을 넣고, 신규 고객 문단은 제목으로 바꾸고,
+    #  매출 문장에는 근거를 묻는 메모를 달아 줘."
+    source, session, storage = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "track_changes": True,
+        "edits": [
+            {"op": "delete_paragraph", "paragraph": "p17", "whole_section": True},
+            {"op": "insert_row", "paragraph": "p14", "cells": ["광주", "12억", "최유진"]},
+            {"op": "set_style", "paragraph": "p3", "style": "제목 2"},
+            {"op": "comment", "old_text": "120억 원", "new_text": "근거 자료가 필요합니다"},
+        ],
+    }
+    events, _ = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done", finished.output
+    assert "Not applied" not in finished.output
+    assert "deleted section '다음 분기 계획'" in finished.output
+    assert "as a tracked change" in finished.output
+    (doc,) = session.added
+    data = storage.objects[doc.storage_key]
+    revised = DocxDocument.from_bytes(data)
+    view = revised.view(1, 100).text
+    assert "행 넣음 추적" in view and "문단 서식 바뀜" in view and "{-다음 분기 계획-}" in view
+    comment = next(c for x in revised.paragraphs for c in x.comments)
+
+    revised.apply_edits(
+        [
+            Edit(op="reject_changes", author="AI 에이전트", paragraph="p3"),
+            Edit(op="accept_changes", author="AI 에이전트"),
+            Edit(op="resolve_comment", comment=f"c{comment.id}", new_text="출처를 확인했습니다."),
+        ]
+    )
+    final = DocxDocument.from_bytes(revised.to_bytes())
+    texts = [x.text for x in final.paragraphs if x.text]
+    assert "다음 분기 계획" not in texts and "광주" in texts
+    assert next(x for x in final.paragraphs if x.text.startswith("신규 고객")).style is None
+    (kept,) = [c for x in final.paragraphs for c in x.comments]
+    assert kept.resolved and kept.replies[0].text == "출처를 확인했습니다."
+    assert not any(x.tracked for x in final.paragraphs)

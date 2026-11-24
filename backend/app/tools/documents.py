@@ -177,11 +177,15 @@ DOCX_VIEW_LEGEND = (
     f"are shown as tab characters and {LINE_BREAK} is a line break inside the paragraph. (빈 칸) "
     "is an empty table cell, and (위 칸과 병합) is a cell merged with the cell above (its text is "
     "in the cell above); other empty paragraphs are not shown but keep their number. In "
-    "paragraphs labeled (변경 추적: name) someone's tracked changes are shown as {+inserted+} "
-    "and {-deleted-} text; other labels there say what else was tracked (서식 바뀜: formatting, "
-    "문단 넣음·나눔 / 문단 합침: paragraphs added, split or joined). Those paragraphs cannot be "
-    "edited yet, and old_text never includes the marks. A line (메모 c3 · name: 'text' → "
-    "'target') under a paragraph is a comment on that paragraph, not document text."
+    "paragraphs labeled (변경 추적: names) tracked changes are shown as {+inserted+} and "
+    "{-deleted-} text; other labels there say what else was tracked (서식 바뀜: formatting, "
+    "문단 넣음·나눔 / 문단 합침: paragraphs added, split or joined, 행 넣음 / 행 지움: table rows "
+    "added or deleted, 표 서식 / 칸 서식 / 구역 설정: table, cell or page layout changes). The "
+    "names are the authors you can give to accept_changes or reject_changes. Text inside "
+    "someone else's tracked changes cannot be edited until they are accepted or rejected, and "
+    "old_text never includes the marks. A line (메모 c3 · name: 'text' → 'target') under a "
+    "paragraph is a comment on that paragraph, not document text; (↳ 답글 c4 · name: 'text') "
+    "lines under it are replies, and · 해결됨 means the comment is resolved."
 )
 """DOCX 보기 결과 끝에 붙이는 범례."""
 
@@ -337,6 +341,8 @@ class DocumentEdit(BaseModel):
         "insert_markdown",
         "set_style",
         "comment",
+        "resolve_comment",
+        "delete_comment",
         "format",
         "accept_changes",
         "reject_changes",
@@ -356,11 +362,14 @@ class DocumentEdit(BaseModel):
             "of the cell that contains paragraph), delete_column (delete that column), "
             "delete_table (delete the whole table that contains paragraph), set_style "
             "(change paragraph to style), comment (add new_text as a comment on old_text, or on "
-            "the whole paragraph when old_text is empty), format (change the character "
+            "the whole paragraph when old_text is empty; with comment set, add new_text as a "
+            "reply to that comment), resolve_comment (mark comment as resolved, after adding "
+            "new_text as a reply if given), delete_comment (delete comment with its replies), "
+            "format (change the character "
             "formatting of old_text, or of the whole paragraph when old_text is empty, to "
             "format), accept_changes / reject_changes "
             "(accept or reject the tracked changes in paragraph, or in the whole document when "
-            "paragraph is empty)."
+            "paragraph is empty, optionally only those by author)."
         ),
     )
     old_text: str = Field(
@@ -381,7 +390,7 @@ class DocumentEdit(BaseModel):
             "documents a line break in new_text splits the paragraph there, and "
             f"{LINE_BREAK} adds a line break inside the paragraph. insert_paragraph: the "
             "text of the new paragraph (one paragraph per line). insert_markdown: the content "
-            "in Markdown. comment: the comment text."
+            "in Markdown. comment and resolve_comment: the comment or reply text."
         ),
     )
     replace_all: bool = Field(
@@ -447,6 +456,21 @@ class DocumentEdit(BaseModel):
             "the whole section (the heading and everything up to the next heading of the same "
             'or higher level, including tables) should be deleted or moved, as in "move chapter '
             '3 before chapter 2".'
+        ),
+    )
+    author: str | None = Field(
+        default=None,
+        description=(
+            "accept_changes and reject_changes only: handle only the tracked changes by this "
+            'author, as named in the view label (변경 추적: names), such as "김민지".'
+        ),
+    )
+    comment: str | None = Field(
+        default=None,
+        description=(
+            'A comment id from the view, such as "c3". comment: reply to it. resolve_comment '
+            "and delete_comment: the comment to resolve or delete (a reply id deletes only that "
+            "reply)."
         ),
     )
     format: FormatArg | None = Field(
@@ -576,14 +600,16 @@ def make_edit_document(settings: Settings) -> BaseTool:
         other kinds of edits can split, merge, insert, delete or move paragraphs or whole
         sections, insert Markdown content (headings, lists, tables), add or delete table rows
         and columns, delete tables, change a paragraph's style (heading, normal text, list),
-        add comments, and accept or reject tracked changes.
+        add, reply to, resolve or delete comments, and accept or reject tracked changes (all of
+        them or one author's).
 
         In Word documents, set track_changes to true when the user wants to review your changes
         (for example "track changes", "so I can check them in Word", "mark what you changed"):
-        replace, insert_paragraph and delete_paragraph are then saved as tracked changes that the
-        user can accept or reject in Word, and other kinds of edits fail. Leave it unset to
+        the edits are then saved as tracked changes that the user can accept or reject in Word.
+        Only inserting or deleting table columns cannot be tracked and fails. Leave it unset to
         follow the document's own Word setting. When the user only asks you to review or give
-        feedback, prefer comments over changing the text, unless they ask for changes.
+        feedback, prefer comments over changing the text, unless they ask for changes. Resolve
+        comments only when the user asks you to.
 
         The original is never changed: each call saves a new revised version of the file,
         which the user can download, and returns its new document_id. Put all the changes
@@ -633,6 +659,8 @@ def make_edit_document(settings: Settings) -> BaseTool:
                             if e.format is not None
                             else None,
                             whole_section=e.whole_section,
+                            author=e.author or None,
+                            comment=e.comment or None,
                         )
                         for e in parsed
                     ],

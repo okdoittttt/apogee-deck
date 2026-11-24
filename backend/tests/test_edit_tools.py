@@ -190,6 +190,8 @@ def test_edit_schema_describes_edits():
         "cells",
         "format",
         "whole_section",
+        "author",
+        "comment",
     }
     assert {
         "merge",
@@ -200,6 +202,8 @@ def test_edit_schema_describes_edits():
         "insert_column",
         "delete_column",
         "delete_table",
+        "resolve_comment",
+        "delete_comment",
     } <= set(edit["properties"]["op"]["enum"])
     assert set(schema["$defs"]["FormatArg"]["properties"]) == {
         "bold",
@@ -391,7 +395,7 @@ async def test_edit_docx_with_tracked_changes(monkeypatch):
                 "edits": [
                     {"old_text": "원으로 전년보다", "new_text": "원으로 작년보다"},
                     {"op": "comment", "old_text": "원으로", "new_text": "단위 확인"},
-                    {"op": "merge", "paragraph": "p1"},
+                    {"op": "delete_column", "paragraph": "p1"},
                 ],
                 "track_changes": True,
             },
@@ -400,7 +404,10 @@ async def test_edit_docx_with_tracked_changes(monkeypatch):
     )
     content = message.content
     assert "saved as tracked changes by '검토 에이전트'" in content
-    assert "commented on" in content and 'op "merge" cannot be made as a tracked change' in content
+    assert (
+        "commented on" in content
+        and 'op "delete_column" cannot be made as a tracked change' in content
+    )
     (doc,) = session.added
     saved = DocxDocument.from_bytes(storage.objects[doc.storage_key])
     tracked = [x for x in saved.paragraphs if x.tracked]

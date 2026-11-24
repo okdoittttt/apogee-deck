@@ -61,6 +61,31 @@ def assert_valid(data: bytes, author: str = "AI 에이전트") -> None:
     if refs:
         comments = etree.fromstring(parts["word/comments.xml"])
         assert refs <= {c.get(f"{{{W}}}id") for c in comments.iter(f"{{{W}}}comment")}
+    for row_props in document.iter(f"{{{W}}}trPr"):
+        names = [etree.QName(c).localname for c in row_props]
+        records = [i for i, n in enumerate(names) if n in ("ins", "del")]
+        others = [i for i, n in enumerate(names) if n not in ("ins", "del", "trPrChange")]
+        assert not records or not others or min(records) > max(others), "행 기록은 행 속성 뒤"
+        if "trPrChange" in names:
+            assert names[-1] == "trPrChange"
+    for props in document.iter(f"{{{W}}}pPr"):
+        names = [etree.QName(c).localname for c in props]
+        if "pPrChange" in names:
+            assert names[-1] == "pPrChange", "w:pPrChange 는 w:pPr 의 마지막"
+    if "word/commentsExtended.xml" in parts:
+        w14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+        w15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+        comments = etree.fromstring(parts["word/comments.xml"])
+        para_ids = [
+            c.findall(".//w:p", NS)[-1].get(f"{{{w14}}}paraId")
+            for c in comments.iter(f"{{{W}}}comment")
+        ]
+        known = {x for x in para_ids if x}
+        assert len(known) == len([x for x in para_ids if x]), "메모 paraId 는 겹치지 않는다"
+        for entry in etree.fromstring(parts["word/commentsExtended.xml"]):
+            assert entry.get(f"{{{w15}}}paraId") in known
+            parent = entry.get(f"{{{w15}}}paraIdParent")
+            assert parent is None or parent in known, "답글의 부모 메모가 있다"
     for element in document.iter():
         assert not str(element.tag).endswith("okdoit-paragraph")
 
@@ -81,7 +106,7 @@ def test_accept_all_keeps_insertions_and_drops_deletions():
 def test_reject_all_restores_deletions_and_joins_inserted_paragraph():
     doc = DocxDocument.from_bytes(REVIEW_KO.read_bytes())
     (change,) = doc.apply_edits([Edit(op="reject_changes")])
-    assert "1 paragraph joined" in change.note
+    assert "1 empty paragraph removed" in change.note
     texts = [x.text for x in doc.paragraphs]
     assert texts[1] == "2024년 매출은 120억 원이다."
     assert "검토자가 넣은 문단이다." not in texts
@@ -110,15 +135,15 @@ def test_review_without_tracked_changes_fails():
     assert "no tracked changes" in str(failure)
 
 
-def test_table_structure_changes_are_refused():
+def test_single_cell_records_are_refused():
     row = (
-        '<w:tbl><w:tr><w:trPr><w:ins w:id="1" w:author="가"/></w:trPr><w:tc><w:p>'
+        '<w:tbl><w:tr><w:tc><w:tcPr><w:cellIns w:id="1" w:author="가"/></w:tcPr><w:p>'
         + r("칸")
         + "</w:p></w:tc></w:tr></w:tbl>"
     )
     doc = DocxDocument.from_bytes(make_docx(row + p(r("뒤"))))
     _, (failure,) = doc.apply_some([Edit(op="accept_changes")])
-    assert "tables, sections or numbering" in str(failure)
+    assert "single table cells" in str(failure)
 
 
 # --- 추적 문단 고치기 ----------------------------------------------------------------------
@@ -225,12 +250,24 @@ def test_own_tracked_text_is_edited_in_place():
     assert view(fixed)[1] == "[p2] (변경 추적: AI 에이전트 · 문단 넣음·나눔 추적) {+고친 글+}"
 
 
-def test_structure_ops_fail_in_tracking_mode():
-    doc = DocxDocument.from_bytes(make_docx(p(r("가")) + p(r("나"))))
+def test_column_ops_fail_in_tracking_mode():
+    data = make_docx(
+        "<w:tbl><w:tr><w:tc><w:p>"
+        + r("가")
+        + "</w:p></w:tc><w:tc><w:p>"
+        + r("나")
+        + "</w:p></w:tc></w:tr></w:tbl>"
+        + p(r("뒤"))
+    )
+    doc = DocxDocument.from_bytes(data)
     _, failures = doc.apply_some(
-        [Edit(op="merge", paragraph="p1"), Edit(op="move_paragraph", paragraph="p2", target="p1")],
+        [
+            Edit(op="insert_column", paragraph="p1", cells=["다"]),
+            Edit(op="delete_column", paragraph="p2"),
+        ],
         track=True,
     )
+    assert len(failures) == 2
     assert all("cannot be made as a tracked change" in str(f) for f in failures)
 
 
