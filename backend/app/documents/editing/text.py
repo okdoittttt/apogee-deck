@@ -74,11 +74,13 @@ class Edit:
         old_text: 바꿀 글자. ``replace_all`` 이 아니면 문서 안에서 정확히 한 번 나와야 한다.
         new_text: 바꿔 넣을 글자. 빈 글자면 ``old_text`` 를 지운다.
         replace_all: ``old_text`` 가 나오는 곳을 모두 바꿀지.
+        paragraph: DOCX 에서 찾을 문단 (예: ``"p12"``). 텍스트 형식에서는 쓰지 않는다 (무시한다).
     """
 
     old_text: str
     new_text: str
     replace_all: bool = False
+    paragraph: str | None = None
 
 
 @dataclass(frozen=True)

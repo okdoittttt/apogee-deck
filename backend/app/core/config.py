@@ -106,7 +106,9 @@ class Settings(BaseSettings):
             (도구 호출 한 번을 아낀다). 0 이면 항상 ``read_document`` 로 읽게 한다.
         document_read_max_chars: ``read_document`` 가 한 번에 보여줄 최대 글자 수.
         document_edit_view_max_lines: ``view_document_for_edit`` 가 한 번에 보여줄 최대 줄 수.
-            글자 수는 ``document_read_max_chars`` 로도 자른다.
+            글자 수는 ``document_read_max_chars`` 로도 자른다. DOCX 는 문단 수다.
+        document_edit_parse_wait_seconds: DOCX 수정본을 다시 파싱할 때 도구가 기다리는 최대 시간(초).
+            넘기면 수정본은 저장한 채 파싱을 백그라운드에서 이어 간다 (답변이 너무 늦어지지 않게).
         max_documents_per_message: 메시지 하나에 붙일 수 있는 문서 수.
         project_max_tokens: 프로젝트 하나에 넣을 수 있는 문서 분량(추정 토큰 수 합계). 문서 수는 제한하지 않는다.
         project_inline_max_tokens: 프로젝트 문서 합계가 이 이하면 본문을 모두 system 프롬프트에 넣는다
@@ -260,6 +262,7 @@ class Settings(BaseSettings):
     document_inline_max_tokens: int = 2000
     document_read_max_chars: int = 8000
     document_edit_view_max_lines: int = 400
+    document_edit_parse_wait_seconds: float = 20.0
     max_documents_per_message: int = 5
     project_max_tokens: int = 1_000_000
     project_inline_max_tokens: int = 20_000

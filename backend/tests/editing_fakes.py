@@ -29,11 +29,13 @@ class FakeStorage:
 class FakeSession:
     """조회하면 ``found`` 를 돌려주고, 추가한 행과 commit 횟수를 기록한다.
 
+    ``later`` 를 주면 두 번째 조회부터 그 값을 차례로 돌려준다 (예: 수정본 파싱 뒤 상태 조회).
     ``async with SessionLocal() as session`` 처럼 쓸 수 있게 자기 자신을 돌려준다.
     """
 
-    def __init__(self, found=None):
+    def __init__(self, found=None, later=()):
         self.found = found
+        self.later = list(later)
         self.queries = []
         self.added = []
         self.commits = 0
@@ -46,6 +48,8 @@ class FakeSession:
 
     async def scalar(self, query):
         self.queries.append(query)
+        if len(self.queries) > 1 and self.later:
+            return self.later.pop(0)
         return self.found
 
     def add(self, obj):
@@ -69,6 +73,7 @@ def source_doc(kind="txt", status="ready", revision=1, filename=None, **extra):
         "filename": filename or f"notes.{kind}",
         "mime_type": f"text/{kind}; charset=utf-8",
         "storage_key": f"documents/{doc_id}",
+        "created_by": "user",
     }
     return SimpleNamespace(**(fields | extra))
 

@@ -1,13 +1,18 @@
 """문서 수정 E2E (fake 모델): 요청 → 에이전트 그래프 → 도구 호출 → 수정본 저장 → 화면용 실행 단계."""
 
+import asyncio
 import json
+from pathlib import Path
 
 from editing_fakes import CONVERSATION, install_tools, source_doc
 from langgraph.checkpoint.memory import InMemorySaver
+from lxml import etree
 
 from app.agents import chat
 from app.api.schemas import ToolStep
 from app.core.config import Settings
+from app.documents.editing import service as editing
+from app.documents.editing.docx import DocxDocument, W
 from app.orchestration import runtime
 from app.orchestration.events import Finished, StepRecorder, ToolFinished, ToolStarted
 from app.tools import documents as document_tools
@@ -90,3 +95,76 @@ async def test_view_then_edit_tools_are_offered_to_the_model(monkeypatch):
 
     finished = next(e for e in events if isinstance(e, ToolFinished))
     assert finished.status == "done" and "[L2] 본문" in finished.output
+
+
+# --- DOCX ----------------------------------------------------------------------------------------
+
+DOCX = (Path(__file__).parent / "fixtures" / "sales-report.docx").read_bytes()
+
+
+def install_docx(monkeypatch):
+    source = source_doc(
+        kind="docx",
+        filename="sales-report.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    session, storage = install_tools(monkeypatch, document_tools, source, DOCX)
+
+    def schedule(*args):
+        # 수정본 파싱은 바로 끝난 것으로 하고, 뒤이은 상태 조회에 ready 를 돌려준다.
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        session.later.append("ready")
+        return future
+
+    monkeypatch.setattr(editing.documents, "schedule_parse", schedule)
+    return source, session, storage
+
+
+async def test_docx_view_then_edit_keeps_formatting(monkeypatch):
+    source, session, storage = install_docx(monkeypatch)
+
+    events, _ = await run(
+        monkeypatch, request("view_document_for_edit", {"document_id": str(source.id)})
+    )
+    viewed = next(e for e in events if isinstance(e, ToolFinished))
+    assert viewed.status == "done" and "[p2] 매출은 120억 원으로" in viewed.output
+
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {"old_text": "120억", "new_text": "135억"},
+            {"old_text": "영업기획팀 ·", "new_text": "영업전략팀 ·", "paragraph": "p23"},
+        ],
+    }
+    events, steps = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done"
+    (doc,) = session.added
+    assert finished.documents[0]["filename"] == "sales-report (수정 2).docx"
+    assert finished.documents[0]["kind"] == "docx"
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    assert revised.paragraphs[1].text == "매출은 135억 원으로 전년보다 8% 늘었다."
+    assert revised.paragraphs[22].text == "영업전략팀 · 1 쪽"
+    # "135" 는 원본의 "120" 처럼 굵게 남는다.
+    run_xml = [
+        etree.tostring(r, encoding="unicode")
+        for r in revised.paragraphs[1].element.iter(f"{{{W}}}r")
+    ]
+    assert any("<w:b/>" in x and ">135<" in x for x in run_xml)
+    assert storage.objects[source.storage_key] == DOCX
+    (step,) = [s for s in steps if s["type"] == "tool"]
+    assert ToolStep.model_validate(step).documents[0].document_id == str(doc.id)
+
+
+async def test_docx_edit_touching_image_is_refused(monkeypatch):
+    source, session, _ = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "edits": [{"old_text": "로고: ￼", "new_text": "로고:"}],
+    }
+    events, _ = await run(monkeypatch, request("edit_document", args))
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "error" and "image" in finished.output
+    assert session.added == []

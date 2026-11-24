@@ -32,6 +32,8 @@ dependencies = [
     "requests>=2.34.2",
     "pgvector>=0.5.1",
     "pypdfium2>=5.14.0",
+    # DOCX 수정: ZIP 안의 XML 을 직접 고친다 (2026-11-24, 이미 trafilatura 를 따라 들어와 있던 버전)
+    "lxml>=6.1.3",
 ]
 
 [dependency-groups]

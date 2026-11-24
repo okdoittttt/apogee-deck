@@ -9,11 +9,14 @@
 보관 기간 정리가 원본과 똑같이 동작한다.
 
 텍스트 형식은 파싱이 글자 그대로라서 따로 파싱하지 않고 바로 ``ready`` 로 기록한다. 그래서 수정이 끝나자마자
-다음 ``read_document`` 가 새 내용을 읽는다.
+다음 ``read_document`` 가 새 내용을 읽는다. DOCX 수정본은 본문(``content``)이 파싱 결과(Markdown, 그림 OCR)라서
+업로드와 같은 파싱을 돌리고, 시간 제한 안에서 끝나기를 기다린다. 넘기면 수정본은 저장한 채 ``processing`` 으로
+두고 파싱은 백그라운드에서 이어진다.
 
 오류(``EditError``)의 메시지는 에이전트에게 도구 결과로 그대로 전달되므로 영어로 쓴다.
 """
 
+import asyncio
 import hashlib
 import re
 import uuid
@@ -26,13 +29,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.core.storage import ObjectNotFoundError, ObjectStorage
+from app.documents import service as documents
 from app.documents.editing import text
+from app.documents.editing.docx import DocxDocument
 from app.documents.editing.text import Change, Edit, EditError, TextShape
 from app.documents.formats import MIME_TYPES, DocumentKind, safe_filename
 from app.documents.service import storage_key
 from app.models import Conversation, Document
 
-EDITABLE_KINDS = frozenset({DocumentKind.TXT, DocumentKind.MD, DocumentKind.CSV})
+TEXT_KINDS = frozenset({DocumentKind.TXT, DocumentKind.MD, DocumentKind.CSV})
+"""글자 그대로 고치는 텍스트 형식."""
+
+EDITABLE_KINDS = TEXT_KINDS | {DocumentKind.DOCX}
 """지금 고칠 수 있는 형식."""
 
 NEW_DOCUMENT_KINDS = {
@@ -61,7 +69,9 @@ class Revision:
         source_document_id: 수정본을 만든 직전 문서 ID.
         kind: 문서 형식 (원본과 같다).
         size_bytes: 수정본 크기.
-        changes: 바뀐 곳 요약 (수정 순서대로).
+        changes: 바뀐 곳 요약 (수정 순서대로). DOCX 면 ``line`` 이 문단 번호다.
+        status: 수정본 상태. 텍스트 형식은 늘 ``ready``. DOCX 는 파싱을 기다린 결과
+            (``ready`` | ``processing`` 시간 안에 못 끝남 | ``failed``).
     """
 
     id: uuid.UUID
@@ -71,6 +81,7 @@ class Revision:
     kind: str
     size_bytes: int
     changes: list[Change]
+    status: str = "ready"
 
 
 def revision_filename(filename: str, revision: int) -> str:
@@ -111,7 +122,7 @@ def _not_found(document_id: str) -> EditError:
 
 @dataclass(frozen=True)
 class EditableText:
-    r"""고칠 문서와 그 원본에서 만든 글자.
+    r"""고칠 텍스트 문서(TXT·MD·CSV)와 그 원본에서 만든 글자.
 
     Attributes:
         source: 고칠 문서 행 (본문 ``content`` 는 읽지 않았다).
@@ -124,13 +135,29 @@ class EditableText:
     shape: TextShape
 
 
-async def load_text(
+@dataclass(frozen=True)
+class EditableDocx:
+    """고칠 DOCX 문서와 그 원본을 연 것.
+
+    Attributes:
+        source: 고칠 문서 행 (본문 ``content`` 는 읽지 않았다).
+        document: 원본 바이트로 연 DOCX.
+    """
+
+    source: Document
+    document: DocxDocument
+
+
+async def load_editable(
     session: AsyncSession, storage: ObjectStorage, *, document_id: str, conversation_id: str
-) -> EditableText:
-    """고칠 문서를 확인하고 원본 바이트에서 수정할 글자를 만든다.
+) -> EditableText | EditableDocx:
+    """고칠 문서를 확인하고 원본 바이트를 형식에 맞게 연다.
 
     지금 대화에 붙은 문서(이전 수정본 포함)만 고칠 수 있다. 프로젝트 문서는 아직 고치지 않는다.
     보기 도구와 수정 도구가 같은 확인을 거치도록 둘 다 이 함수를 쓴다.
+
+    업로드한 문서는 파싱이 끝나(``ready``) 있어야 한다 (파싱이 실패한 파일은 암호·손상 등 열 수 없는 경우가
+    많다). 에이전트가 만든 수정본은 원본을 우리가 만들었으므로 파싱이 아직이거나 실패해도 고칠 수 있다.
 
     Args:
         session: DB 세션.
@@ -139,11 +166,12 @@ async def load_text(
         conversation_id: 지금 대화 ID (서버가 정한 값).
 
     Returns:
-        고칠 문서와 수정할 글자, 원본 형태.
+        텍스트 형식이면 ``EditableText``, DOCX 면 ``EditableDocx``.
 
     Raises:
         EditError: 문서가 없거나 다른 대화·프로젝트의 문서일 때, 고칠 수 없는 형식이거나 준비되지
-            않았을 때, 원본이 저장소에서 지워졌을 때, 줄바꿈이 섞였거나 UTF-8 이 아닐 때.
+            않았을 때, 원본이 저장소에서 지워졌을 때, 원본을 열 수 없을 때 (텍스트: 줄바꿈이 섞였거나
+            UTF-8 이 아님, DOCX: 손상·매크로).
     """
     doc_id, conv_id = _parse_id(document_id), _parse_id(conversation_id)
     if doc_id is None or conv_id is None:
@@ -161,10 +189,10 @@ async def load_text(
         raise _not_found(document_id)
     if source.kind not in EDITABLE_KINDS:
         raise EditError(
-            f"Editing {source.kind.upper()} documents is not supported yet. Only TXT, MD and "
-            "CSV documents can be edited."
+            f"Editing {source.kind.upper()} documents is not supported yet. Only TXT, MD, CSV "
+            "and Word (DOCX) documents can be edited."
         )
-    if source.status != "ready":
+    if source.status != "ready" and source.created_by != "agent":
         raise EditError(
             "This document is not ready (it is still being processed or failed to process). "
             "Try again after it is ready."
@@ -176,8 +204,23 @@ async def load_text(
             "The original file of this document is no longer stored (it may have expired), so "
             "it cannot be edited."
         ) from exc
+    if source.kind == DocumentKind.DOCX:
+        return EditableDocx(source, DocxDocument.from_bytes(data))
     decoded, shape = text.decode(data)
     return EditableText(source, decoded, shape)
+
+
+async def _wait_for_parse(
+    session: AsyncSession, doc_id: uuid.UUID, task: asyncio.Task, wait: float
+) -> str:
+    """수정본 파싱을 ``wait`` 초까지 기다리고 상태를 돌려준다. 넘기면 파싱은 백그라운드에서 이어진다."""
+    try:
+        # shield: 시간이 지나도 파싱 작업 자체는 취소하지 않는다.
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(wait, 0))
+    except TimeoutError:
+        return "processing"
+    status = await session.scalar(select(Document.status).where(Document.id == doc_id))
+    return status or "processing"
 
 
 async def create_revision(
@@ -188,11 +231,15 @@ async def create_revision(
     conversation_id: str,
     edits: Sequence[Edit],
     max_bytes: int,
+    parse_wait: float = 0.0,
 ) -> Revision:
     """문서에 수정을 적용해 수정본을 만든다. 원본은 바꾸지 않는다.
 
-    고칠 수 있는 문서인지는 ``load_text`` 와 같은 규칙으로 확인한다. 수정본 원본을 저장소에 먼저 올리고
+    고칠 수 있는 문서인지는 ``load_editable`` 과 같은 규칙으로 확인한다. 수정본 원본을 저장소에 먼저 올리고
     DB 에 기록한다. 기록이 실패해서 남은 객체는 보관 기간 규칙이 지운다.
+
+    텍스트 형식은 바로 ``ready`` 로 기록한다. DOCX 는 ``processing`` 으로 기록하고 업로드와 같은 파싱을
+    시작해서 ``parse_wait`` 초까지 기다린다.
 
     Args:
         session: DB 세션. 이 함수가 commit 한다.
@@ -201,22 +248,31 @@ async def create_revision(
         conversation_id: 지금 대화 ID (서버가 정한 값).
         edits: 적용할 수정 (순서대로).
         max_bytes: 수정본의 최대 크기 (``Settings.document_max_bytes``).
+        parse_wait: DOCX 수정본의 파싱을 기다릴 최대 시간(초).
 
     Returns:
         만든 수정본.
 
     Raises:
-        EditError: 고칠 수 있는 문서가 아니거나(``load_text`` 참고), 수정을 적용할 수 없거나,
+        EditError: 고칠 수 있는 문서가 아니거나(``load_editable`` 참고), 수정을 적용할 수 없거나,
             수정본이 너무 클 때.
     """
-    loaded = await load_text(
+    loaded = await load_editable(
         session, storage, document_id=document_id, conversation_id=conversation_id
     )
-    source, before, shape = loaded.source, loaded.text, loaded.shape
-    after, changes = text.apply_edits(before, edits)
-    if source.kind == DocumentKind.CSV:
-        text.check_csv(before, after)
-    new_data = text.encode(after, shape)
+    source = loaded.source
+    content: str | None
+    if isinstance(loaded, EditableDocx):
+        changes = loaded.document.apply_edits(edits)
+        new_data = loaded.document.to_bytes()
+        content, status = None, "processing"
+    else:
+        before, shape = loaded.text, loaded.shape
+        content, changes = text.apply_edits(before, edits)
+        if source.kind == DocumentKind.CSV:
+            text.check_csv(before, content)
+        new_data = text.encode(content, shape)
+        status = "ready"
     if len(new_data) > max_bytes:
         raise EditError(
             f"The edited document would be {len(new_data):,} bytes, larger than the limit of "
@@ -236,14 +292,17 @@ async def create_revision(
         mime_type=source.mime_type,
         size_bytes=len(new_data),
         sha256=hashlib.sha256(new_data).hexdigest(),
-        status="ready",
-        content=after,
-        parsed_at=datetime.now(UTC),
+        status=status,
+        content=content,
+        parsed_at=datetime.now(UTC) if status == "ready" else None,
     )
     doc.storage_key = storage_key(doc.id)
     await storage.put(doc.storage_key, new_data, doc.mime_type)
     session.add(doc)
     await session.commit()
+    if status == "processing":
+        task = documents.schedule_parse(doc.id, new_data, doc.kind, doc.filename)
+        status = await _wait_for_parse(session, doc.id, task, parse_wait)
     return Revision(
         id=doc.id,
         filename=doc.filename,
@@ -252,6 +311,7 @@ async def create_revision(
         kind=doc.kind,
         size_bytes=doc.size_bytes,
         changes=changes,
+        status=status,
     )
 
 

@@ -1,6 +1,8 @@
 """문서 수정 도구: 줄 번호 보기, 수정본 만들기, 실패 표시, 화면으로 넘기는 artifact·실행 단계."""
 
+import asyncio
 import uuid
+from pathlib import Path
 
 import pytest
 from editing_fakes import CONVERSATION, install_tools, source_doc
@@ -9,6 +11,8 @@ from langchain_core.messages import ToolMessage
 from app.api.schemas import ToolStep
 from app.core.config import Settings
 from app.core.errors import ToolError
+from app.documents.editing import service as editing
+from app.documents.editing.docx import DocxDocument
 from app.orchestration.events import StepRecorder, ToolFinished, ToolStarted, tool_documents
 from app.orchestration.tooling import handle_tool_error
 from app.tools import build_tools, registry
@@ -59,12 +63,12 @@ async def test_view_pages_long_documents(monkeypatch):
     text = "".join(f"line {i}\n" for i in range(1, 11))
     source, _, _ = install(monkeypatch, data=text.encode())
     tool = document_tools.make_view_document_for_edit(Settings(document_edit_view_max_lines=3))
-    out = await tool.ainvoke({"document_id": str(source.id), "start_line": 4}, config=CONFIG)
-    assert "Lines 4-6 of 10. Call again with start_line=7 to see more." in out
+    out = await tool.ainvoke({"document_id": str(source.id), "start": 4}, config=CONFIG)
+    assert "Lines 4-6 of 10. Call again with start=7 to see more." in out
     assert "[L4] line 4" in out and "[L7]" not in out
 
-    past = await tool.ainvoke({"document_id": str(source.id), "start_line": 50}, config=CONFIG)
-    assert "There is no line 50; the document has 10 lines." in past
+    past = await tool.ainvoke({"document_id": str(source.id), "start": 50}, config=CONFIG)
+    assert "There is no line 50 or later with text; the document has 10 lines." in past
 
 
 async def test_view_refuses_what_edit_refuses(monkeypatch):
@@ -154,8 +158,9 @@ def test_edit_schema_describes_edits():
     schema = document_tools.make_edit_document(Settings()).tool_call_schema.model_json_schema()
     assert set(schema["properties"]) == {"document_id", "edits"}
     edit = schema["$defs"]["DocumentEdit"]
-    assert set(edit["properties"]) == {"old_text", "new_text", "replace_all"}
+    assert set(edit["properties"]) == {"old_text", "new_text", "replace_all", "paragraph"}
     assert "[L12]" in edit["properties"]["old_text"]["description"]
+    assert '"p12"' in edit["properties"]["paragraph"]["description"]
 
 
 def test_edit_tools_are_registered_in_documents_group():
@@ -207,3 +212,88 @@ def test_step_recorder_keeps_documents_and_schema_accepts_them():
     rec.apply(ToolFinished("t2", "ok", "done"))
     assert "documents" not in rec.to_json()[1]
     assert ToolStep.model_validate(rec.to_json()[1]).documents == []
+
+
+# --- DOCX ----------------------------------------------------------------------------------------
+
+DOCX = (Path(__file__).parent / "fixtures" / "sales-report.docx").read_bytes()
+
+
+def install_docx(monkeypatch, *, parse_status="ready"):
+    source = source_doc(kind="docx", filename="영업 보고.docx", mime_type="application/docx")
+    session, storage = install_tools(monkeypatch, document_tools, source, DOCX)
+    # 두 번째 조회부터는 수정본 파싱 뒤의 상태 조회다 (보기만 할 때는 쓰지 않는다).
+    session.later = [parse_status] if parse_status else []
+
+    def schedule(*args):
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        return future
+
+    monkeypatch.setattr(editing.documents, "schedule_parse", schedule)
+    return source, session, storage
+
+
+async def test_view_docx_by_paragraph(monkeypatch):
+    source, _, _ = install_docx(monkeypatch, parse_status=None)
+    tool = document_tools.make_view_document_for_edit(Settings(document_edit_view_max_lines=5))
+    out = await tool.ainvoke({"document_id": str(source.id)}, config=CONFIG)
+    assert f"(document_id: {source.id}, DOCX, revision 1)" in out
+    assert "Paragraphs 1-5 of 23. Call again with start=6 to see more." in out
+    assert "[p1] (제목 1) 2024년 하반기 영업 보고" in out
+    assert "[p5] (표1 1행 1열) 지역" in out and "[p6]" not in out
+    assert out.endswith(document_tools.DOCX_VIEW_LEGEND)
+
+    rest = await tool.ainvoke({"document_id": str(source.id), "start": 20}, config=CONFIG)
+    assert "[p20] 로고: ￼ (2024년 판)" in rest
+    assert "Paragraphs 20-23 of 23." in rest
+
+
+async def test_edit_docx_reports_paragraphs(monkeypatch):
+    source, session, storage = install_docx(monkeypatch)
+    tool = document_tools.make_edit_document(Settings())
+    message = await tool.ainvoke(
+        call(
+            "edit_document",
+            {
+                "document_id": str(source.id),
+                "edits": [
+                    {"old_text": "120억", "new_text": "135억"},
+                    {"old_text": "김민수", "new_text": "최유진", "paragraph": "p10"},
+                ],
+            },
+        ),
+        config=CONFIG,
+    )
+    (doc,) = session.added
+    assert f"document_id: {doc.id}" in message.content[:300]
+    assert "1. paragraph p2: '120억' -> '135억'" in message.content
+    assert "2. paragraph p10: '김민수' -> '최유진'" in message.content
+    assert "still being prepared" not in message.content
+    assert message.artifact["documents"][0]["kind"] == "docx"
+    assert "135억" in DocxDocument.from_bytes(storage.objects[doc.storage_key]).paragraphs[1].text
+
+
+async def test_edit_docx_mentions_pending_text(monkeypatch):
+    source, _, _ = install_docx(monkeypatch, parse_status="processing")
+    tool = document_tools.make_edit_document(Settings())
+    message = await tool.ainvoke(
+        call(
+            "edit_document",
+            {"document_id": str(source.id), "edits": [{"old_text": "120억", "new_text": "135억"}]},
+        ),
+        config=CONFIG,
+    )
+    assert "still being prepared" in message.content
+
+
+async def test_edit_docx_failure_explains(monkeypatch):
+    source, session, _ = install_docx(monkeypatch)
+    tool = document_tools.make_edit_document(Settings())
+    args = {
+        "document_id": str(source.id),
+        "edits": [{"old_text": "보고\n매출은", "new_text": "보고 매출은"}],
+    }
+    message = await failure(tool, args)
+    assert "more than one paragraph" in message and message.endswith("No changes were saved.")
+    assert session.added == []

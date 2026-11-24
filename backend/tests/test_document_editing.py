@@ -1,11 +1,15 @@
 """수정본 만들기: 원본 확인 규칙, 수정본 행·저장소 객체, 파일 이름, 원본 형태 보존."""
 
+import asyncio
 import hashlib
 import uuid
+from pathlib import Path
 
 import pytest
 from editing_fakes import CONVERSATION, USER, FakeSession, FakeStorage, source_doc
 
+from app.documents.editing import service as editing_service
+from app.documents.editing.docx import DocxDocument
 from app.documents.editing.service import (
     FILENAME_LIMIT,
     create_revision,
@@ -115,7 +119,7 @@ async def test_not_found(document_id):
         )
 
 
-@pytest.mark.parametrize("kind", ["docx", "pdf", "xlsx", "hwp"])
+@pytest.mark.parametrize("kind", ["pdf", "xlsx", "pptx", "hwp"])
 async def test_unsupported_kind(kind):
     with pytest.raises(EditError, match=f"Editing {kind.upper()} documents is not supported"):
         await revise(source_doc(kind=kind), b"x", [Edit("x", "y")])
@@ -182,3 +186,100 @@ def test_revision_filename_fits_limit():
     name = revision_filename("가" * 260 + ".txt", 12)
     assert len(name) == FILENAME_LIMIT
     assert name.endswith(" (수정 12).txt")
+
+
+# --- DOCX ----------------------------------------------------------------------------------------
+
+DOCX = (Path(__file__).parent / "fixtures" / "sales-report.docx").read_bytes()
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def docx_source(**extra):
+    return source_doc(kind="docx", filename="영업 보고.docx", mime_type=DOCX_MIME, **extra)
+
+
+def fake_parse(monkeypatch, *, finish=True):
+    """수정본 파싱(``schedule_parse``)을 가짜로 바꾸고 불린 인자를 기록한다."""
+    calls = []
+
+    def schedule(document_id, data, kind, filename):
+        calls.append((document_id, data, kind, filename))
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        if finish:
+            future.set_result(None)
+        return future
+
+    monkeypatch.setattr(editing_service.documents, "schedule_parse", schedule)
+    return calls
+
+
+async def revise_docx(source, edits, *, later=(), parse_wait=5.0):
+    storage = FakeStorage({source.storage_key: DOCX})
+    session = FakeSession(source, later=later)
+    revision = await create_revision(
+        session,
+        storage,
+        document_id=str(source.id),
+        conversation_id=str(CONVERSATION),
+        edits=edits,
+        max_bytes=10_000_000,
+        parse_wait=parse_wait,
+    )
+    return revision, session, storage
+
+
+async def test_docx_revision_is_parsed_like_an_upload(monkeypatch):
+    calls = fake_parse(monkeypatch)
+    source = docx_source()
+    revision, session, storage = await revise_docx(
+        source, [Edit("120억", "135억")], later=["ready"]
+    )
+    (doc,) = session.added
+    assert (doc.status, doc.content, doc.parsed_at) == ("processing", None, None)
+    assert doc.filename == "영업 보고 (수정 2).docx"
+    assert doc.mime_type == DOCX_MIME
+    saved = storage.objects[doc.storage_key]
+    assert "135억" in DocxDocument.from_bytes(saved).paragraphs[1].text
+    assert calls == [(doc.id, saved, "docx", doc.filename)]
+    assert revision.status == "ready"
+    assert (revision.changes[0].line, revision.kind) == (2, "docx")
+
+
+async def test_docx_paragraph_field_narrows_search(monkeypatch):
+    fake_parse(monkeypatch)
+    _, session, storage = await revise_docx(
+        docx_source(), [Edit("김민수", "최유진", paragraph="p21")], later=["ready"]
+    )
+    text = DocxDocument.from_bytes(storage.objects[session.added[0].storage_key]).view(1, 99).text
+    assert "[p10] (표1 2행 3열) 김민수" in text
+    assert "[p21] 문의: 영업기획팀 최유진 (내선 1234)" in text
+
+
+async def test_docx_parse_timeout_keeps_revision_processing(monkeypatch):
+    fake_parse(monkeypatch, finish=False)
+    revision, session, _ = await revise_docx(
+        docx_source(), [Edit("120억", "135억")], parse_wait=0.01
+    )
+    assert revision.status == "processing"
+    assert session.commits == 1
+
+
+async def test_docx_failed_parse_is_reported(monkeypatch):
+    fake_parse(monkeypatch)
+    revision, _, _ = await revise_docx(docx_source(), [Edit("120억", "135억")], later=["failed"])
+    assert revision.status == "failed"
+
+
+async def test_agent_revision_can_be_edited_before_parse_finishes(monkeypatch):
+    fake_parse(monkeypatch)
+    source = docx_source(status="processing", created_by="agent", revision=2)
+    revision, _, _ = await revise_docx(source, [Edit("120억", "135억")], later=["ready"])
+    assert revision.revision == 3
+
+
+async def test_docx_edit_error_saves_nothing(monkeypatch):
+    calls = fake_parse(monkeypatch)
+    with pytest.raises(EditError, match="image"):
+        await revise_docx(docx_source(), [Edit("로고: ￼", "로고:")])
+    assert calls == []
