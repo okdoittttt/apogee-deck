@@ -180,7 +180,7 @@ sequenceDiagram
 | `meta` | `conversation_id` | `run_turn` 첫 이벤트 | 새 대화면 주소를 `/c/{id}` 로 바꾼다. 대화 ID 전에 중지를 눌렀으면 이때 중지한다 |
 | `reasoning` | `text` | `ReasoningDelta` | 연속된 조각은 마지막 추론 단계에 이어 붙인다 |
 | `tool_start` | `id`, `name`, `label`, `done_label`, `args` | `ToolStarted` | 실행 중 도구 단계를 더한다 |
-| `tool_end` | `id`, `output`, `status`, `sources` | `ToolFinished` | 같은 `id` 의 도구 단계를 바꾼다. `output` 은 최대 2,000자 |
+| `tool_end` | `id`, `output`, `status`, `sources`, `documents` | `ToolFinished` | 같은 `id` 의 도구 단계를 바꾼다. `output` 은 최대 2,000자. `documents` 는 답변 아래 파일 칩 ([문서 수정과 생성](document-editing.md)) |
 | `delta` | `text` | `TextDelta` | 답 자리에 이어 붙인다 |
 | `done` | `stop_reason`, `model`, `message_id` | `Finished` 처리 뒤 | `message_id` 를 피드백용으로 기억한다. `max_tokens`, `refusal` 이면 안내 문구를 붙인다 |
 | `error` | `message`, `error_id`, `transient` | 예외 처리 | `transient` 면 알림, 아니면 오류 상자 |

@@ -6,6 +6,7 @@
 
 이 문서는 대화 첨부 문서와, 프로젝트 문서도 함께 쓰는 올리기·파싱 단계를 다룹니다.
 프로젝트 문서의 요소·그림 설명·청크·검색은 [프로젝트 문서와 검색](projects-rag.md)에 있습니다.
+에이전트가 문서를 고치거나 새로 만드는 기능은 [문서 수정과 생성](document-editing.md)에 있습니다.
 메시지를 보낸 뒤 한 턴이 도는 흐름은 [한 턴의 흐름](chat-turn.md)을 보세요.
 
 ## 사용자 관점
@@ -250,6 +251,7 @@ stateDiagram-v2
 ## 데이터
 
 - 테이블: `documents` 한 테이블. 대화 첨부는 `project_id` 가 비어 있고, 보내면 `conversation_id`, `message_id` 가 채워집니다([ERD 3. 문서](../data/erd.md#3-문서)).
+  에이전트가 만든 수정본·새 문서도 이 테이블의 행입니다(`created_by='agent'`, [문서 수정과 생성](document-editing.md#데이터)).
 - 원본: MinIO `documents/<문서 ID>`. 버킷 lifecycle 이 30일 뒤 지웁니다([MinIO 객체 키](../data/storage-map.md#minio-객체-키)).
 - 정리: `cleanup_loop` 가 앱 시작 직후와 그 뒤 하루마다 돕니다. 프로젝트 문서가 아니면서 올린 지 `ATTACHMENT_RETENTION_DAYS` 가 지났거나,
   보내지 않은 채 `DOCUMENT_UNSENT_TTL_HOURS` 가 지난 문서의 행과 원본을 지웁니다. 대화를 지울 때도 함께 지웁니다
