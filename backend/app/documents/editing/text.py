@@ -87,9 +87,35 @@ EDIT_OPS = frozenset(
         "accept_changes",
         "reject_changes",
         "comment",
+        "format",
     }
 )
 """수정 종류. 텍스트 형식은 ``replace`` 만, 나머지는 DOCX 에서만 쓴다."""
+
+
+@dataclass(frozen=True)
+class TextFormat:
+    """``format`` 수정에서 바꿀 글자 서식. ``None`` 인 항목은 그대로 둔다.
+
+    Attributes:
+        bold: 굵게 넣기(``True``)·빼기(``False``).
+        italic: 기울임 넣기·빼기.
+        underline: 밑줄 넣기·빼기.
+        strike: 취소선 넣기·빼기.
+        color: 글자색. 이름(``"red"``, ``"빨강"``)이나 ``"#C00000"``, 기본색은 ``"auto"``.
+        highlight: 형광펜 색 (Word 형광펜 이름이나 ``"노랑"`` 같은 한국어). 빼기는 ``"none"``.
+    """
+
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    strike: bool | None = None
+    color: str | None = None
+    highlight: str | None = None
+
+    def is_empty(self) -> bool:
+        """바꿀 서식이 하나도 없는지."""
+        return all(getattr(self, name) is None for name in self.__dataclass_fields__)
 
 
 @dataclass(frozen=True)
@@ -112,6 +138,7 @@ class Edit:
         style: ``insert_paragraph`` 에서 새 문단의 스타일 (예: ``"제목 2"``, 없으면 기준 문단을 따른다).
             ``set_style`` 에서 문단에 줄 스타일이나 목록 수준 (예: ``"본문"``, ``"목록 2수준"``).
         cells: ``insert_row`` 에서 새 행의 칸 값 (왼쪽부터).
+        format: ``format`` 에서 바꿀 글자 서식.
     """
 
     old_text: str = ""
@@ -123,6 +150,7 @@ class Edit:
     target: str | None = None
     style: str | None = None
     cells: tuple[str, ...] | None = None
+    format: TextFormat | None = None
 
 
 @dataclass(frozen=True)
@@ -166,12 +194,16 @@ class LineView:
         first: 보여준 첫 줄 번호 (1부터).
         last: 보여준 마지막 줄 번호. 보여준 줄이 없으면 ``first - 1``.
         total: 전체 줄 수.
+        matches: 찾는 글자(``query``)가 든 줄 수 (``first`` 부터 끝까지). 찾지 않았으면 ``None``.
+        shown: 보여준 줄 수.
     """
 
     text: str
     first: int
     last: int
     total: int
+    matches: int | None = None
+    shown: int = 0
 
 
 def decode(data: bytes) -> tuple[str, TextShape]:
@@ -481,36 +513,68 @@ def check_new_csv(content: str) -> None:
             )
 
 
-def numbered_lines(text: str, first: int, limit: int, max_chars: int | None = None) -> LineView:
+def matches_query(text: str, query: str | None) -> bool:
+    """보기에서 찾는 글자(``query``)가 ``text`` 에 드는지. 대소문자는 무시하고 공백은 그대로 본다."""
+    return not query or query.casefold() in text.casefold()
+
+
+def numbered_lines(
+    text: str,
+    first: int,
+    limit: int,
+    max_chars: int | None = None,
+    query: str | None = None,
+) -> LineView:
     r"""본문의 줄에 번호를 붙여 일부를 보여준다 (``[L12] 줄 내용``).
 
     파일이 줄바꿈으로 끝나면 그 뒤의 빈 글자는 줄로 세지 않는다. ``max_chars`` 를 주면 결과가 그 글자 수를
-    넘기 전에 멈춘다 (긴 줄이 많은 문서). 그래도 첫 줄은 길어도 보여준다.
+    넘기 전에 멈춘다 (긴 줄이 많은 문서). 그래도 첫 줄은 길어도 보여준다. ``query`` 를 주면 그 글자가 든
+    줄만 보여준다 (긴 문서에서 고칠 곳 찾기).
 
     Args:
         text: ``\n`` 기준 글자.
         first: 보여줄 첫 줄 번호 (1부터). 1보다 작으면 1로 본다.
         limit: 보여줄 최대 줄 수 (1 이상).
         max_chars: 결과 글자 수의 상한. ``None`` 이면 줄 수로만 자른다.
+        query: 찾을 글자 (대소문자 무시). ``None`` 이나 빈 글자면 모든 줄.
 
     Returns:
-        번호를 붙인 줄들과 범위, 전체 줄 수.
+        번호를 붙인 줄들과 범위, 전체 줄 수 (찾았으면 맞는 줄 수).
     """
     lines = text.split("\n")
     if text.endswith("\n"):
         lines.pop()
     first = max(first, 1)
+    query = query.strip() if query and query.strip() else None
     shown: list[str] = []
     size = 0
-    for number, line in enumerate(lines[first - 1 : first - 1 + max(limit, 1)], first):
+    last = first - 1
+    matches = 0
+    full = False
+    for number, line in enumerate(lines[first - 1 :], first):
+        full = full or len(shown) >= max(limit, 1)
+        if full and query is None:
+            break
+        if not matches_query(line, query):
+            last = number if not full else last
+            continue
+        matches += 1
+        if full:
+            continue
         numbered = f"[L{number}] {line}"
         size += len(numbered) + (1 if shown else 0)
         if shown and max_chars is not None and size > max_chars:
-            break
+            full = True
+            if query is None:
+                break
+            continue
         shown.append(numbered)
+        last = number
     return LineView(
         text="\n".join(shown),
         first=first,
-        last=first + len(shown) - 1,
+        last=last,
         total=len(lines),
+        matches=matches if query is not None else None,
+        shown=len(shown),
     )

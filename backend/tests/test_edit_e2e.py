@@ -214,3 +214,36 @@ async def test_docx_review_request_with_tracked_changes(monkeypatch):
     revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
     text = revised.view(1, 100).text
     assert "12{-0-}{+5+}억" in text and "비교 기준 연도를 적어 주세요." in text
+
+
+async def test_docx_find_then_format_request(monkeypatch):
+    # "영업기획팀이 나온 곳을 찾아서 빨간 굵은 글씨로, 매출 숫자는 노란 형광펜으로."
+    source, session, storage = install_docx(monkeypatch)
+    view = {"document_id": str(source.id), "query": "영업기획팀"}
+    events, _ = await run(monkeypatch, request("view_document_for_edit", view))
+    viewed = next(e for e in events if isinstance(e, ToolFinished))
+    assert viewed.status == "done" and "3 paragraphs contain '영업기획팀'" in viewed.output
+
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {
+                "op": "format",
+                "old_text": "영업기획팀",
+                "replace_all": True,
+                "format": {"bold": True, "color": "red"},
+            },
+            {"op": "format", "paragraph": "p9", "format": {"highlight": "노랑"}},
+        ],
+    }
+    events, _ = await run(monkeypatch, request("edit_document", args))
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done"
+    assert "1. formatted 3 places in 3 paragraphs (p18, p21, p23) as bold, color red" in (
+        finished.output
+    )
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    lines = revised.view(1, 100, formatting=True).text
+    assert "(서식: 굵게, 글자색 빨강 '영업기획팀')" in lines
+    assert "(서식: 굵게, 형광펜 노랑 '52억')" in lines  # 원래 굵은 칸

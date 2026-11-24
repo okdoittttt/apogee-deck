@@ -34,7 +34,9 @@ from app.documents.editing.text import (
     Change,
     Edit,
     EditError,
+    TextFormat,
     in_url,
+    matches_query,
     snippets,
     targets_url,
     url_spans,
@@ -139,8 +141,9 @@ _TRACKED_HIDDEN = {_w("del"), _w("moveFrom")}
 _COMMENT_RANGE = {_w("commentRangeStart"), _w("commentRangeEnd")}
 DEFAULT_AUTHOR = "AI 에이전트"
 """에이전트가 남기는 변경 추적 기록·메모의 기본 작성자."""
-FORMAT_CHANGE = "\0format"
-"""``_Glyph.tracked`` 에서 서식 변경 기록이 있는 run 의 글자를 뜻하는 값 (작성자 이름과 겹치지 않게)."""
+FORMAT_CHANGE = "\0format:"
+"""``_Glyph.tracked`` 에서 서식 변경 기록이 있는 run 의 글자를 뜻하는 접두어. 뒤에 기록의 작성자를 붙인다
+(작성자 이름과 겹치지 않게 NUL 로 시작한다)."""
 _COMMENT_CHARS = 120
 """보기에 보여줄 메모 내용 글자 수의 상한."""
 _ANCHOR_CHARS = 40
@@ -434,7 +437,7 @@ class _Glyph:
         wall: 고칠 수 없는 글자인지 (그림, 필드 결과, 각주 번호 등).
         scope: 글자를 둘러싼 가장 가까운 하이퍼링크·콘텐츠 컨트롤 (없으면 ``None``).
         tracked: 추적 기록 안의 글자면 그 기록. 넣은 글자(``w:ins``·``w:moveTo``)는 작성자 이름,
-            서식 변경 기록(``w:rPrChange``)이 있는 run 의 글자는 ``FORMAT_CHANGE``. 아니면 ``None``.
+            서식 변경 기록(``w:rPrChange``)이 있는 run 의 글자는 ``FORMAT_CHANGE + 작성자``. 아니면 ``None``.
     """
 
     char: str
@@ -612,7 +615,7 @@ def _flatten(paragraph: etree._Element, fields: _FieldState) -> _Flat:
         tracked = track
         if change is not None:
             note(change, "서식 바뀜")
-            tracked = FORMAT_CHANGE
+            tracked = FORMAT_CHANGE + (change.get(_w("author")) or "?")
         for index, token in enumerate(_tokens(element)):
             if token.kind == "x":
                 assert token.element is not None
@@ -744,12 +747,16 @@ class ParagraphView:
         first: 보기를 시작한 문단 번호 (1부터).
         last: 보여준 마지막 문단 번호. 보여준 문단이 없으면 ``first - 1``.
         total: 전체 문단 수 (빈 문단 포함).
+        matches: 찾는 글자(``query``)가 든 문단 수 (``first`` 부터 끝까지). 찾지 않았으면 ``None``.
+        shown: 보여준 문단 수.
     """
 
     text: str
     first: int
     last: int
     total: int
+    matches: int | None = None
+    shown: int = 0
 
 
 class DocxDocument:
@@ -999,37 +1006,65 @@ class DocxDocument:
             self._paragraphs = result
         return self._paragraphs
 
-    def view(self, first: int, limit: int, max_chars: int | None = None) -> ParagraphView:
+    def view(
+        self,
+        first: int,
+        limit: int,
+        max_chars: int | None = None,
+        query: str | None = None,
+        formatting: bool = False,
+    ) -> ParagraphView:
         """문단에 번호를 붙여 일부를 보여준다 (``[p12] (표1 1행 1열) 글자``).
 
         빈 문단은 번호만 차지하고 보여주지 않는다. 다만 표 칸의 빈 문단은 ``(빈 칸)`` 으로 보여준다 (채울 수
-        있게). ``max_chars`` 를 주면 결과가 그 글자 수를 넘기 전에
-        멈춘다. 그래도 첫 문단은 길어도 보여준다.
+        있게). ``max_chars`` 를 주면 결과가 그 글자 수를 넘기 전에 멈춘다. 그래도 첫 문단은 길어도 보여준다.
+        ``query`` 를 주면 그 글자가 든 문단만 보여준다. 추적 기록이 있는 문단은 수락한 모습에서 찾는다
+        (``old_text`` 를 찾는 글자와 같다).
 
         Args:
             first: 보여줄 첫 문단 번호 (1부터). 1보다 작으면 1로 본다.
             limit: 보여줄 최대 문단 수 (1 이상, 빈 문단은 세지 않는다).
             max_chars: 결과 글자 수의 상한. ``None`` 이면 문단 수로만 자른다.
+            query: 찾을 글자 (대소문자 무시). ``None`` 이나 빈 글자면 모든 문단.
+            formatting: 문단 아래에 직접 서식(굵게·색·형광펜 등)이 있는 글자를 한 줄로 보여줄지.
 
         Returns:
-            번호를 붙인 문단들과 범위, 전체 문단 수.
+            번호를 붙인 문단들과 범위, 전체 문단 수 (찾았으면 맞는 문단 수).
         """
         paragraphs = self.paragraphs
         first = max(first, 1)
+        query = query.strip() if query and query.strip() else None
         shown: list[str] = []
         last = first - 1
         size = 0
+        matches = 0
+        full = False
         for paragraph in paragraphs[first - 1 :]:
-            if len(shown) >= max(limit, 1):
+            full = full or len(shown) >= max(limit, 1)
+            if full and query is None:
                 break
-            if _shown(paragraph):
-                line = _format_paragraph(paragraph)
+            wanted = _shown(paragraph) if query is None else matches_query(paragraph.text, query)
+            if wanted and query is not None:
+                matches += 1
+            if wanted and not full:
+                line = _format_paragraph(paragraph, formatting)
                 size += len(line) + (1 if shown else 0)
                 if shown and max_chars is not None and size > max_chars:
-                    break
-                shown.append(line)
-            last = paragraph.number
-        return ParagraphView("\n".join(shown), first, last, len(paragraphs))
+                    full = True
+                    if query is None:
+                        break
+                else:
+                    shown.append(line)
+            if not full:
+                last = paragraph.number
+        return ParagraphView(
+            "\n".join(shown),
+            first,
+            last,
+            len(paragraphs),
+            matches if query is not None else None,
+            len(shown),
+        )
 
     # --- 수정 ------------------------------------------------------------------------------------
 
@@ -1146,6 +1181,8 @@ class DocxDocument:
             return self._review(index, edit, accept=edit.op == "accept_changes")
         if edit.op == "comment":
             return self._comment(index, edit)
+        if edit.op == "format":
+            return self._format(index, edit)
         raise EditError(
             f"Edit {index}: unknown op {edit.op!r}. Use one of: {', '.join(sorted(EDIT_OPS))}.",
             index,
@@ -1220,6 +1257,7 @@ class DocxDocument:
                 index,
             )
         own = {(id(p.element), s): self._check_range(index, p, s, len(old), new) for p, s in hits}
+        lost = sum(lost_formatting(old, new, p.glyphs[s : s + len(old)]) for p, s in hits)
         first = self._number(hits[0][0])
         count = 0
         places: list[int] = []
@@ -1262,6 +1300,13 @@ class DocxDocument:
             note = f"split into {added + 1} paragraphs: {heads}"
         elif added:
             note = f"{added} new paragraphs from line breaks"
+        if lost:
+            lost_note = (
+                f"{lost} formatted piece{'s' if lost > 1 else ''} (such as bold words or links) "
+                "did not appear unchanged in new_text, so that text now has the paragraph's "
+                "first formatting; use op format to restore formatting if needed"
+            )
+            note = f"{note}; {lost_note}" if note else lost_note
         before, after = snippets(old, new)
         return Change(
             index,
@@ -1890,7 +1935,8 @@ class DocxDocument:
         number = self._number(paragraph)
         span = paragraph.glyphs[start : start + length]
         marks = {g.tracked for g in span}
-        foreign = {m for m in marks if m is not None and m != self._author}
+        own = (self._author, FORMAT_CHANGE + self._author)
+        foreign = {m for m in marks if m is not None and m not in own}
         touches_deleted = any(
             start < at < start + length and who != self._author for at, who in paragraph.deleted_at
         )
@@ -2044,6 +2090,202 @@ class DocxDocument:
                 "user whether to make it without tracking (track_changes false).",
                 index,
             )
+
+    # --- 글자 서식 ------------------------------------------------------------------------------
+
+    def _format(self, index: int, edit: Edit) -> Change:
+        """``old_text``(없으면 ``paragraph`` 문단 전체)의 글자 서식을 바꾼다.
+
+        범위 경계에서 run 을 쪼개고 조각마다 ``w:rPr`` 를 고친다. 빼는 서식이 스타일에서 오면 직접 서식으로
+        끈다 (``w:b w:val="0"``). 추적 모드면 바꾸기 전 서식을 ``w:rPrChange`` 로 남긴다.
+        """
+        wanted = edit.format
+        if wanted is None or wanted.is_empty():
+            raise EditError(
+                f'Edit {index}: format is required for op "format" (for example '
+                '{"bold": true} or {"color": "red"}).',
+                index,
+            )
+        changes = _format_changes(index, wanted)
+        old = edit.old_text.replace("\r\n", "\n")
+        if not old:
+            if not edit.paragraph:
+                raise EditError(
+                    f"Edit {index}: set old_text (the text to format), or leave it empty and set "
+                    'paragraph (for example "p12") to format the whole paragraph.',
+                    index,
+                )
+            target = self._paragraph(index, edit.paragraph)
+            if not target.text.strip():
+                raise EditError(
+                    f"Edit {index}: paragraph p{self._number(target)} has no text to format.", index
+                )
+            hits = [(target, 0, len(target.text))]
+        else:
+            target = self._paragraph(index, edit.paragraph) if edit.paragraph else None
+            targets = [target] if target is not None else self.paragraphs
+            hits = [(p, s, len(old)) for p in targets for s in _find_all(p.text, old)]
+            if not hits:
+                raise self._not_found(index, old, targets, edit.paragraph)
+            if len(hits) > 1 and not edit.replace_all:
+                raise EditError(
+                    f"Edit {index}: old_text appears {len(hits)} times. Include more surrounding "
+                    'text so that it matches exactly one place, set paragraph (for example "p12") '
+                    "to search only one paragraph, or set replace_all to format every occurrence.",
+                    index,
+                )
+        by_paragraph: dict[int, tuple[Paragraph, list[tuple[int, int]]]] = {}
+        for paragraph, start, length in hits:
+            self._check_range(index, paragraph, start, length, "")
+            _, spans = by_paragraph.setdefault(id(paragraph.element), (paragraph, []))
+            if not spans or start >= spans[-1][0] + spans[-1][1]:
+                spans.append((start, length))
+        changed = 0
+        places: list[int] = []
+        for paragraph, spans in by_paragraph.values():
+            # 뒤에서부터 고친다: 앞쪽 글자의 run·토큰 위치는 그대로 남는다.
+            for start, length in reversed(spans):
+                changed += self._format_span(paragraph, start, length, changes)
+            places.extend([self._number(paragraph)] * len(spans))
+            self._dirty.add(paragraph.part)
+        if not changed:
+            raise EditError(
+                f"Edit {index}: the text already has that formatting, so nothing changed.", index
+            )
+        self._paragraphs = None
+        first = hits[0][0]
+        sample = first.text[hits[0][1] : hits[0][1] + hits[0][2]]
+        where = f"p{places[0]}"
+        if len(places) > 1:
+            numbers = list(dict.fromkeys(places))
+            shown = ", ".join(f"p{n}" for n in numbers[:30])
+            more = f" and {len(numbers) - 30} more" if len(numbers) > 30 else ""
+            where = f"{len(places)} places in {len(numbers)} paragraphs ({shown}{more})"
+        note = f"formatted {where} as {_describe_format(wanted)}: {_shorten(sample)!r}"
+        return Change(
+            index,
+            places[0],
+            len(places),
+            "",
+            "",
+            kind=edit.op,
+            note=note,
+            places=tuple(places),
+        )
+
+    def _format_span(
+        self, paragraph: Paragraph, start: int, length: int, changes: list["_PropChange"]
+    ) -> int:
+        """문단 글자 ``[start, start + length)`` 의 서식을 바꾼다. 서식이 실제로 바뀐 run 조각 수."""
+        groups: list[list[Any]] = []  # [run, 첫 토큰, 마지막 토큰]
+        for glyph in paragraph.glyphs[start : start + length]:
+            if glyph.run is None:  # run 밖의 벽(수식 등)은 서식이 없다
+                continue
+            if groups and groups[-1][0] is glyph.run:
+                groups[-1][2] = glyph.index
+            else:
+                groups.append([glyph.run, glyph.index, glyph.index])
+        changed = 0
+        for run, low, high in reversed(groups):
+            piece = _cut_run(run, low, high + 1)
+            props = piece.find(_w("rPr"))
+            if props is None:
+                props = etree.Element(_w("rPr"))
+                piece.insert(0, props)
+            before = deepcopy(props)
+            for change in changes:
+                self._apply_prop(change, props, piece, paragraph.element)
+            # 이미 그 서식이면(짝 태그 bCs 등만 다르면) 그대로 둔다: 헛 수정과 헛 추적 기록을 막는다.
+            if all(
+                _main_prop(props, tags[0]) == _main_prop(before, tags[0]) for tags, _, _ in changes
+            ):
+                for child in list(props):
+                    props.remove(child)
+                for child in before:
+                    props.append(child)
+                if len(props) == 0:
+                    piece.remove(props)
+                continue
+            changed += 1
+            if self._track and _record_author(piece) != self._author:
+                self._track_format(props, before)
+            if len(props) == 0:
+                piece.remove(props)
+        return changed
+
+    def _apply_prop(
+        self,
+        change: "_PropChange",
+        props: etree._Element,
+        run: etree._Element,
+        paragraph: etree._Element,
+    ) -> None:
+        """서식 항목 하나를 ``props``(run 의 ``w:rPr``)에 넣거나 뺀다."""
+        tags, value, off = change
+        if value is not None:
+            for tag in tags:
+                _set_prop(props, tag, value)
+            return
+        styled = self._styled(tags[0], props, paragraph)
+        for tag in tags:
+            for old in props.findall(_w(tag)):
+                props.remove(old)
+        if styled:
+            _set_prop(props, tags[0], off)
+
+    def _track_format(self, props: etree._Element, before: etree._Element) -> None:
+        """서식 바꾸기를 ``w:rPrChange`` 로 남긴다. 이미 기록(우리 것)이 있으면 처음 서식을 그대로 둔다."""
+        old_change = before.find(_w("rPrChange"))
+        for existing in props.findall(_w("rPrChange")):
+            props.remove(existing)
+        if old_change is not None:
+            props.append(old_change)
+            return
+        record = self._record("rPrChange")
+        old = etree.SubElement(record, _w("rPr"))
+        for child in _without_tracking(before):
+            old.append(child)
+        props.append(record)
+
+    def _styled(self, tag: str, props: etree._Element, paragraph: etree._Element) -> bool:
+        """``tag`` 서식(예: ``"b"``)이 직접 서식이 아니라 스타일(문자·문단 스타일, 문서 기본값)에서 오는지."""
+        root = self._styles_root()
+        if root is None:
+            return False
+        styles = {st.get(_w("styleId"), ""): st for st in root.iter(_w("style"))}
+        chains: list[str | None] = []
+        ref = props.find(_w("rStyle"))
+        chains.append(ref.get(_w("val")) if ref is not None else None)
+        pref = paragraph.find(f"{_w('pPr')}/{_w('pStyle')}")
+        if pref is not None:
+            chains.append(pref.get(_w("val")))
+        else:
+            default = next(
+                (
+                    st.get(_w("styleId"))
+                    for st in styles.values()
+                    if st.get(_w("type")) == "paragraph" and st.get(_w("default")) in ("1", "true")
+                ),
+                None,
+            )
+            chains.append(default)
+        for style_id in chains:
+            seen: set[str] = set()
+            while style_id and style_id not in seen and style_id in styles:
+                seen.add(style_id)
+                style = styles[style_id]
+                found = style.find(f"{_w('rPr')}/{_w(tag)}")
+                if found is not None:
+                    return _prop_on(tag, found)
+                based = style.find(_w("basedOn"))
+                style_id = based.get(_w("val")) if based is not None else None
+        default_props = root.find(f"{_w('docDefaults')}/{_w('rPrDefault')}/{_w('rPr')}")
+        found = default_props.find(_w(tag)) if default_props is not None else None
+        return found is not None and _prop_on(tag, found)
+
+    def _styles_root(self) -> etree._Element | None:
+        name = self._related("styles")
+        return self._part_root(name) if name else None
 
     # --- 메모 ----------------------------------------------------------------------------------
 
@@ -2356,6 +2598,159 @@ class DocxDocument:
         return buffer.getvalue()
 
 
+_RUN_PROP_ORDER = [
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike",
+    "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid", "vanish", "webHidden",
+    "color", "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect",
+    "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
+    "specVanish", "oMath",
+]  # fmt: skip
+"""``w:rPr`` 자식의 스키마 순서. 이 순서를 어기면 Word 가 파일을 고쳐야 한다고 한다."""
+
+_COLORS = {
+    "black": "000000", "검정": "000000", "검은색": "000000",
+    "white": "FFFFFF", "흰색": "FFFFFF", "하양": "FFFFFF",
+    "red": "FF0000", "빨강": "FF0000", "빨간색": "FF0000",
+    "dark red": "C00000", "진한 빨강": "C00000",
+    "orange": "FFC000", "주황": "FFC000", "주황색": "FFC000",
+    "yellow": "FFFF00", "노랑": "FFFF00", "노란색": "FFFF00",
+    "green": "00B050", "초록": "00B050", "초록색": "00B050",
+    "blue": "0070C0", "파랑": "0070C0", "파란색": "0070C0",
+    "dark blue": "002060", "남색": "002060",
+    "purple": "7030A0", "보라": "7030A0", "보라색": "7030A0",
+    "gray": "808080", "grey": "808080", "회색": "808080",
+}  # fmt: skip
+"""글자색 이름 → RGB. Word 의 "표준 색" 과 같은 값."""
+
+_HIGHLIGHTS = {
+    name.lower(): name
+    for name in (
+        "black", "blue", "cyan", "green", "magenta", "red", "yellow", "white", "darkBlue",
+        "darkCyan", "darkGreen", "darkMagenta", "darkRed", "darkYellow", "darkGray", "lightGray",
+    )
+} | {
+    "노랑": "yellow", "노란색": "yellow", "초록": "green", "초록색": "green", "연두": "green",
+    "하늘": "cyan", "하늘색": "cyan", "파랑": "blue", "파란색": "blue", "분홍": "magenta",
+    "분홍색": "magenta", "빨강": "red", "빨간색": "red", "회색": "lightGray", "gray": "lightGray",
+    "grey": "lightGray",
+}  # fmt: skip
+"""형광펜 이름 → Word 형광펜 값 (``ST_HighlightColor``). Word 형광펜은 이 색들만 된다."""
+
+_HEX = re.compile(r"#?([0-9a-fA-F]{6})")
+
+_PropChange = tuple[tuple[str, ...], dict[str, str] | None, dict[str, str]]
+"""서식 항목 하나: ``(태그들, 넣을 속성 또는 None(빼기), 스타일 서식을 끄는 속성)``."""
+
+_OFF = {"w:val": "0"}
+
+
+def _format_changes(index: int, wanted: TextFormat) -> list[_PropChange]:
+    """``TextFormat`` 을 ``w:rPr`` 항목 변경으로 바꾼다. 알 수 없는 색 이름은 거절한다."""
+    changes: list[_PropChange] = []
+    toggles = (("bold", ("b", "bCs")), ("italic", ("i", "iCs")), ("strike", ("strike", "dstrike")))
+    for name, tags in toggles:
+        value = getattr(wanted, name)
+        if value is True:
+            changes.append((tags[:2] if name != "strike" else ("strike",), {}, _OFF))
+            if name == "strike":
+                changes.append((("dstrike",), None, _OFF))
+        elif value is False:
+            changes.append((tags, None, _OFF))
+    if wanted.underline is True:
+        changes.append((("u",), {"w:val": "single"}, {"w:val": "none"}))
+    elif wanted.underline is False:
+        changes.append((("u",), None, {"w:val": "none"}))
+    if wanted.color is not None:
+        name = wanted.color.strip()
+        if name.lower() in ("auto", "default", "none", "기본", "기본색", "자동"):
+            changes.append((("color",), None, {"w:val": "auto"}))
+        else:
+            match = _HEX.fullmatch(name)
+            rgb = match.group(1).upper() if match else _COLORS.get(name.lower())
+            if rgb is None:
+                raise EditError(
+                    f"Edit {index}: unknown color {wanted.color!r}. Use a color name such as "
+                    'red, blue or 빨강, a code such as "#C00000", or "auto" for the default color.',
+                    index,
+                )
+            changes.append((("color",), {"w:val": rgb}, {"w:val": "auto"}))
+    if wanted.highlight is not None:
+        name = wanted.highlight.strip()
+        if name.lower() in ("none", "no", "off", "없음", "빼기"):
+            changes.append((("highlight",), None, {"w:val": "none"}))
+        else:
+            value = _HIGHLIGHTS.get(name.lower()) or _HIGHLIGHTS.get(name.replace(" ", "").lower())
+            if value is None:
+                raise EditError(
+                    f"Edit {index}: unknown highlight {wanted.highlight!r}. Word highlights only "
+                    "come in these colors: yellow, green, cyan, magenta, blue, red, darkBlue, "
+                    "darkCyan, darkGreen, darkMagenta, darkRed, darkYellow, darkGray, lightGray, "
+                    'black, white (or "none" to remove).',
+                    index,
+                )
+            changes.append((("highlight",), {"w:val": value}, {"w:val": "none"}))
+    return changes
+
+
+def _describe_format(wanted: TextFormat) -> str:
+    """결과에 적을 서식 설명 (영어, 예: ``"bold, not italic, color red"``)."""
+    parts = []
+    for name in ("bold", "italic", "underline", "strike"):
+        value = getattr(wanted, name)
+        label = {"underline": "underlined", "strike": "strikethrough"}.get(name, name)
+        if value is True:
+            parts.append(label)
+        elif value is False:
+            parts.append(f"not {label}")
+    if wanted.color is not None:
+        parts.append(f"color {wanted.color.strip()}")
+    if wanted.highlight is not None:
+        name = wanted.highlight.strip()
+        parts.append("no highlight" if name.lower() in ("none", "없음") else f"highlight {name}")
+    return ", ".join(parts)
+
+
+def _attr(name: str) -> str:
+    return _w(name.removeprefix("w:"))
+
+
+def _set_prop(props: etree._Element, tag: str, attrs: dict[str, str]) -> None:
+    """``w:rPr`` 에 ``tag`` 요소를 (있으면 바꿔) 스키마 순서에 맞는 자리에 둔다."""
+    for old in props.findall(_w(tag)):
+        props.remove(old)
+    element = etree.Element(_w(tag))
+    for key, value in attrs.items():
+        element.set(_attr(key), value)
+    rank = _RUN_PROP_ORDER.index(tag)
+    for position, child in enumerate(props):
+        name = etree.QName(child).localname if isinstance(child.tag, str) else ""
+        child_rank = (
+            _RUN_PROP_ORDER.index(name)
+            if etree.QName(child).namespace == W and name in _RUN_PROP_ORDER
+            else len(_RUN_PROP_ORDER)
+        )
+        if child_rank > rank:
+            props.insert(position, element)
+            return
+    props.append(element)
+
+
+def _prop_on(tag: str, element: etree._Element) -> bool:
+    """서식 요소가 켜진 상태인지 (``w:b`` 는 ``val`` 이 없거나 참, ``w:u``·``w:highlight`` 는 ``none`` 이 아님)."""
+    value = element.get(_w("val"))
+    if tag in ("u", "highlight"):
+        return value not in (None, "none")
+    if tag == "color":
+        return value not in (None, "auto")
+    return value not in ("0", "false", "off")
+
+
+def _main_prop(props: etree._Element, tag: str) -> tuple[tuple[str, str], ...] | None:
+    """``w:rPr`` 안 ``tag`` 요소의 속성 (없으면 ``None``). 서식이 바뀌었는지 비교할 때 쓴다."""
+    element = props.find(_w(tag))
+    return tuple(sorted(element.attrib.items())) if element is not None else None
+
+
 def _find_all(text: str, value: str) -> list[int]:
     """``value`` 가 나오는 모든 위치 (겹치는 것 포함)."""
     found = []
@@ -2374,13 +2769,80 @@ _UNTRACKABLE_OPS = {"merge", "move_paragraph", "set_style", "insert_row", "delet
 def _diff_ops(old: str, new: str, span: list[_Glyph]) -> list[tuple[str, int, int, int, int]]:
     """``old`` → ``new`` 로 바꿀 때 고칠 부분 (``SequenceMatcher`` opcodes, 같은 부분 제외).
 
-    많이 다르면 통째로 바꾼다 (글자 조각마다 서식이 흩어지지 않게). 고칠 수 없는 글자가 있으면 그 글자를
-    지키도록 글자 단위로 비교한다.
+    많이 다르면 통째로 바꾼다 (글자 조각마다 서식이 흩어지지 않게). 다만 서식이 다른 조각(굵은 말, 링크
+    글자 등)이 새 글자에 그대로 한 번 나오면 그 조각은 "같음" 으로 남겨 서식을 지킨다. 고칠 수 없는
+    글자가 있으면 그 글자를 지키도록 글자 단위로 비교한다.
     """
     matcher = SequenceMatcher(None, old, new, autojunk=False)
     if matcher.ratio() < WHOLE_REPLACE_RATIO and not any(g.wall for g in span):
-        return [("replace", 0, len(old), 0, len(new))]
+        anchors, _ = _format_anchors(old, new, span)
+        ops: list[tuple[str, int, int, int, int]] = []
+        i = j = 0
+        for a, b, c, d in [*anchors, (len(old), len(old), len(new), len(new))]:
+            if a > i or c > j:
+                ops.append(("replace", i, a, j, c))
+            i, j = b, d
+        return ops
     return [op for op in matcher.get_opcodes() if op[0] != "equal"]
+
+
+_ANCHOR_MIN = 2
+"""고쳐 쓰기에서 서식을 지킬 조각의 최소 글자 수 (공백 제외). 짧으면 우연히 같은 글자일 수 있다."""
+
+
+def _format_key(glyph: _Glyph) -> tuple[bytes, int]:
+    """글자의 서식 묶음 (run 서식, 링크·콘텐츠 컨트롤)."""
+    props = glyph.run.find(_w("rPr")) if glyph.run is not None else None
+    if props is None:
+        return b"", id(glyph.scope)
+    copied = _without_tracking(deepcopy(props))
+    return etree.tostring(copied, method="c14n"), id(glyph.scope)
+
+
+def _format_anchors(
+    old: str, new: str, span: list[_Glyph]
+) -> tuple[list[tuple[int, int, int, int]], int]:
+    """통째로 바꿀 때 서식을 지킬 조각 ``(old 시작, 끝, new 시작, 끝)`` 과, 지키지 못한 조각 수.
+
+    첫 글자와 서식이 다른 조각만 본다 (통째로 바꾸면 새 글자는 첫 글자의 서식을 따르므로). 조각 글자(앞뒤
+    공백 제외)가 새 글자에 정확히 한 번 나오고 순서가 앞 조각 뒤면 지킨다.
+    """
+    if not span:
+        return [], 0
+    pieces: list[tuple[tuple[bytes, int], int, int]] = []  # (서식, 시작, 끝)
+    for position, glyph in enumerate(span):
+        key = _format_key(glyph)
+        if pieces and pieces[-1][0] == key:
+            pieces[-1] = (key, pieces[-1][1], position + 1)
+        else:
+            pieces.append((key, position, position + 1))
+    base = pieces[0][0]
+    anchors: list[tuple[int, int, int, int]] = []
+    lost = 0
+    after = 0
+    for key, start, end in pieces:
+        if key == base:
+            continue
+        text = old[start:end]
+        core = text.strip()
+        if len(core.replace(" ", "")) < _ANCHOR_MIN:
+            continue
+        begin = start + text.index(core)
+        found = new.find(core)
+        if found < 0 or new.find(core, found + 1) >= 0 or found < after:
+            lost += 1
+            continue
+        anchors.append((begin, begin + len(core), found, found + len(core)))
+        after = found + len(core)
+    return anchors, lost
+
+
+def lost_formatting(old: str, new: str, span: list[_Glyph]) -> int:
+    """통째로 바꾸는 고쳐 쓰기에서 서식을 지키지 못한 조각 수 (결과에 알리려고). 아니면 0."""
+    matcher = SequenceMatcher(None, old, new, autojunk=False)
+    if matcher.ratio() >= WHOLE_REPLACE_RATIO or any(g.wall for g in span):
+        return 0
+    return _format_anchors(old, new, span)[1]
 
 
 def _check_change(index: int, number: int, removed: list[_Glyph], text: str) -> None:
@@ -2738,7 +3200,80 @@ def _in_table(paragraph: Paragraph) -> bool:
     return bool(paragraph.location and re.search(r"표\d+ \d+행", paragraph.location))
 
 
-def _format_paragraph(paragraph: Paragraph) -> str:
+_COLOR_NAMES = {
+    "000000": "검정",
+    "FFFFFF": "흰색",
+    "FF0000": "빨강",
+    "C00000": "진한 빨강",
+    "FFC000": "주황",
+    "FFFF00": "노랑",
+    "00B050": "초록",
+    "0070C0": "파랑",
+    "002060": "남색",
+    "7030A0": "보라",
+    "808080": "회색",
+}
+"""보기에 보여줄 글자색 이름. 목록에 없으면 ``#RRGGBB`` 로 보여준다."""
+
+_HIGHLIGHT_NAMES = {
+    "yellow": "노랑",
+    "green": "초록",
+    "cyan": "하늘",
+    "magenta": "분홍",
+    "blue": "파랑",
+    "red": "빨강",
+    "lightGray": "회색",
+}
+"""보기에 보여줄 형광펜 이름. 목록에 없으면 Word 값 그대로 보여준다."""
+
+_FORMAT_FRAGMENTS = 12
+"""문단 하나의 서식 줄에 보여줄 조각 수의 상한."""
+
+
+def _direct_format(run: etree._Element | None) -> str:
+    """Run 의 직접 서식 설명 (예: ``"굵게, 글자색 빨강"``). 없으면 빈 글자."""
+    props = run.find(_w("rPr")) if run is not None else None
+    if props is None:
+        return ""
+    labels = []
+    for tag, label in (("b", "굵게"), ("i", "기울임"), ("u", "밑줄"), ("strike", "취소선")):
+        element = props.find(_w(tag))
+        if element is not None and _prop_on(tag, element):
+            labels.append(label)
+    color = props.find(_w("color"))
+    if color is not None and _prop_on("color", color):
+        value = (color.get(_w("val")) or "").upper()
+        labels.append(f"글자색 {_COLOR_NAMES.get(value, '#' + value)}")
+    highlight = props.find(_w("highlight"))
+    if highlight is not None and _prop_on("highlight", highlight):
+        value = highlight.get(_w("val")) or ""
+        labels.append(f"형광펜 {_HIGHLIGHT_NAMES.get(value, value)}")
+    return ", ".join(labels)
+
+
+def _format_line(paragraph: Paragraph) -> str | None:
+    """문단의 직접 서식 조각을 한 줄로 (``    (서식: 굵게 '135억' · 글자색 빨강 '주의')``)."""
+    fragments: list[tuple[str, str]] = []
+    cache: dict[int, str] = {}
+    for glyph in paragraph.glyphs:
+        key = id(glyph.run)
+        if key not in cache:
+            cache[key] = _direct_format(glyph.run)
+        label = cache[key]
+        if fragments and fragments[-1][0] == label:
+            fragments[-1] = (label, fragments[-1][1] + glyph.char)
+        else:
+            fragments.append((label, glyph.char))
+    shown = [(label, text.strip()) for label, text in fragments if label and text.strip()]
+    if not shown:
+        return None
+    parts = [f"{label} {_head(text)!r}" for label, text in shown[:_FORMAT_FRAGMENTS]]
+    if len(shown) > _FORMAT_FRAGMENTS:
+        parts.append(f"외 {len(shown) - _FORMAT_FRAGMENTS}곳")
+    return f"    (서식: {' · '.join(parts)})"
+
+
+def _format_paragraph(paragraph: Paragraph, formatting: bool = False) -> str:
     labels = [x for x in (paragraph.location, paragraph.style) if x]
     if not paragraph.text.strip() and _in_table(paragraph):
         labels.append("빈 칸")
@@ -2753,6 +3288,8 @@ def _format_paragraph(paragraph: Paragraph) -> str:
         prefix += " " + " ".join(f"({x})" for x in labels)
     text = paragraph.marked if paragraph.tracked else paragraph.text
     lines = [f"{prefix} {text}".rstrip(" ")]
+    if formatting and (line := _format_line(paragraph)):
+        lines.append(line)
     for comment in paragraph.comments:
         target = f" → {_head(comment.anchor, _ANCHOR_CHARS)!r}" if comment.anchor else ""
         body = _head(comment.text, _COMMENT_CHARS)
