@@ -5,7 +5,7 @@
 > 관련 코드: `backend/app/documents/editing/`, `backend/app/tools/documents.py`, `backend/app/orchestration/events.py`,
 > `frontend/src/components/EditedFiles.tsx`
 > 설계 기록: [`works/00.document-editing.md`](../../works/00.document-editing.md), [`works/01.text-formats.md`](../../works/01.text-formats.md),
-> [`works/02.docx.md`](../../works/02.docx.md)
+> [`works/02.docx.md`](../../works/02.docx.md), [`works/02.docx-advencement.md`](../../works/02.docx-advencement.md)
 
 올리기·파싱·읽기는 [첨부 문서](documents.md)를, 도구가 한 턴 안에서 도는 흐름은 [한 턴의 흐름](chat-turn.md)을 보세요.
 
@@ -26,8 +26,11 @@ flowchart LR
 ```
 
 - 고칠 수 있는 형식: TXT, MD, CSV, Word(DOCX). 다른 형식(PDF, Excel, PowerPoint, 한글)은 에이전트가 아직 못 고친다고 답합니다.
-- Word 문서는 문단·표 칸·머리글·바닥글 안의 **글자만** 바꿉니다. 서식(굵게, 색, 표, 그림, 머리글)은 그대로입니다.
-  문단 나누기·추가·삭제, 표 행 추가, 그림·서식 바꾸기는 아직 못 한다고 답합니다.
+- Word 문서는 서식(굵게, 색, 표, 그림, 머리글)을 지키며 고칩니다. 글자 바꾸기 말고도 문단 나누기·합치기·넣기·지우기·옮기기,
+  표 행 넣기·지우기, 빈 표 칸 채우기, 문단을 제목·본문·목록 수준으로 바꾸기가 됩니다.
+  표 열, 그림, 메모, 변경 내용 추적, 굵게·색 같은 글자 서식 바꾸기는 아직 못 한다고 답합니다.
+- 여러 곳을 한 번에 고칠 때 일부를 적용할 수 없으면 나머지만 저장하고, 못 한 것을 알려 줍니다.
+- 예전 버전을 고치려 하면 최신 버전을 고치라고 거절합니다 (예전 버전을 고치면 그 뒤의 수정이 빠진 갈래가 생기므로).
 - 새로 만들 수 있는 형식은 TXT, MD, CSV 입니다.
 - 고칠 때마다 새 버전이 생깁니다: `보고서.md` → `보고서 (수정 2).md` → `보고서 (수정 3).md`. 원본은 그대로 남습니다.
 - 새로 만든 문서의 칩에는 "새 문서", 수정본의 칩에는 "수정본 v2" 가 붙습니다. 칩을 누르면 파일을 받습니다.
@@ -44,8 +47,8 @@ flowchart TB
     end
     subgraph editing["app/documents/editing"]
         service["service.py<br/>load_editable · create_revision · create_new_document"]
-        text["text.py<br/>decode/encode · apply_edits · check_csv · numbered_lines"]
-        docx["docx.py<br/>DocxDocument: view · apply_edits · to_bytes"]
+        text["text.py<br/>decode/encode · apply_some · check_csv · numbered_lines"]
+        docx["docx.py<br/>DocxDocument: view · apply_some · to_bytes"]
     end
     minio[("MinIO<br/>documents/&lt;문서 ID&gt;")]
     db[("PostgreSQL<br/>documents")]
@@ -63,7 +66,7 @@ flowchart TB
 | 도구 | 하는 일 | 화면 문구 |
 |---|---|---|
 | `view_document_for_edit(document_id, start)` | 원본에 번호를 붙여 보여준다. 텍스트는 줄(`[L12] 내용`), DOCX 는 문단(`[p12] (표1 2행 1열) 내용`). `start` 는 형식에 따라 줄·문단 번호다. 고칠 수 없는 문서는 여기서 미리 알려준다 | 수정할 곳 보는 중 / 봄 |
-| `edit_document(document_id, edits)` | `edits` 를 차례로 적용해 수정본을 만든다. 수정 하나는 `{old_text, new_text, replace_all, paragraph}` (`paragraph` 는 DOCX 에서 찾을 문단, 예: `"p12"`. 텍스트 형식에서는 무시) | 문서 수정하는 중 / 수정함 |
+| `edit_document(document_id, edits)` | `edits` 를 차례로 적용해 수정본을 만든다. 수정 하나는 `{op, old_text, new_text, replace_all, paragraph, position, target, style, cells}` (아래 [수정 종류](#수정-종류-op)). 텍스트 형식은 `replace` 만 | 문서 수정하는 중 / 수정함 |
 | `create_document(filename, content)` | 새 TXT·MD·CSV 문서를 만든다 | 문서 만드는 중 / 만듦 |
 
 세 도구 모두 `documents` 도구 그룹에 속합니다([도구 결정](tool-decision.md)).
@@ -83,22 +86,26 @@ sequenceDiagram
     M->>T: document_id, edits
     T->>S: create_revision
     S->>D: 원본 행 (지금 대화 · 프로젝트 문서 아님)
+    S->>D: 더 새 수정본이 있는지 (있으면 거절)
     S->>O: 원본 바이트
-    S->>S: 텍스트: decode → apply_edits → check_csv → encode<br/>DOCX: 열기 → apply_edits → to_bytes
+    S->>S: 텍스트: decode → apply_some → check_csv → encode<br/>DOCX: 열기 → apply_some → to_bytes
     S->>O: documents/<새 ID>
     S->>D: 새 행 (텍스트 ready · DOCX processing, revision+1, created_by=agent)
     opt DOCX
         S->>S: schedule_parse (업로드와 같은 파싱), 최대 20초 기다림
     end
-    T-->>M: 새 document_id · 바뀐 곳 요약
+    T-->>M: 새 document_id · 바뀐 곳 요약 · 적용하지 못한 수정
     T-->>T: artifact {documents: [...]}
 ```
 
 - **고칠 수 있는 문서**: 지금 대화에 붙은 문서와 그 수정본입니다. 다른 대화·프로젝트의 문서는 없는 문서와 같은 말로 거절합니다(있는지 숨김).
 - **원본 형태 지키기**: 원본 바이트에서 BOM 과 줄바꿈을 기억했다가 저장할 때 되돌립니다. 그래서 고친 곳 말고는 원본과 바이트까지 같습니다.
   줄바꿈이 `\r\n` 과 `\n` 으로 섞인 파일은 고치지 않습니다. 하나로 맞추면 고치지 않은 줄까지 바뀌기 때문입니다.
-- **수정 규칙**: `old_text` 는 문서 안에서 정확히 한 번 나와야 합니다(`replace_all` 이면 모두). 수정은 순서대로 적용하고, 하나라도 실패하면 아무것도 저장하지 않습니다.
-  바뀌는 게 없는 수정과 빈 문서가 되는 수정도 거절합니다. `old_text` 에 `[L12]` 를 넣은 실수에는 힌트를 줍니다.
+- **수정 규칙**: `old_text` 는 문서 안에서 정확히 한 번 나와야 합니다(`replace_all` 이면 모두). 수정은 순서대로 적용하고, 뒤 수정은 앞 수정을 적용한 글자에서 찾습니다.
+  바뀌는 게 없는 수정도 거절합니다. `old_text` 에 `[L12]` 를 넣은 실수에는 힌트를 줍니다.
+- **수정마다 따로 성공·실패**: 적용할 수 없는 수정은 그 수정만 되돌리고 건너뜁니다(DOCX 는 수정마다 문서 상태를 저장해 둡니다). 나머지로 수정본을 만들고 결과에
+  "Not applied" 목록과 이유를 붙입니다. 하나도 적용하지 못하면 수정본을 만들지 않습니다. CSV 검사와 "빈 문서가 된다" 검사는 모든 수정을 적용한 뒤 한 번 하고, 걸리면 전부 취소합니다.
+- **최신 버전만**: 고치려는 문서로 만든 수정본이 같은 대화에 있으면(`source_document_id` 사슬) 거절하고 최신 수정본의 document_id 를 알려 줍니다. 보기는 막지 않습니다.
 - **CSV 검사**: 원본이 엄격한 규칙(`strict`)으로 읽히면 수정본도 그래야 하고(따옴표 짝), 원본의 모든 행이 같은 열 수면 수정본도 같아야 합니다.
 - **바로 읽기**: 텍스트 형식은 파싱이 글자 그대로라서 수정본을 바로 `ready` 로 기록합니다. 다음 `read_document` 가 바로 새 내용을 읽습니다.
 - **준비 상태**: 업로드한 문서는 파싱이 끝나(`ready`) 있어야 고칠 수 있습니다. 에이전트가 만든 수정본은 원본을 우리가 만들었으므로
@@ -109,16 +116,42 @@ sequenceDiagram
 DOCX 는 ZIP 안의 XML(`word/document.xml`, 머리글·바닥글)을 `lxml` 로 직접 고칩니다. python-docx 는 쓰지 않습니다.
 
 - **보기**: 본문 → 머리글 → 바닥글 순서로 모든 문단에 번호를 매깁니다(표 칸·중첩 표 안 포함, 빈 문단은 번호만 차지).
-  위치(`(표1 2행 1열)`, `(머리글 1)`)와 제목 스타일(`(제목 1)`)을 함께 적고, 결과 끝에 범례를 붙입니다.
+  위치(`(표1 2행 1열)`, `(머리글 1)`), 제목 스타일(`(제목 1)`), 목록 수준(`(목록)`, `(목록 2수준)`)을 함께 적고, 결과 끝에 범례를 붙입니다.
+  빈 문단은 보여주지 않지만 표 칸의 빈 문단은 `(빈 칸)` 으로 보여줍니다(채울 수 있게).
   고칠 수 없는 자리(그림·도형·수식·각주 번호 등)는 `￼` 로, 필드(쪽 번호·날짜)는 결과 글자 그대로 보여 줍니다.
-- **찾기**: `old_text` 는 문단 하나 안에서 찾습니다. 문단을 넘으면 "문단마다 따로 고치라" 고 거절합니다. `paragraph` 로 한 문단 안에서만 찾게 할 수 있습니다.
+- **찾기**: `old_text` 는 문단 하나 안에서 찾습니다. 문단을 넘으면 "문단마다 따로 고치거나 합치라(`merge`)" 고 거절합니다. `paragraph` 로 한 문단 안에서만 찾게 할 수 있습니다.
+- **문단 번호**: 수정 안의 `pN`(`paragraph`, `target`)은 모두 **호출을 시작할 때의 번호**입니다. 호출 동안 문단마다 임시 속성으로 번호를 달아 두므로, 앞 수정이 문단을 나누거나 지워도
+  뒤 수정의 `p7` 은 원래 p7 을 가리킵니다(지워졌으면 그 수정은 실패). 임시 속성은 호출이 끝나면 지웁니다. 구조가 바뀌면 결과에 "다시 보기로 번호를 확인하라" 를 붙입니다.
 - **서식 지키기**: 화면에서는 한 문장이어도 XML 에서는 서식 조각(run) 여러 개입니다. 문단을 글자 목록으로 펼쳐 글자마다 출처(run)를 기억하고,
   원래 글자와 새 글자를 글자 단위로 비교(`difflib.SequenceMatcher`)해 **달라진 글자만** 고칩니다. "매출 **120**억" 에서 "120억 → 135억" 은 "20" 만 "35" 로 바뀌어 굵게가 남습니다.
   - 넣은 글자는 `old_text` 안의 이웃 글자(앞, 없으면 뒤)의 run 서식을 따릅니다. 그래야 링크 글자 맨 앞에 넣은 글자가 링크 밖으로 새지 않습니다.
   - 거의 다 바뀐 문장(비슷한 정도 0.5 미만)은 범위를 통째로 첫 run 에 넣습니다. 글자 단위로 맞추면 우연히 같은 글자만 남아 run 조각이 이상해집니다.
   - 비게 된 run 은 지우고, 앞뒤 공백이 있는 글자에는 `xml:space="preserve"` 를 붙입니다. 책갈피 같은 길이 없는 표시는 건드리지 않아 그대로 남습니다.
 - **거절**: 바꾸는 범위가 그림·필드·각주 번호에 걸릴 때, 링크·콘텐츠 컨트롤 경계를 넘을 때, 변경 내용 추적 기록(`w:ins`·`w:del`)이 있는 문단일 때,
-  `new_text` 로 줄바꿈이나 `￼` 를 새로 넣을 때(문단 나누기는 아직 지원하지 않음), 매크로 문서(`.docm`)일 때.
+  `new_text` 로 `￼` 를 새로 넣을 때, 매크로 문서(`.docm`)일 때.
+#### 수정 종류 (`op`)
+
+| `op` | 쓰는 필드 | 동작 |
+|---|---|---|
+| `replace` (기본) | `old_text`, `new_text`, `replace_all`, `paragraph` | 글자 바꾸기. `new_text` 의 `\n` 에서 **문단을 나눕니다**. `old_text` 가 비고 `paragraph` 가 빈 문단(빈 표 칸)이면 그 문단을 채웁니다 |
+| `merge` | `paragraph` | 그 문단과 바로 다음 문단을 합칩니다. 경계에 공백이 없으면 하나 넣습니다 |
+| `insert_paragraph` | `paragraph`, `position`, `new_text`, `style` | 기준 문단 앞·뒤에 새 문단(줄마다 하나)을 넣습니다 |
+| `delete_paragraph` | `paragraph` | 문단을 지웁니다 |
+| `move_paragraph` | `paragraph`, `position`, `target` | 문단을 서식 그대로 `target` 앞·뒤로 옮깁니다 (같은 부분 안에서만) |
+| `insert_row` | `paragraph`, `position`, `cells` | `paragraph` 가 든 표 행 앞·뒤에 행을 넣고 `cells` 를 칸마다 넣습니다 |
+| `delete_row` | `paragraph` | `paragraph` 가 든 표 행을 지웁니다 |
+| `set_style` | `paragraph`, `style` | 문단을 `제목 N`·`본문`·`문서 제목`·`부제목`·문서의 스타일 이름·`목록 N수준` 으로 바꿉니다 |
+
+- **나누기**: 문단 서식은 양쪽 조각에 복사하고, 나누는 자리의 run 은 둘로 쪼개 글자 서식을 양쪽에 둡니다. 구역 나누기(`w:sectPr`)는 마지막 조각으로 옮깁니다.
+  빈 줄(`\n\n`)은 한 번 나누기로 보고, 빈 문단이 생기거나 링크·필드 안을 나누면 거절합니다.
+- **새 문단 서식**: 기준 문단의 문단 서식(구역 나누기·변경 기록 빼고)과 첫 글자 run 의 서식을 따릅니다. 목록 문단 옆에 넣으면 번호 설정(`w:numPr`)이 따라와 번호가 이어집니다.
+  기준이 제목이면 이웃 본문 문단을 따르고, 없으면 기본 문단으로 넣습니다. `style` 을 주면 그 스타일만 두고 글자 서식은 복사하지 않습니다.
+- **지우기·옮기기**: 구역 나누기를 가진 문단, 다른 문단으로 이어지는 필드, 변경 추적 문단은 거절합니다. 메모가 달린 문단은 지우지 않습니다. 책갈피는 짝을 함께 지웁니다.
+  표 칸·본문의 마지막 문단처럼 지우면 구조가 깨지는 자리(칸에 문단이 없어지거나 표가 끝이 됨)는 지우지 않고 글자만 비웁니다(옮기기는 거절).
+- **표 행**: 기준 행의 칸 서식·첫 문단 서식·첫 글자 서식만 따른 새 칸을 만듭니다. 머리글 행(`w:tblHeader`) 뒤에 넣으면 아래 데이터 행의 모양을 따릅니다. 값이 칸보다 적으면 나머지는
+  빈 칸(문단 기호 서식을 남겨 나중에 같은 서식으로 채울 수 있음)입니다. 세로 병합(`w:vMerge`)이 걸린 행, 표의 마지막 한 행 지우기는 거절합니다.
+- **목록 수준**: 목록 문단이면 수준(`w:ilvl`)만 바꾸고, 목록이 아니면 바로 앞·뒤 목록 문단의 번호 설정을 복사해 이어 붙입니다. 제목·본문으로 바꾸면 목록 번호를 뗍니다.
+
 - **저장**: 고친 XML 부분만 다시 쓰고(원래 XML 선언 유지), 나머지 ZIP 항목은 내용 그대로 복사합니다. 항목 순서·이름·압축 방식도 원본을 따릅니다.
 - **본문 다시 만들기**: DOCX 의 `content` 는 파싱 결과(Markdown, 그림 OCR)라서 수정본을 `processing` 으로 저장하고 업로드와 같은 파싱(`schedule_parse`)을 돌립니다.
   `DOCUMENT_EDIT_PARSE_WAIT_SECONDS`(20초)까지 기다려 끝나면 바로 `read_document` 로 읽힙니다. 넘기면 수정본은 받을 수 있게 저장해 두고 파싱은 백그라운드에서 이어지며,
@@ -135,6 +168,7 @@ DOCX 는 ZIP 안의 XML(`word/document.xml`, 머리글·바닥글)을 `lxml` 로
 
 - 고치거나 만들 수 없으면 `EditError`(`ToolError`)를 올립니다. `ToolNode` 가 그 문구를 도구 결과로 주고 `status="error"` 로 표시해서, 화면에는 도구 단계가 실패로 보입니다.
 - 결과 끝에 "No changes were saved." / "No file was created." 를 붙여서 모델이 아무것도 저장되지 않았음을 압니다.
+- 수정 일부만 실패하면 도구는 성공(수정본 있음)이고, 결과에 "Not applied" 목록과 "사용자에게 못 한 것을 알리라" 는 안내가 붙습니다.
 
 ### 화면까지
 
@@ -166,6 +200,8 @@ DOCX 는 ZIP 안의 XML(`word/document.xml`, 머리글·바닥글)을 `lxml` 로
 - **바로 새 버전을 만든다.** 원본이 남으므로 잘못 고쳐도 잃는 것이 없습니다. 적용 전 승인은 나중에 LangGraph `interrupt` 로 붙입니다.
 - **수정 기준은 MinIO 원본 바이트.** DB 본문만으로는 BOM·`\r\n` 을 모릅니다. DOCX 의 본문은 변환된 사본이라 원본 문단과 1:1 로 맞지 않습니다.
 - **DOCX 는 ZIP + lxml 직접.** python-docx 로 문단 글자를 바꾸면 run 이 지워져 서식이 사라지고, 저장할 때 읽은 부분을 다시 써서 원본 보존이 나쁩니다.
+- **DOCX 구조 고치기는 `edit_document` 의 `op` 로.** 도구가 늘면 작은 모델이 엉뚱한 도구를 고르고, "한 번 부르면 수정본 하나" 규칙과 섞어 쓰기(나누기 + 행 추가)가 어렵습니다.
+- **수정마다 따로 성공·실패.** 맞춤법 교정처럼 수정이 많으면 한 번의 실수로 전부 취소되어 재시도가 반복됐습니다. 원본이 남으므로 일부만 적용해도 잃는 것이 없습니다.
 - **DOCX 수정본 파싱을 기다린다(시간 제한).** 글자만 바꿔 그림은 그대로라 대부분 금방 끝나고, 끝나면 다음 질문에서 바로 새 내용을 읽습니다.
 - **결과 첫 줄에 새 document_id.** 지난 도구 결과는 다음 턴에 앞 300자만 남기 때문입니다([지난 도구 결과 줄이기](context-management.md)).
 - 대화 요약 뒤에 수정본 ID 를 잃을 수 있는 위험은 알려진 한계로 남겨 두었습니다(설계 기록 결정 G).
