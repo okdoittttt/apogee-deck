@@ -25,6 +25,7 @@ r"""Markdown 으로 새 DOCX 를 만든다.
 import io
 import re
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from xml.sax.saxutils import escape
@@ -33,7 +34,14 @@ from lxml import etree
 from markdown_it import MarkdownIt
 from markdown_it.tree import SyntaxTreeNode
 
-from app.documents.editing.docx import W, parse_part, rels_name, resolve_target, serialize_part
+from app.documents.editing.docx import (
+    LINE_BREAK,
+    W,
+    parse_part,
+    rels_name,
+    resolve_target,
+    serialize_part,
+)
 from app.documents.editing.text import EditError
 
 _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -269,6 +277,31 @@ class _Numbering:
         self.changed = True
         return value
 
+    def reuse(self, used: list[str]) -> None:
+        """문서 본문이 이미 쓰는 목록 정의를 종류(글머리표·번호)마다 하나씩 다시 쓴다 (모양을 맞춘다).
+
+        Args:
+            used: 본문 문단이 쓰는 ``numId`` (나온 순서).
+        """
+        abstracts = {
+            n.get(_w("numId")): n.find(_w("abstractNumId")) for n in self.root.iter(_w("num"))
+        }
+        definitions = {a.get(_w("abstractNumId")): a for a in self.root.iter(_w("abstractNum"))}
+        for num_id in used:
+            link = abstracts.get(num_id)
+            definition = definitions.get(link.get(_w("val")) if link is not None else None)
+            if definition is None or definition.find(_w("numStyleLink")) is not None:
+                continue
+            first = definition.find(f"{_w('lvl')}[@{_w('ilvl')}='0']/{_w('numFmt')}")
+            if first is None or first.get(_w("val")) == "none":
+                continue
+            kind = "bullet" if first.get(_w("val")) == "bullet" else "ordered"
+            if kind not in self._abstract:
+                try:
+                    self._abstract[kind] = int(definition.get(_w("abstractNumId"), ""))
+                except ValueError:
+                    continue
+
     def bullet(self) -> int:
         """글머리표 목록의 번호 id."""
         if self._bullet_num is None:
@@ -308,10 +341,17 @@ class _Context:
 class _Builder:
     """Markdown 문법 트리를 본문 요소(``w:p``·``w:tbl``)로 바꾼다."""
 
-    def __init__(self, styles: _Styles, numbering: _Numbering, links: "_Links") -> None:
+    def __init__(
+        self,
+        styles: _Styles,
+        numbering: _Numbering,
+        links: "_Links",
+        text_width: int = _TEXT_WIDTH,
+    ) -> None:
         self.styles = styles
         self.numbering = numbering
         self.links = links
+        self.text_width = text_width
         self.blocks: list[etree._Element] = []
         self.tables = 0
         self.images = 0
@@ -409,7 +449,7 @@ class _Builder:
             return
         self.tables += 1
         columns = max(len(row.children) for row in rows)
-        width = _TEXT_WIDTH // columns
+        width = self.text_width // columns
         table = etree.Element(_w("tbl"))
         props = etree.SubElement(table, _w("tblPr"))
         etree.SubElement(props, _w("tblStyle")).set(_w("val"), self.styles.id("table grid"))
@@ -522,11 +562,14 @@ class _Builder:
         if not text:
             return
         run = self._run(parent, marks)
-        for k, piece in enumerate(text.split("\t")):
-            if k:
-                etree.SubElement(run, _w("tab"))
-            if piece:
-                _text(run, piece)
+        for n, line in enumerate(text.split(LINE_BREAK)):
+            if n:
+                etree.SubElement(run, _w("br"))
+            for k, piece in enumerate(line.split("\t")):
+                if k:
+                    etree.SubElement(run, _w("tab"))
+                if piece:
+                    _text(run, piece)
 
 
 class _Links:
@@ -648,6 +691,125 @@ def _base_package(author: str, title: str, now: datetime) -> dict[str, bytes]:
 
 
 # --- 만들기 ---------------------------------------------------------------------------------------
+
+
+@dataclass
+class MarkdownBlocks:
+    """기존 문서에 넣을 Markdown 내용 (``markdown_blocks`` 결과).
+
+    Attributes:
+        blocks: 본문 블록 (``w:p``·``w:tbl``), 순서대로.
+        headings: 제목 문단 수.
+        paragraphs: 제목·목록이 아닌 글자 있는 문단 수.
+        list_items: 목록 항목 수.
+        tables: 표 수.
+        rows: 표 행 수 (모든 표).
+        images: 글자로 대신 넣은 그림 수.
+        changed: 고친 부분 종류 (``styles``·``numbering``·``rels``).
+        plain: 스타일 없는 본문 문단 (넣는 쪽이 주변 문단 서식을 입힌다).
+    """
+
+    blocks: list[etree._Element]
+    headings: int = 0
+    paragraphs: int = 0
+    list_items: int = 0
+    tables: int = 0
+    rows: int = 0
+    images: int = 0
+    changed: set[str] = field(default_factory=set)
+    plain: list[etree._Element] = field(default_factory=list)
+
+
+def new_list_number(root: etree._Element, used: list[str], bullet: bool, level: int) -> int:
+    """기존 문서에 새 목록 번호(``numId``)를 만든다 (묶음 5 ``set_style`` 의 새 목록).
+
+    Args:
+        root: 문서의 목록 번호 부분.
+        used: 본문 문단이 쓰는 ``numId`` (나온 순서). 같은 종류 목록 정의가 있으면 그 모양을 따른다.
+        bullet: 글머리표 목록인지 (아니면 번호 목록, 1부터).
+        level: 시작 수준 (0부터).
+
+    Returns:
+        새 ``numId``.
+    """
+    numbering = _Numbering(root)
+    numbering.reuse(used)
+    return numbering.bullet() if bullet else numbering.ordered(min(level, 8), 1)
+
+
+def _has_lists(node: SyntaxTreeNode) -> bool:
+    return node.type in ("bullet_list", "ordered_list") or any(
+        _has_lists(child) for child in node.children
+    )
+
+
+def markdown_blocks(
+    markdown: str,
+    *,
+    styles: etree._Element,
+    numbering: Callable[[], etree._Element],
+    rels: etree._Element,
+    text_width: int,
+    used_lists: list[str],
+) -> MarkdownBlocks:
+    """Markdown 을 기존 문서에 넣을 본문 블록으로 바꾼다 (묶음 5 ``insert_markdown``).
+
+    스타일은 문서에 같은 이름이 있으면 그것을 쓰고 없으면 정의를 더한다. 목록은 문서가 이미 쓰는 같은 종류
+    목록 정의를 따른다 (번호 목록은 1부터 다시).
+
+    Args:
+        markdown: 넣을 내용.
+        styles: 문서의 스타일 부분 (고치면 ``changed`` 에 ``styles``).
+        numbering: 목록 번호 부분을 돌려주는 함수 (목록이 있을 때만 부른다. 없으면 만들어야 한다).
+        rels: 본문 부분의 관계 (링크를 더하면 ``changed`` 에 ``rels``).
+        text_width: 표를 넣을 자리의 본문 너비 (twip).
+        used_lists: 본문 문단이 쓰는 ``numId`` (나온 순서).
+
+    Returns:
+        만든 블록과 개수.
+
+    Raises:
+        EditError: 내용이 비었거나 넣을 글자가 없을 때.
+    """
+    text = markdown.replace("\r\n", "\n")
+    if not text.strip():
+        raise EditError("new_text is empty. Write the content to insert in Markdown.")
+    tree = _parse_markdown(text)
+    style_table = _Styles(styles)
+    if _has_lists(tree):
+        number_table = _Numbering(numbering())
+        number_table.reuse(used_lists)
+    else:
+        number_table = _Numbering(etree.Element(_w("numbering")))
+    links = _Links(rels)
+    builder = _Builder(style_table, number_table, links, text_width)
+    builder.build(tree, _Context())
+    if not builder.blocks:
+        raise EditError("new_text has no content to insert.")
+    result = MarkdownBlocks(builder.blocks, tables=builder.tables, images=builder.images)
+    headings = {
+        style_table.id(f"heading {n}") for n in range(1, 7) if f"heading {n}" in style_table._ids
+    }
+    for block in builder.blocks:
+        if block.tag == _w("tbl"):
+            result.rows += len(block.findall(_w("tr")))
+            continue
+        style = block.find(f"{_w('pPr')}/{_w('pStyle')}")
+        if style is not None and style.get(_w("val")) in headings:
+            result.headings += 1
+        elif block.find(f"{_w('pPr')}/{_w('numPr')}") is not None:
+            result.list_items += 1
+        elif "".join(t.text or "" for t in block.iter(_w("t"))).strip():
+            result.paragraphs += 1
+            if style is None and block.find(f"{_w('pPr')}/{_w('ind')}") is None:
+                result.plain.append(block)
+    if style_table.changed:
+        result.changed.add("styles")
+    if number_table.changed:
+        result.changed.add("numbering")
+    if links.changed:
+        result.changed.add("rels")
+    return result
 
 
 def build_docx(

@@ -71,13 +71,13 @@ def test_nested_lists_and_numbering_restarts():
     markdown = "1. 하나\n   - 가\n   - 나\n2. 둘\n\n문단\n\n3. 셋부터\n4. 넷\n"
     data = build_docx(markdown, author="a").data
     assert lines(data) == [
-        "[p1] (목록) 하나",
-        "[p2] (목록 2수준) 가",
-        "[p3] (목록 2수준) 나",
-        "[p4] (목록) 둘",
+        "[p1] (번호 목록) 하나",
+        "[p2] (글머리표 목록 2수준) 가",
+        "[p3] (글머리표 목록 2수준) 나",
+        "[p4] (번호 목록) 둘",
         "[p5] 문단",
-        "[p6] (목록) 셋부터",
-        "[p7] (목록) 넷",
+        "[p6] (번호 목록) 셋부터",
+        "[p7] (번호 목록) 넷",
     ]
     numbering = etree.fromstring(parts(data)["word/numbering.xml"])
     children = [etree.QName(c).localname for c in numbering]
@@ -113,7 +113,7 @@ def test_quote_code_rule_image_and_html():
     markdown = "> 인용\n\n```\n줄 하나\n\t들여쓴 줄\n```\n\n---\n\n![차트](a.png) 끝 <b>굵게</b>"
     created = build_docx(markdown, author="a")
     texts = [x.text for x in DocxDocument.from_bytes(created.data).paragraphs]
-    assert texts == ["인용", "줄 하나\n\t들여쓴 줄", "", "[차트] 끝 <b>굵게</b>"]
+    assert texts == ["인용", "줄 하나⏎\t들여쓴 줄", "", "[차트] 끝 <b>굵게</b>"]
     assert created.notes and "image" in created.notes[0]
     paragraphs = body(created.data).findall("w:p", NS)
     assert paragraphs[0].find("w:pPr/w:pStyle", NS).get(f"{{{W}}}val") == "Quote"
@@ -130,8 +130,8 @@ def test_created_document_can_be_edited_and_tracked():
     )
     assert lines(doc.to_bytes())[1:] == [
         "[p2] (변경 추적: AI 에이전트) 매출은 1{-20-}{+35+}억 원이다.",
-        "[p3] (목록) 항목",
-        "[p4] (목록) (변경 추적: AI 에이전트 · 문단 넣음·나눔 추적) {+새 항목+}",
+        "[p3] (글머리표 목록) 항목",
+        "[p4] (글머리표 목록) (변경 추적: AI 에이전트 · 문단 넣음·나눔 추적) {+새 항목+}",
     ]
 
 
@@ -157,7 +157,11 @@ def test_template_keeps_header_footer_and_replaces_body():
         if name in before:
             assert after[name] == before[name]
     view = lines(created.data)
-    assert view[:3] == ["[p1] (제목 1) 새 보고서", "[p2] 본문만 바뀐다.", "[p3] (목록) 목록"]
+    assert view[:3] == [
+        "[p1] (제목 1) 새 보고서",
+        "[p2] 본문만 바뀐다.",
+        "[p3] (글머리표 목록) 목록",
+    ]
     assert not any("120억" in line for line in view[:3])
     section_before = etree.fromstring(before["word/document.xml"]).find("w:body/w:sectPr", NS)
     section_after = body(created.data).find("w:sectPr", NS)

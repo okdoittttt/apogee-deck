@@ -282,7 +282,7 @@ def test_breaks_tabs_and_markers():
         '<w:r><w:t>라</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p>'
     )
     doc = DocxDocument.from_bytes(make_docx(body))
-    assert doc.paragraphs[0].text == "가\t나\n다라"
+    assert doc.paragraphs[0].text == "가\t나⏎다라"
 
 
 # --- 패키지 --------------------------------------------------------------------------------------
@@ -1068,25 +1068,6 @@ def test_row_failures(edit_, message):
     doc = DocxDocument.from_bytes(make_docx(table(HEADER_ROW, data_row("서울", "52억"))))
     _, (failure,) = doc.apply_some([edit_])
     assert message in str(failure)
-
-
-def test_rows_with_vertical_merge_are_rejected():
-    merged = (
-        "<w:tr>"
-        + cell("서울", props='<w:tcPr><w:vMerge w:val="restart"/></w:tcPr>')
-        + cell("1")
-        + "</w:tr>"
-        "<w:tr>" + cell("", props="<w:tcPr><w:vMerge/></w:tcPr>") + cell("2") + "</w:tr>"
-    )
-    doc = DocxDocument.from_bytes(make_docx(table(HEADER_ROW, merged)))
-    _, failures = doc.apply_some(
-        [
-            Edit(op="insert_row", paragraph="p3", cells=("x",)),
-            Edit(op="delete_row", paragraph="p3"),
-            Edit(op="insert_row", paragraph="p1", cells=("x",)),
-        ]
-    )
-    assert len(failures) == 3 and all("vertically merged" in str(f) for f in failures)
 
 
 def test_delete_row():

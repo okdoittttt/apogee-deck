@@ -247,3 +247,44 @@ async def test_docx_find_then_format_request(monkeypatch):
     lines = revised.view(1, 100, formatting=True).text
     assert "(서식: 굵게, 글자색 빨강 '영업기획팀')" in lines
     assert "(서식: 굵게, 형광펜 노랑 '52억')" in lines  # 원래 굵은 칸
+
+
+async def test_docx_bundle5_structure_request(monkeypatch):
+    # "다음 분기 계획을 지역별 매출 앞으로 옮기고, 표에 목표 열을 넣고, 일정 표를 새로 추가하고,
+    #  문의 문단은 줄을 바꿔 줘."
+    source, session, storage = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {
+                "op": "move_paragraph",
+                "paragraph": "p17",
+                "target": "p4",
+                "position": "before",
+                "whole_section": True,
+            },
+            {"op": "insert_column", "paragraph": "p6", "cells": ["목표", "55억", "33억", "20억"]},
+            {
+                "op": "insert_markdown",
+                "paragraph": "p19",
+                "new_text": "### 일정\n\n| 단계 | 기간 |\n|---|---|\n| 준비 | 1월 |",
+            },
+            {"old_text": "김민수 (내선", "new_text": "김민수⏎(내선"},
+        ],
+    }
+    events, _ = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done", finished.output
+    assert "Not applied" not in finished.output
+    assert "moved section '다음 분기 계획'" in finished.output
+    assert "inserted a column after '매출' in 표1" in finished.output
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    view = revised.view(1, 100).text
+    order = [line.split("] ", 1)[1] for line in view.splitlines()]
+    assert order.index("(제목 2) 다음 분기 계획") < order.index("(제목 2) 지역별 매출")
+    # 옮긴 섹션에 넣은 일정 표가 앞에 와서 표1, 매출 표는 표2 가 된다
+    assert "(표1 2행 1열) 준비" in view
+    assert "(표2 1행 3열) 목표" in view and "(표2 2행 3열) 55억" in view
+    assert "문의: 영업기획팀 김민수⏎(내선 1234)" in view

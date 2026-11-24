@@ -189,8 +189,18 @@ def test_edit_schema_describes_edits():
         "style",
         "cells",
         "format",
+        "whole_section",
     }
-    assert {"merge", "comment", "format", "accept_changes"} <= set(edit["properties"]["op"]["enum"])
+    assert {
+        "merge",
+        "comment",
+        "format",
+        "accept_changes",
+        "insert_markdown",
+        "insert_column",
+        "delete_column",
+        "delete_table",
+    } <= set(edit["properties"]["op"]["enum"])
     assert set(schema["$defs"]["FormatArg"]["properties"]) == {
         "bold",
         "italic",

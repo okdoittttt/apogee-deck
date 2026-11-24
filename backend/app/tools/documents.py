@@ -20,7 +20,7 @@ from app.core.storage import ObjectStorage, get_storage
 from app.documents import reading
 from app.documents import service as documents
 from app.documents.editing import service as editing
-from app.documents.editing.docx import WALL, ParagraphView
+from app.documents.editing.docx import LINE_BREAK, WALL, ParagraphView
 from app.documents.editing.text import (
     Change,
     Edit,
@@ -170,11 +170,13 @@ def make_search_project(settings: Settings) -> BaseTool:
 
 
 DOCX_VIEW_LEGEND = (
-    f"[p12] is the paragraph label and (표1 2행 1열) / (머리글 1) / (제목 1) / (목록 2수준) show where "
-    "it is and what it is (table cell, header or footer, heading, list item level): never include "
-    f"them in old_text. {WALL} marks an image or other object, and field values such as page "
-    "numbers or dates cannot be edited either. Tabs are shown as tab characters. (빈 칸) is an "
-    "empty table cell; other empty paragraphs are not shown but keep their number. In "
+    "[p12] is the paragraph label and (표1 2행 1열) / (머리글 1) / (제목 1) / (번호 목록) / (글머리표 "
+    "목록 2수준) show where it is and what it is (table cell, header or footer, heading, numbered or "
+    f"bulleted list item and level): never include them in old_text. {WALL} marks an image or "
+    "other object, and field values such as page numbers or dates cannot be edited either. Tabs "
+    f"are shown as tab characters and {LINE_BREAK} is a line break inside the paragraph. (빈 칸) "
+    "is an empty table cell, and (위 칸과 병합) is a cell merged with the cell above (its text is "
+    "in the cell above); other empty paragraphs are not shown but keep their number. In "
     "paragraphs labeled (변경 추적: name) someone's tracked changes are shown as {+inserted+} "
     "and {-deleted-} text; other labels there say what else was tracked (서식 바뀜: formatting, "
     "문단 넣음·나눔 / 문단 합침: paragraphs added, split or joined). Those paragraphs cannot be "
@@ -329,6 +331,10 @@ class DocumentEdit(BaseModel):
         "move_paragraph",
         "insert_row",
         "delete_row",
+        "insert_column",
+        "delete_column",
+        "delete_table",
+        "insert_markdown",
         "set_style",
         "comment",
         "format",
@@ -340,9 +346,15 @@ class DocumentEdit(BaseModel):
             "What to do. replace (default): replace old_text with new_text. The other kinds are "
             "for Word documents only: merge (join paragraph with the next paragraph), "
             "insert_paragraph (add new_text as a new paragraph before or after paragraph), "
-            "delete_paragraph, move_paragraph (move paragraph before or after target), "
+            "insert_markdown (add new_text written in Markdown, such as headings, lists and "
+            "tables, before or after paragraph: use it to add a table, start a new list or add "
+            "a whole section), delete_paragraph, move_paragraph (move paragraph before or after "
+            "target; with whole_section, delete or move a heading with everything under it), "
             "insert_row (add a table row with cells before or after the row that contains "
-            "paragraph), delete_row (delete the table row that contains paragraph), set_style "
+            "paragraph), delete_row (delete the table row that contains paragraph), "
+            "insert_column (add a column with cells, top to bottom, before or after the column "
+            "of the cell that contains paragraph), delete_column (delete that column), "
+            "delete_table (delete the whole table that contains paragraph), set_style "
             "(change paragraph to style), comment (add new_text as a comment on old_text, or on "
             "the whole paragraph when old_text is empty), format (change the character "
             "formatting of old_text, or of the whole paragraph when old_text is empty, to "
@@ -366,8 +378,10 @@ class DocumentEdit(BaseModel):
         default="",
         description=(
             "replace: text to put in its place (an empty string deletes old_text). In Word "
-            "documents a line break in new_text splits the paragraph there. insert_paragraph: the "
-            "text of the new paragraph (one paragraph per line). comment: the comment text."
+            "documents a line break in new_text splits the paragraph there, and "
+            f"{LINE_BREAK} adds a line break inside the paragraph. insert_paragraph: the "
+            "text of the new paragraph (one paragraph per line). insert_markdown: the content "
+            "in Markdown. comment: the comment text."
         ),
     )
     replace_all: bool = Field(
@@ -386,31 +400,54 @@ class DocumentEdit(BaseModel):
             "accept_changes "
             "and reject_changes it limits them to that paragraph (empty means the whole "
             "document); for the other kinds it is the paragraph to act on (for insert_row and "
-            "delete_row, any paragraph inside the row). "
+            "delete_row, any paragraph inside the row; for insert_column, delete_column and "
+            "delete_table, any paragraph inside a cell of that column or table; for "
+            "insert_markdown, a paragraph that is not inside a table). "
             "Labels always mean the numbers shown in the view before this call, even after "
             "earlier edits in the same call split or remove paragraphs."
         ),
     )
     position: Literal["after", "before"] = Field(
         default="after",
-        description="insert_paragraph, move_paragraph, insert_row: put it after or before.",
+        description=(
+            "insert_paragraph, insert_markdown, move_paragraph, insert_row, insert_column: put "
+            "it after or before."
+        ),
     )
     target: str | None = Field(
         default=None,
-        description='move_paragraph only: the paragraph label to move next to, such as "p3".',
+        description=(
+            'move_paragraph only: the paragraph label to move next to, such as "p3". With '
+            "whole_section, after a heading target means after that heading's whole section."
+        ),
     )
     style: str | None = Field(
         default=None,
         description=(
             "insert_paragraph (optional) and set_style: a style shown in the view, such as "
-            '"제목 1" to "제목 9", "본문" (normal text), "문서 제목", "부제목", or "목록" / '
-            '"목록 2수준" (list item level, set_style only). Without it, a new paragraph follows '
-            "the nearby paragraph's formatting."
+            '"제목 1" to "제목 9", "본문" (normal text), "문서 제목", "부제목", or (set_style '
+            'only) "번호 목록" / "글머리표 목록" (numbered or bulleted list item: joins the list '
+            "right before or after it, or starts a new list), optionally with a level such as "
+            '"번호 목록 2수준", or "목록 2수준" to change only the level of a list item. Without it, '
+            "a new paragraph follows the nearby paragraph's formatting."
         ),
     )
     cells: list[str] | None = Field(
         default=None,
-        description="insert_row only: the values of the new row's cells, from left to right.",
+        description=(
+            "insert_row: the values of the new row's cells, from left to right. insert_column: "
+            "the values of the new column's cells, from top to bottom (including the header "
+            f"row). Use {LINE_BREAK} for a line break inside a cell."
+        ),
+    )
+    whole_section: bool = Field(
+        default=False,
+        description=(
+            "delete_paragraph and move_paragraph only: true when paragraph is a heading and "
+            "the whole section (the heading and everything up to the next heading of the same "
+            'or higher level, including tables) should be deleted or moved, as in "move chapter '
+            '3 before chapter 2".'
+        ),
     )
     format: FormatArg | None = Field(
         default=None,
@@ -536,9 +573,10 @@ def make_edit_document(settings: Settings) -> BaseTool:
 
         Text files are changed by replacing text. Word documents keep their formatting (bold,
         colors, tables, images, headers): replace changes only the replaced characters, and
-        other kinds of edits can split, merge, insert, delete or move paragraphs, add or delete
-        table rows, change a paragraph's style (heading, normal text, list level), add
-        comments, and accept or reject tracked changes.
+        other kinds of edits can split, merge, insert, delete or move paragraphs or whole
+        sections, insert Markdown content (headings, lists, tables), add or delete table rows
+        and columns, delete tables, change a paragraph's style (heading, normal text, list),
+        add comments, and accept or reject tracked changes.
 
         In Word documents, set track_changes to true when the user wants to review your changes
         (for example "track changes", "so I can check them in Word", "mark what you changed"):
@@ -594,6 +632,7 @@ def make_edit_document(settings: Settings) -> BaseTool:
                             format=TextFormat(**e.format.model_dump())
                             if e.format is not None
                             else None,
+                            whole_section=e.whole_section,
                         )
                         for e in parsed
                     ],

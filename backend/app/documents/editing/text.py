@@ -83,6 +83,10 @@ EDIT_OPS = frozenset(
         "move_paragraph",
         "insert_row",
         "delete_row",
+        "insert_column",
+        "delete_column",
+        "delete_table",
+        "insert_markdown",
         "set_style",
         "accept_changes",
         "reject_changes",
@@ -137,8 +141,9 @@ class Edit:
         target: ``move_paragraph`` 에서 옮겨 갈 자리의 기준 문단 (예: ``"p3"``).
         style: ``insert_paragraph`` 에서 새 문단의 스타일 (예: ``"제목 2"``, 없으면 기준 문단을 따른다).
             ``set_style`` 에서 문단에 줄 스타일이나 목록 수준 (예: ``"본문"``, ``"목록 2수준"``).
-        cells: ``insert_row`` 에서 새 행의 칸 값 (왼쪽부터).
+        cells: ``insert_row`` 에서 새 행의 칸 값 (왼쪽부터), ``insert_column`` 에서 새 열의 칸 값 (위부터).
         format: ``format`` 에서 바꿀 글자 서식.
+        whole_section: ``delete_paragraph``·``move_paragraph`` 에서 제목 문단부터 그 섹션 끝까지 다룰지.
     """
 
     old_text: str = ""
@@ -151,6 +156,7 @@ class Edit:
     style: str | None = None
     cells: tuple[str, ...] | None = None
     format: TextFormat | None = None
+    whole_section: bool = False
 
 
 @dataclass(frozen=True)

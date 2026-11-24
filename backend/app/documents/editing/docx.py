@@ -56,9 +56,14 @@ _REL_OFFICE_DOCUMENT = (
 _REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 _CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
 _COMMENTS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+_STYLES_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
+_NUMBERING_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
 
 WALL = "￼"
 """고칠 수 없는 자리(그림, 각주 번호 등)를 보기에서 나타내는 글자 (OBJECT REPLACEMENT CHARACTER)."""
+
+LINE_BREAK = "⏎"
+"""보기와 수정 글자에서 문단 안 줄바꿈(``w:br``·``w:cr``)을 나타내는 글자. ``\\n`` 은 문단 나누기다."""
 
 _TRACK_MARKS = re.compile(r"\{[+-]|[+-]\}")
 """보기의 추적 표기. 에이전트가 ``old_text`` 에 표기째 복사하는 실수를 찾는다."""
@@ -218,7 +223,7 @@ def _tokens(run: etree._Element) -> list[_Token]:
         elif child.tag == _w("tab"):
             tokens.append(_Token("tab", "\t", child))
         elif _is_text_break(child):
-            tokens.append(_Token("br", "\n", child))
+            tokens.append(_Token("br", LINE_BREAK, child))
         else:
             tokens.append(_Token("x", "", child))
     return tokens
@@ -253,6 +258,8 @@ def _write_run(run: etree._Element, tokens: list[_Token]) -> None:
         flush()
         if token.element is not None:
             run.append(token.element)
+        elif token.kind == "br":  # 새로 넣은 줄바꿈
+            etree.SubElement(run, _w("br"))
         else:  # 새로 넣은 탭
             etree.SubElement(run, _w("tab"))
     flush()
@@ -265,11 +272,13 @@ def _split_marker() -> etree._Element:
 
 
 def _text_tokens(text: str) -> list[_Token]:
-    r"""넣을 글자를 run 토큰으로. ``\t`` 은 탭, ``\n`` 은 문단을 나눌 자리 표시."""
+    r"""넣을 글자를 run 토큰으로. ``\t`` 은 탭, ``⏎`` 는 줄바꿈, ``\n`` 은 문단을 나눌 자리 표시."""
     tokens = []
     for ch in text:
         if ch == "\t":
             tokens.append(_Token("tab", "\t"))
+        elif ch == LINE_BREAK:
+            tokens.append(_Token("br", LINE_BREAK))
         elif ch == "\n":
             tokens.append(_Token("x", "", _split_marker()))
         else:
@@ -355,7 +364,7 @@ def _blank_cell(column: etree._Element, value: str) -> etree._Element:
     cell_props = column.find(_w("tcPr"))
     if cell_props is not None:
         copied = _without_tracking(deepcopy(cell_props))
-        for drop in list(copied.iter(_w("cnfStyle"))):
+        for drop in list(copied.iter(_w("cnfStyle"), _w("vMerge"))):
             drop.getparent().remove(drop)
         cell.append(copied)
     first = column.find(_w("p"))
@@ -388,6 +397,228 @@ def _blank_cell(column: etree._Element, value: str) -> etree._Element:
 
 def _within(element: etree._Element, ancestor: etree._Element) -> bool:
     return any(x is ancestor for x in element.iterancestors()) or element is ancestor
+
+
+# --- 표 격자 -------------------------------------------------------------------------------------
+
+
+def _fix_container_end(container: etree._Element) -> None:
+    """본문이 블록 없이 끝나거나 표로 끝나면 빈 문단을 붙인다 (Word 는 문단으로 끝나기를 바란다)."""
+    if _keeps_structure(container):
+        return
+    paragraph = etree.Element(_w("p"))
+    section = container.find(_w("sectPr"))
+    if section is not None:
+        section.addprevious(paragraph)
+    else:
+        container.append(paragraph)
+
+
+_DEFAULT_TEXT_WIDTH = 11906 - 2 * 1440
+"""구역 설정을 모를 때의 본문 너비 (A4 − 좌우 2.54cm, twip)."""
+
+
+def _apply_body_format(
+    paragraph: etree._Element,
+    paragraph_props: etree._Element | None,
+    run_props: etree._Element | None,
+) -> None:
+    """Markdown 으로 만든 본문 문단에 이웃 문단의 서식을 입힌다. 굵게 등 Markdown 서식은 그 위에 둔다."""
+    if paragraph_props is not None and paragraph.find(_w("pPr")) is None:
+        paragraph.insert(0, deepcopy(paragraph_props))
+    if run_props is None:
+        return
+    for run in paragraph.iter(_w("r")):
+        own = run.find(_w("rPr"))
+        merged = deepcopy(run_props)
+        if own is not None:
+            for child in own:
+                name = etree.QName(child).localname
+                if name in _RUN_PROP_ORDER:
+                    _set_prop(
+                        merged, name, {etree.QName(k).localname: v for k, v in child.attrib.items()}
+                    )
+            run.remove(own)
+        run.insert(0, merged)
+
+
+def _int_val(element: etree._Element | None, default: int) -> int:
+    if element is None:
+        return default
+    try:
+        return int(element.get(_w("val"), default))
+    except ValueError:
+        return default
+
+
+def _span(cell: etree._Element) -> int:
+    """칸이 차지하는 격자 열 수 (``w:gridSpan``)."""
+    return max(_int_val(cell.find(f"{_w('tcPr')}/{_w('gridSpan')}"), 1), 1)
+
+
+def _vmerge(cell: etree._Element) -> str | None:
+    """칸의 세로 병합: ``"restart"`` (병합 시작), ``"continue"`` (위 칸에 이어짐), 없으면 ``None``."""
+    merge = cell.find(f"{_w('tcPr')}/{_w('vMerge')}")
+    if merge is None:
+        return None
+    return "restart" if merge.get(_w("val")) == "restart" else "continue"
+
+
+def _set_vmerge(cell: etree._Element, value: str | None) -> None:
+    """칸의 세로 병합을 바꾼다 (``None`` 이면 뗀다). ``w:tcPr`` 자식 순서를 지킨다."""
+    props = cell.find(_w("tcPr"))
+    merge = props.find(_w("vMerge")) if props is not None else None
+    if value is None:
+        if merge is not None:
+            props.remove(merge)
+        return
+    if props is None:
+        props = etree.Element(_w("tcPr"))
+        cell.insert(0, props)
+    if merge is None:
+        merge = etree.Element(_w("vMerge"))
+        position = 0
+        for i, child in enumerate(props):
+            if child.tag in _BEFORE_VMERGE:
+                position = i + 1
+        props.insert(position, merge)
+    if value == "restart":
+        merge.set(_w("val"), "restart")
+    else:
+        merge.attrib.pop(_w("val"), None)
+
+
+_BEFORE_VMERGE = {_w(n) for n in ("cnfStyle", "tcW", "gridSpan", "hMerge")}
+"""칸 서식(``w:tcPr``) 안에서 ``w:vMerge`` 보다 앞에 오는 요소 (스키마 순서)."""
+
+
+def _set_span(cell: etree._Element, span: int) -> None:
+    """칸의 가로 병합 수(``w:gridSpan``)를 바꾼다. 1이면 뗀다."""
+    props = cell.find(_w("tcPr"))
+    element = props.find(_w("gridSpan")) if props is not None else None
+    if span <= 1:
+        if element is not None:
+            props.remove(element)
+        return
+    if props is None:
+        props = etree.Element(_w("tcPr"))
+        cell.insert(0, props)
+    if element is None:
+        element = etree.Element(_w("gridSpan"))
+        position = 0
+        for i, child in enumerate(props):
+            if child.tag in (_w("cnfStyle"), _w("tcW")):
+                position = i + 1
+        props.insert(position, element)
+    element.set(_w("val"), str(span))
+
+
+def _set_cell_width(cell: etree._Element, width: int) -> None:
+    """``dxa`` 로 적힌 칸 너비(``w:tcW``)만 바꾼다 (``pct``·``auto`` 는 그대로)."""
+    element = cell.find(f"{_w('tcPr')}/{_w('tcW')}")
+    if element is not None and element.get(_w("type"), "dxa") == "dxa":
+        element.set(_w("w"), str(max(width, 1)))
+
+
+def _scaled(widths: list[int], total: int) -> list[int]:
+    """너비들을 합이 ``total`` 이 되도록 비율대로 늘리거나 줄인다 (반올림 나머지는 마지막 열에)."""
+    current = sum(widths) or 1
+    result = [max(round(w * total / current), 1) for w in widths]
+    result[-1] = max(result[-1] + total - sum(result), 1)
+    return result
+
+
+def _int_val_attr(element: etree._Element, name: str) -> int:
+    try:
+        return int(element.get(_w(name), "0"))
+    except ValueError:
+        return 0
+
+
+def _row_cells(row: etree._Element) -> list[tuple[etree._Element, int, int]]:
+    """행의 칸마다 ``(w:tc, 시작 격자 열, 끝 격자 열)`` (끝은 포함하지 않음). ``w:gridBefore`` 를 센다."""
+    column = _int_val(row.find(f"{_w('trPr')}/{_w('gridBefore')}"), 0)
+    cells = []
+    for cell in row.iterchildren(_w("tc")):
+        span = _span(cell)
+        cells.append((cell, column, column + span))
+        column += span
+    return cells
+
+
+def _cell_at(row: etree._Element | None, start: int) -> etree._Element | None:
+    """``row`` 에서 격자 열 ``start`` 에서 시작하는 칸."""
+    if row is None:
+        return None
+    return next((c for c, a, _ in _row_cells(row) if a == start), None)
+
+
+def _sibling_row(row: etree._Element, step: str) -> etree._Element | None:
+    """같은 표의 바로 앞(``"before"``)·뒤(``"after"``) 행."""
+    sibling = row.getnext() if step == "after" else row.getprevious()
+    while sibling is not None and sibling.tag != _w("tr"):
+        if sibling.tag in (_w("tr"), _w("tblGrid"), _w("tblPr")):
+            return None
+        sibling = sibling.getnext() if step == "after" else sibling.getprevious()
+    return sibling
+
+
+def _merge_start(cell: etree._Element) -> etree._Element | None:
+    """세로 병합이 이어지는 칸(``continue``)의 시작 칸 (위로 올라가며 찾는다)."""
+    row = cell.getparent()
+    start = next((a for c, a, _ in _row_cells(row) if c is cell), None) if row is not None else None
+    while row is not None and start is not None:
+        row = _sibling_row(row, "before")
+        above = _cell_at(row, start)
+        if above is None or _vmerge(above) is None:
+            return None
+        if _vmerge(above) == "restart":
+            return above
+    return None
+
+
+def _unmerge_row(row: etree._Element) -> None:
+    """지울 행의 세로 병합을 정리한다. 병합 시작 칸의 글자는 아래 칸으로 옮기고, 한 칸만 남은 병합은 뗀다."""
+    above_row, below_row = _sibling_row(row, "before"), _sibling_row(row, "after")
+    for cell, start, _ in _row_cells(row):
+        state = _vmerge(cell)
+        if state is None:
+            continue
+        below = _cell_at(below_row, start)
+        continues = below is not None and _vmerge(below) == "continue"
+        if state == "restart" and continues:
+            assert below is not None
+            for child in list(below):
+                if child.tag in _BLOCKS:
+                    below.remove(child)
+            for child in list(cell):
+                if child.tag != _w("tcPr"):
+                    below.append(child)
+            _set_vmerge(below, "restart")
+            _drop_lonely_merge(below)
+        elif state == "continue" and not continues:
+            above = _cell_at(above_row, start)
+            if above is not None and _vmerge(above) == "restart":
+                _set_vmerge(above, None)  # 구역이 시작 칸 하나만 남는다
+
+
+def _drop_lonely_merge(cell: etree._Element) -> None:
+    """병합 시작 칸 아래에 이어지는 칸이 없으면 병합 표시를 뗀다 (한 칸짜리 병합)."""
+    if _vmerge(cell) != "restart":
+        return
+    row = cell.getparent()
+    start = next((a for c, a, _ in _row_cells(row) if c is cell), None) if row is not None else None
+    if row is None or start is None:
+        return
+    below = _cell_at(_sibling_row(row, "after"), start)
+    if below is None or _vmerge(below) != "continue":
+        _set_vmerge(cell, None)
+
+
+def _continued_cell(paragraph: etree._Element) -> etree._Element | None:
+    """문단이 세로 병합으로 위 칸에 이어진 칸(``continue``) 안에 있으면 그 칸."""
+    cell = next(paragraph.iterancestors(_w("tc")), None)
+    return cell if cell is not None and _vmerge(cell) == "continue" else None
 
 
 def _split_at(
@@ -456,9 +687,10 @@ class Paragraph:
         number: 문단 번호 (1부터, 본문 → 머리글 → 바닥글 순서). 보기의 ``[p12]`` 와 같다.
         location: 위치 표시 (예: ``"표1 2행 1열"``, ``"머리글 1"``). 본문의 일반 문단이면 ``None``.
         style: 제목 스타일 표시 (예: ``"제목 1"``). 제목이 아니면 ``None``.
-        text: 보기 글자 (탭 ``\t``, 줄바꿈 ``\n``, 고칠 수 없는 자리 ``￼``).
+        text: 보기 글자 (탭 ``\t``, 문단 안 줄바꿈 ``⏎``, 고칠 수 없는 자리 ``￼``).
         tracked: 변경 내용 추적 기록이 있는지 (있으면 고칠 수 없다).
         list_level: 목록(글머리표·번호) 문단이면 수준 (1부터). 목록이 아니면 ``None``.
+        list_kind: 목록 종류 (``"번호"`` | ``"글머리표"``). 목록이 아니거나 알 수 없으면 ``None``.
         element: 문단 XML 요소 (``w:p``).
         part: 문단이 든 XML 부분 이름 (예: ``"word/document.xml"``).
         marked: 추적 표기를 넣은 보기 글자 (넣은 글자 ``{+…+}``, 지운 글자 ``{-…-}``).
@@ -478,6 +710,7 @@ class Paragraph:
     part: str
     glyphs: list[_Glyph] = field(repr=False, default_factory=list)
     list_level: int | None = None
+    list_kind: str | None = None
     marked: str = ""
     track_authors: tuple[str, ...] = ()
     track_notes: tuple[str, ...] = ()
@@ -925,6 +1158,24 @@ class DocxDocument:
 
     # --- 문단 ------------------------------------------------------------------------------------
 
+    def _list_formats(self) -> dict[str, dict[int, str]]:
+        """목록 ``numId`` → 수준(0부터)별 번호 형식 (``decimal``·``bullet`` 등). 목록 번호 부분이 없으면 빈 표."""
+        name = self._related("numbering")
+        root = self._part_root(name) if name else None
+        if root is None:
+            return {}
+        abstracts: dict[str, dict[int, str]] = {}
+        for definition in root.iter(_w("abstractNum")):
+            abstracts[definition.get(_w("abstractNumId"), "")] = _level_formats(definition)
+        formats: dict[str, dict[int, str]] = {}
+        for num in root.iter(_w("num")):
+            link = num.find(_w("abstractNumId"))
+            levels = dict(abstracts.get(link.get(_w("val"), "") if link is not None else "", {}))
+            for override in num.iterchildren(_w("lvlOverride")):
+                levels.update(_level_formats(override))
+            formats[num.get(_w("numId"), "")] = levels
+        return formats
+
     def _style_label(self, paragraph: etree._Element) -> str | None:
         ref = paragraph.find(f"{_w('pPr')}/{_w('pStyle')}")
         if ref is None:
@@ -977,6 +1228,7 @@ class DocxDocument:
             result: list[Paragraph] = []
             tables = [0]
             comments = self._comments()
+            formats = self._list_formats()
             state = _CommentState()
             for name, label in self._parts:
                 fields = _FieldState()
@@ -991,6 +1243,7 @@ class DocxDocument:
                             location=where,
                             style=self._style_label(element),
                             list_level=_list_level(element),
+                            list_kind=_list_kind(element, formats),
                             text=text,
                             tracked=flat.tracked,
                             element=element,
@@ -1146,6 +1399,19 @@ class DocxDocument:
         self._roots = {n: etree.fromstring(x, parser) for n, x in roots.items()}
         self._dirty = set(dirty)
         self._paragraphs = None
+        self._refresh_style_names()
+
+    def _refresh_style_names(self) -> None:
+        """스타일 id → 이름 표를 스타일 부분에서 다시 읽는다 (스타일을 더하거나 되돌린 뒤)."""
+        root = self._styles_root()
+        if root is None:
+            return
+        names = {}
+        for style in root.iter(_w("style")):
+            label = style.find(_w("name"))
+            if label is not None:
+                names[style.get(_w("styleId"), "")] = label.get(_w("val"), "")
+        self._styles = names
 
     def _mark(self) -> None:
         """문단마다 지금 번호를 임시 속성으로 단다. 문단을 나누거나 지워도 번호로 원래 문단을 찾는다."""
@@ -1175,6 +1441,14 @@ class DocxDocument:
             return self._insert_row(index, edit)
         if edit.op == "delete_row":
             return self._delete_row(index, edit)
+        if edit.op == "insert_column":
+            return self._insert_column(index, edit)
+        if edit.op == "delete_column":
+            return self._delete_column(index, edit)
+        if edit.op == "delete_table":
+            return self._delete_table(index, edit)
+        if edit.op == "insert_markdown":
+            return self._insert_markdown(index, edit)
         if edit.op == "set_style":
             return self._set_style(index, edit)
         if edit.op in ("accept_changes", "reject_changes"):
@@ -1229,8 +1503,22 @@ class DocxDocument:
         target = self._paragraph(index, edit.paragraph) if edit.paragraph else None
         targets = [target] if target is not None else self.paragraphs
         hits = [(p, start) for p in targets for start in _find_all(p.text, old)]
+        if not hits and "\n" in old:
+            # 예전 보기는 문단 안 줄바꿈을 날것의 줄바꿈으로 보였다. 그렇게 쓴 old_text 도 받는다.
+            soft_old, soft_new = old.replace("\n", LINE_BREAK), new.replace("\n", LINE_BREAK)
+            soft = [(p, start) for p in targets for start in _find_all(p.text, soft_old)]
+            if soft:
+                old, new, hits = soft_old, soft_new, soft
         if not hits:
             raise self._not_found(index, old, targets, edit.paragraph)
+        if LINE_BREAK in old + new and any(
+            LINE_BREAK in _paragraph_text(p.element) for p, _ in hits
+        ):
+            raise EditError(
+                f"Edit {index}: this paragraph contains the character {LINE_BREAK} as text, so "
+                f"{LINE_BREAK} cannot be used there to mean a line break.",
+                index,
+            )
         skipped = 0
         in_urls: list[int] = []
         if edit.replace_all and not targets_url(old):
@@ -1327,6 +1615,19 @@ class DocxDocument:
             raise EditError(
                 f"Edit {index}: old_text is empty, but paragraph p{number} is not empty. Put the "
                 "text to change in old_text.",
+                index,
+            )
+        continued = _continued_cell(paragraph.element)
+        if continued is not None:
+            start = _merge_start(continued)
+            owner = next(
+                (x for x in self.paragraphs if start is not None and _within(x.element, start)),
+                None,
+            )
+            where = f" Edit the merged cell's text in p{self._number(owner)}." if owner else ""
+            raise EditError(
+                f"Edit {index}: paragraph p{number} is in a cell merged with the cell above, so "
+                f"it cannot hold text.{where}",
                 index,
             )
         self._check_untracked(index, paragraph)
@@ -1443,6 +1744,31 @@ class DocxDocument:
             index,
         )
 
+    def _nearby_format(
+        self, reference: Paragraph, position: str
+    ) -> tuple[etree._Element | None, etree._Element | None]:
+        """기준 문단 근처에 넣을 본문 글의 ``(문단 서식, 글자 서식)`` 사본 (구역 나누기·추적 기록 뺌).
+
+        기준 문단이 제목이면 넣는 쪽 이웃 본문 문단을 따르고, 없으면 기본 문단 (``(None, None)``).
+        """
+        template: Paragraph | None = reference
+        if reference.style is not None:
+            # 제목 앞뒤에 넣는 글은 보통 본문이다. 이웃 본문 문단을 따르고, 없으면 기본 문단으로.
+            near = self._neighbour(reference.element, position)
+            template = near if near is not None and near.style is None else None
+        paragraph_props, run_props = None, None
+        if template is not None:
+            original = template.element.find(_w("pPr"))
+            if original is not None:
+                paragraph_props = _without_tracking(deepcopy(original))
+                section = paragraph_props.find(_w("sectPr"))
+                if section is not None:
+                    paragraph_props.remove(section)
+            run_props = _run_props_for(template.element)
+            if run_props is not None:
+                run_props = _without_tracking(run_props)
+        return paragraph_props, run_props
+
     def _insert_paragraph(self, index: int, edit: Edit) -> Change:
         """기준 문단 앞이나 뒤에 새 문단을 넣는다. ``new_text`` 의 줄마다 문단 하나."""
         reference = self._paragraph(index, edit.paragraph)
@@ -1468,22 +1794,7 @@ class DocxDocument:
             paragraph_props = self._style_props(index, edit.style)
             run_props = None
         else:
-            template: Paragraph | None = reference
-            if reference.style is not None:
-                # 제목 앞뒤에 넣는 글은 보통 본문이다. 이웃 본문 문단을 따르고, 없으면 기본 문단으로.
-                near = self._neighbour(reference.element, position)
-                template = near if near is not None and near.style is None else None
-            paragraph_props, run_props = None, None
-            if template is not None:
-                original = template.element.find(_w("pPr"))
-                if original is not None:
-                    paragraph_props = _without_tracking(deepcopy(original))
-                    section = paragraph_props.find(_w("sectPr"))
-                    if section is not None:
-                        paragraph_props.remove(section)
-                run_props = _run_props_for(template.element)
-                if run_props is not None:
-                    run_props = _without_tracking(run_props)
+            paragraph_props, run_props = self._nearby_format(reference, position)
         anchor = reference.element
         for line in lines:
             new = anchor.makeelement(_w("p"))
@@ -1537,6 +1848,8 @@ class DocxDocument:
     def _delete_paragraph(self, index: int, edit: Edit) -> Change:
         """문단을 지운다. 지우면 구조가 깨지는 자리(칸의 마지막 문단 등)면 글자만 비운다."""
         paragraph = self._paragraph(index, edit.paragraph)
+        if edit.whole_section:
+            return self._delete_section(index, edit, paragraph)
         if self._track:
             return self._tracked_delete(index, paragraph)
         number = self._number(paragraph)
@@ -1572,6 +1885,8 @@ class DocxDocument:
         """문단을 서식 그대로 ``target`` 문단 앞이나 뒤로 옮긴다 (같은 부분 안에서만)."""
         paragraph = self._paragraph(index, edit.paragraph)
         target = self._paragraph(index, edit.target, "target")
+        if edit.whole_section:
+            return self._move_section(index, edit, paragraph, target)
         number, destination = self._number(paragraph), self._number(target)
         position = self._position(index, edit)
         if paragraph.element is target.element:
@@ -1604,6 +1919,196 @@ class DocxDocument:
         note = f"moved paragraph p{number} {position} p{destination}: {_shorten(paragraph.text)!r}"
         return Change(index, number, 1, _shorten(paragraph.text), "", kind=edit.op, note=note)
 
+    # --- 섹션 (제목 단위) ---------------------------------------------------------------------------
+
+    def _heading_level(self, element: etree._Element) -> int | None:
+        """본문 문단의 제목 수준 (보기의 ``(제목 N)``, 없으면 문단의 ``w:outlineLvl``). 제목이 아니면 ``None``."""
+        if element.tag != _w("p"):
+            return None
+        label = self._style_label(element)
+        if label and (match := re.fullmatch(r"제목 (\d)", label)):
+            return int(match.group(1))
+        outline = element.find(f"{_w('pPr')}/{_w('outlineLvl')}")
+        if outline is not None:
+            level = _int_val(outline, 9) + 1
+            return level if 1 <= level <= 9 else None
+        return None
+
+    def _section(
+        self, index: int, paragraph: Paragraph, name: str = "paragraph"
+    ) -> list[etree._Element]:
+        """제목 문단부터 같거나 높은 수준의 다음 제목 전까지의 본문 블록."""
+        number = self._number(paragraph)
+        element = paragraph.element
+        level = self._heading_level(element)
+        parent = element.getparent()
+        if level is None or parent is None or parent.tag != _w("body"):
+            raise EditError(
+                f"Edit {index}: whole_section needs {name} to be a heading in the document body "
+                f"(shown as (제목 N) in the view), but p{number} is not. Change it to a heading "
+                "with set_style first, or handle the paragraphs one by one.",
+                index,
+            )
+        blocks = [element]
+        for sibling in element.itersiblings():
+            if sibling.tag == _w("sectPr"):
+                break
+            other = self._heading_level(sibling)
+            if other is not None and other <= level:
+                break
+            blocks.append(sibling)
+        while len(blocks) > 1 and blocks[-1].tag not in _BLOCKS:
+            blocks.pop()  # 다음 제목 앞의 책갈피 등은 다음 섹션 쪽에 둔다
+        return blocks
+
+    def _check_section(
+        self, index: int, blocks: list[etree._Element], label: str, action: str
+    ) -> None:
+        """섹션을 지우거나 옮겨도 되는지: 구역 나누기·추적 기록·밖으로 이어지는 필드·걸친 메모는 거절."""
+        tracked = _TRACKED_ALL | {_w(n) for n in ("pPrChange", "rPrChange", "cellIns", "cellDel")}
+        depth = 0
+        events: dict[str, set[str]] = {}
+        comment_tags = {
+            _w("commentRangeStart"): "start",
+            _w("commentRangeEnd"): "end",
+            _w("commentReference"): "ref",
+        }
+        for block in blocks:
+            for element in block.iter():
+                tag = element.tag
+                if tag == _w("sectPr"):
+                    raise EditError(
+                        f"Edit {index}: {label} contains a section break (page layout change), "
+                        f"so it cannot be {action} as a whole.",
+                        index,
+                    )
+                if tag in tracked:
+                    raise EditError(
+                        f"Edit {index}: {label} has tracked changes. Ask the user to accept or "
+                        "reject them in Word first.",
+                        index,
+                    )
+                if tag == _w("fldChar"):
+                    kind = element.get(_w("fldCharType"))
+                    depth += 1 if kind == "begin" else -1 if kind == "end" else 0
+                elif tag in comment_tags:
+                    events.setdefault(element.get(_w("id"), ""), set()).add(comment_tags[tag])
+        if depth != 0:
+            raise EditError(
+                f"Edit {index}: {label} has a field that continues outside it (such as a table "
+                f"of contents), so it cannot be {action}.",
+                index,
+            )
+        if events and (action == "deleted" or any(len(e) != 3 for e in events.values())):
+            raise EditError(
+                f"Edit {index}: {label} has a comment"
+                + (" that reaches outside it" if action != "deleted" else "")
+                + ". Ask the user to delete the comment in Word first.",
+                index,
+            )
+
+    def _section_label(self, blocks: list[etree._Element], heading: Paragraph) -> str:
+        numbers = [
+            self._number(x) for x in self.paragraphs if any(_within(x.element, b) for b in blocks)
+        ]
+        tables = sum(1 for b in blocks if b.tag == _w("tbl"))
+        paragraphs = sum(1 for b in blocks if b.tag == _w("p"))
+        extent = f"p{numbers[0]}-p{numbers[-1]}" if len(numbers) > 1 else f"p{numbers[0]}"
+        counts = f"{paragraphs} paragraph{'s' if paragraphs > 1 else ''}"
+        if tables:
+            counts += f", {tables} table{'s' if tables > 1 else ''}"
+        return f"section {_head(heading.text)!r} ({extent}: {counts})"
+
+    def _delete_section(self, index: int, edit: Edit, heading: Paragraph) -> Change:
+        """제목 문단부터 그 섹션 끝까지 지운다."""
+        if self._track:
+            raise EditError(
+                f"Edit {index}: whole sections cannot be deleted as tracked changes yet. Ask the "
+                "user whether to delete it without tracking (track_changes false).",
+                index,
+            )
+        blocks = self._section(index, heading)
+        label = self._section_label(blocks, heading)
+        self._check_section(index, blocks, label, "deleted")
+        body = heading.element.getparent()
+        assert body is not None
+        root = self._roots[heading.part]
+        for block in blocks:
+            _drop_bookmark_partners(root, block)
+            body.remove(block)
+        _fix_container_end(body)
+        self._dirty.add(heading.part)
+        self._paragraphs = None
+        return Change(
+            index,
+            self._number(heading),
+            len(blocks),
+            _shorten(heading.text),
+            "",
+            kind=edit.op,
+            note=f"deleted {label}",
+        )
+
+    def _move_section(
+        self, index: int, edit: Edit, heading: Paragraph, target: Paragraph
+    ) -> Change:
+        """제목 문단부터 그 섹션 끝까지 ``target`` 앞이나 뒤로 옮긴다.
+
+        ``after`` 이고 ``target`` 이 제목이면 그 섹션 끝 뒤로 옮긴다 ("2장 뒤로" 는 2장 전체 뒤).
+        """
+        position = self._position(index, edit)
+        blocks = self._section(index, heading)
+        label = self._section_label(blocks, heading)
+        destination = self._number(target)
+        parent = target.element.getparent()
+        if parent is None or parent.tag != _w("body") or target.part != heading.part:
+            raise EditError(
+                f"Edit {index}: target must be a paragraph directly in the document body (not "
+                "in a table cell, header or footer).",
+                index,
+            )
+        if any(target.element is b for b in blocks):
+            raise EditError(
+                f"Edit {index}: target p{destination} is inside the section being moved. Choose "
+                "a paragraph outside it.",
+                index,
+            )
+        self._check_section(index, blocks, label, "moved")
+        anchor = target.element
+        if position == "after" and self._heading_level(anchor) is not None:
+            anchor = self._section(index, target, "target")[-1]
+            where = f"after the section of p{destination}"
+        else:
+            where = f"{position} p{destination}"
+        if any(anchor is b for b in blocks):
+            raise EditError(
+                f"Edit {index}: the section is already there.",
+                index,
+            )
+        body = heading.element.getparent()
+        assert body is not None
+        for block in blocks:
+            body.remove(block)
+        if position == "after":
+            for block in blocks:
+                anchor.addnext(block)
+                anchor = block
+        else:
+            for block in blocks:
+                anchor.addprevious(block)
+        _fix_container_end(body)
+        self._dirty.add(heading.part)
+        self._paragraphs = None
+        return Change(
+            index,
+            self._number(heading),
+            len(blocks),
+            _shorten(heading.text),
+            "",
+            kind=edit.op,
+            note=f"moved {label} {where}",
+        )
+
     # --- 문단 스타일·목록 수준 ---------------------------------------------------------------------
 
     def _set_style(self, index: int, edit: Edit) -> Change:
@@ -1627,13 +2132,17 @@ class DocxDocument:
         if props is None:
             props = etree.Element(_w("pPr"))
             element.insert(0, props)
-        listing = re.fullmatch(r"목록(?:\s*(\d)\s*수준)?", value)
+        listing = re.fullmatch(r"(번호 |글머리표 )?목록(?:\s*(\d)\s*수준)?", value)
         if listing:
-            level = int(listing.group(1) or 1)
+            level = int(listing.group(2) or 1)
             if not 1 <= level <= 9:
                 raise EditError(f"Edit {index}: list levels go from 1 to 9.", index)
+            wanted = listing.group(1).strip() if listing.group(1) else None
             numbering = props.find(_w("numPr"))
-            if numbering is None or _list_level(element) is None:
+            same = paragraph.list_level is not None and (
+                wanted is None or paragraph.list_kind == wanted
+            )
+            if numbering is None or not same:
                 source = next(
                     (
                         x
@@ -1641,20 +2150,25 @@ class DocxDocument:
                             self._neighbour(element, "before"),
                             self._neighbour(element, "after"),
                         )
-                        if x is not None and x.list_level is not None
+                        if x is not None
+                        and x.list_level is not None
+                        and (wanted is None or x.list_kind == wanted)
                     ),
                     None,
                 )
-                if source is None:
+                if source is None and wanted is None:
                     raise EditError(
                         f"Edit {index}: paragraph p{number} is not a list item and there is no "
-                        "list right before or after it to join. Starting a new list is not "
-                        "supported yet.",
+                        'list right before or after it to join. To start a new list, use "번호 '
+                        '목록" (numbered) or "글머리표 목록" (bulleted).',
                         index,
                     )
                 if numbering is not None:
                     props.remove(numbering)
-                numbering = deepcopy(source.element.find(f"{_w('pPr')}/{_w('numPr')}"))
+                if source is not None:
+                    numbering = deepcopy(source.element.find(f"{_w('pPr')}/{_w('numPr')}"))
+                else:
+                    numbering = self._new_list(wanted == "글머리표", level)
                 _insert_ordered(props, numbering)
             level_element = numbering.find(_w("ilvl"))
             if level_element is None:
@@ -1681,6 +2195,17 @@ class DocxDocument:
             note=f"changed paragraph p{number} to {value}: {_shorten(paragraph.text)!r}",
         )
 
+    def _new_list(self, bullet: bool, level: int) -> etree._Element:
+        """새 목록의 ``w:numPr``. 문서가 이미 쓰는 같은 종류 목록 정의를 따르고, 번호 목록은 1부터."""
+        # docx_create 가 이 모듈을 import 하므로 여기서 늦게 부른다 (순환 import).
+        from app.documents.editing.docx_create import new_list_number
+
+        num_id = new_list_number(self._numbering_root(), self._used_lists(), bullet, level - 1)
+        numbering = etree.Element(_w("numPr"))
+        etree.SubElement(numbering, _w("ilvl")).set(_w("val"), str(level - 1))
+        etree.SubElement(numbering, _w("numId")).set(_w("val"), str(num_id))
+        return numbering
+
     # --- 표 행 ----------------------------------------------------------------------------------
 
     def _row_of(self, index: int, edit: Edit) -> tuple[Paragraph, etree._Element, str]:
@@ -1705,32 +2230,15 @@ class DocxDocument:
             )
         return paragraph, row, label
 
-    @staticmethod
-    def _check_unmerged(index: int, label: str, *rows: etree._Element | None) -> None:
-        for row in rows:
-            if row is not None and next(row.iter(_w("vMerge")), None) is not None:
-                raise EditError(
-                    f"Edit {index}: {label} or the row next to it has vertically merged cells, "
-                    "so rows cannot be added or removed there.",
-                    index,
-                )
-
     def _insert_row(self, index: int, edit: Edit) -> Change:
         """표 행 앞이나 뒤에 행을 넣는다. 칸 서식은 기준 행을 따르고 ``cells`` 값을 칸마다 넣는다."""
         paragraph, row, label = self._row_of(index, edit)
         position = self._position(index, edit)
-        neighbour = row.getnext() if position == "after" else row.getprevious()
-        if neighbour is not None and neighbour.tag != _w("tr"):
-            neighbour = None
-        self._check_unmerged(index, label, row, neighbour)
+        # 새 행 바로 아래에 올 행. 그 행의 칸이 위에서 이어진 병합(continue)이면 새 행도 병합 구역 안이다.
+        lower = _sibling_row(row, "after") if position == "after" else row
         template = row
-        after = row.getnext()
-        if (
-            row.find(f"{_w('trPr')}/{_w('tblHeader')}") is not None
-            and after is not None
-            and after.tag == _w("tr")
-            and next(after.iter(_w("vMerge")), None) is None
-        ):
+        after = _sibling_row(row, "after")
+        if row.find(f"{_w('trPr')}/{_w('tblHeader')}") is not None and after is not None:
             template = after  # 머리글 행(굵게·배경) 대신 아래 데이터 행의 모양을 따른다
         cells = [c.replace("\r\n", "\n") for c in (edit.cells or ())]
         columns = list(template.iterchildren(_w("tc")))
@@ -1759,8 +2267,18 @@ class DocxDocument:
                 for drop in list(copied.iter(_w("tblHeader"), _w("cnfStyle"))):
                     drop.getparent().remove(drop)
                 new_row.append(copied)
-        for column, value in zip(columns, cells + [""] * (len(columns) - len(cells)), strict=True):
-            new_row.append(_blank_cell(column, value))
+        merged = 0
+        values = cells + [""] * (len(columns) - len(cells))
+        for (column, start, _), value in zip(_row_cells(template), values, strict=True):
+            below = _cell_at(lower, start)
+            if below is not None and _vmerge(below) == "continue":
+                # 병합 구역 가운데에 넣는다: Word 처럼 구역을 늘리고, 값은 넣지 않는다 (시작 칸에 있다).
+                cell = _blank_cell(column, "")
+                _set_vmerge(cell, "continue")
+                merged += 1 if value.strip() else 0
+            else:
+                cell = _blank_cell(column, value)
+            new_row.append(cell)
         if position == "after":
             row.addnext(new_row)
         else:
@@ -1768,6 +2286,11 @@ class DocxDocument:
         self._dirty.add(paragraph.part)
         self._paragraphs = None
         note = f"inserted a table row {position} {label}: {_shorten(' | '.join(cells))!r}"
+        if merged:
+            note += (
+                f" ({merged} value(s) were left out because those cells are part of a vertically "
+                "merged cell above, which keeps its text)"
+            )
         return Change(
             index,
             self._number(paragraph),
@@ -1781,10 +2304,6 @@ class DocxDocument:
     def _delete_row(self, index: int, edit: Edit) -> Change:
         """``paragraph`` 가 든 표 행을 지운다."""
         paragraph, row, label = self._row_of(index, edit)
-        after = row.getnext()
-        self._check_unmerged(
-            index, label, row, after if after is not None and after.tag == _w("tr") else None
-        )
         table = row.getparent()
         assert table is not None
         if len(list(table.iterchildren(_w("tr")))) == 1:
@@ -1815,6 +2334,7 @@ class DocxDocument:
             inside = [x.text for x in self.paragraphs if _within(x.element, cell) and x.text]
             values.append(" ".join(inside))
         _drop_bookmark_partners(self._roots[paragraph.part], row)
+        _unmerge_row(row)
         table.remove(row)
         self._dirty.add(paragraph.part)
         self._paragraphs = None
@@ -1828,6 +2348,448 @@ class DocxDocument:
             kind=edit.op,
             note=f"deleted table row {label}: {summary!r}",
         )
+
+    # --- Markdown 넣기, 표 지우기 -----------------------------------------------------------------
+
+    def _text_width(self, element: etree._Element) -> int:
+        """``element`` 가 든 구역의 본문 너비 (쪽 너비 − 좌우 여백, twip). 모르면 A4 기본값."""
+        section = None
+        for sibling in element.itersiblings():
+            if sibling.tag == _w("sectPr"):
+                section = sibling
+                break
+            found = sibling.find(f"{_w('pPr')}/{_w('sectPr')}") if sibling.tag == _w("p") else None
+            if found is not None:
+                section = found
+                break
+        if section is None:
+            own = element.find(f"{_w('pPr')}/{_w('sectPr')}")
+            section = own
+        if section is None:
+            return _DEFAULT_TEXT_WIDTH
+        size = section.find(_w("pgSz"))
+        margin = section.find(_w("pgMar"))
+        try:
+            width = int(size.get(_w("w"))) if size is not None else 11906
+            if size is not None and size.get(_w("orient")) == "landscape" and size.get(_w("h")):
+                width = max(width, int(size.get(_w("h"))))
+            left = int(margin.get(_w("left"), "1440")) if margin is not None else 1440
+            right = int(margin.get(_w("right"), "1440")) if margin is not None else 1440
+            gutter = int(margin.get(_w("gutter"), "0")) if margin is not None else 0
+        except (TypeError, ValueError):
+            return _DEFAULT_TEXT_WIDTH
+        text = width - left - right - gutter
+        return text if text > 1000 else _DEFAULT_TEXT_WIDTH
+
+    def _used_lists(self) -> list[str]:
+        """본문 문단이 쓰는 목록 ``numId`` (나온 순서, 중복 없음)."""
+        used: list[str] = []
+        main = self._parts[0][0]
+        for paragraph in self.paragraphs:
+            if paragraph.part != main or paragraph.list_level is None:
+                continue
+            num = paragraph.element.find(f"{_w('pPr')}/{_w('numPr')}/{_w('numId')}")
+            value = num.get(_w("val")) if num is not None else None
+            if value and value not in used:
+                used.append(value)
+        return used
+
+    def _numbering_root(self) -> etree._Element:
+        """목록 번호 부분 (없으면 만든다)."""
+        name = self._related("numbering")
+        root = self._part_root(name) if name else None
+        if root is None:
+            root = etree.Element(_w("numbering"), nsmap={"w": W})
+            name = self._create_part("numbering", name, root, _NUMBERING_TYPE)
+        assert name is not None
+        self._dirty.add(name)
+        return root
+
+    def _styles_or_new(self) -> tuple[str, etree._Element]:
+        """스타일 부분 (없으면 기본 문단 스타일만 든 부분을 만든다)."""
+        name = self._related("styles")
+        root = self._part_root(name) if name else None
+        if root is None:
+            root = etree.fromstring(
+                f'<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" '
+                'w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>'
+            )
+            name = self._create_part("styles", name, root, _STYLES_TYPE)
+            self._dirty.add(name)
+        assert name is not None
+        return name, root
+
+    def _insert_markdown(self, index: int, edit: Edit) -> Change:
+        """기준 문단 앞이나 뒤에 Markdown 내용(제목·문단·목록·표 등)을 넣는다.
+
+        스타일 없는 본문 문단은 ``insert_paragraph`` 처럼 이웃 본문 문단의 서식을 따른다. 본문 바로 아래의
+        문단만 기준으로 쓴다 (표 칸·머리글·바닥글·콘텐츠 컨트롤 안은 거절).
+        """
+        # docx_create 가 이 모듈을 import 하므로 여기서 늦게 부른다 (순환 import).
+        from app.documents.editing.docx_create import markdown_blocks
+
+        reference = self._paragraph(index, edit.paragraph)
+        number = self._number(reference)
+        position = self._position(index, edit)
+        element = reference.element
+        parent = element.getparent()
+        if parent is None or parent.tag != _w("body"):
+            raise EditError(
+                f"Edit {index}: insert_markdown needs a paragraph directly in the document body, "
+                f"but p{number} is inside a table cell, header, footer or content control. Use "
+                "insert_paragraph there instead.",
+                index,
+            )
+        if _FORBIDDEN_CHARS.search(edit.new_text.replace("\t", " ")):
+            raise EditError(f"Edit {index}: new_text contains control characters.", index)
+        styles_name, styles_root = self._styles_or_new()
+        try:
+            made = markdown_blocks(
+                edit.new_text,
+                styles=styles_root,
+                numbering=self._numbering_root,
+                rels=self._main_rels(),
+                text_width=self._text_width(element),
+                used_lists=self._used_lists(),
+            )
+        except EditError as exc:
+            raise EditError(f"Edit {index}: {exc}", index) from exc
+        if "styles" in made.changed:
+            self._dirty.add(styles_name)
+            self._refresh_style_names()
+        if "rels" in made.changed:
+            self._dirty.add(_rels_name(self._parts[0][0]))
+        paragraph_props, run_props = self._nearby_format(reference, position)
+        if paragraph_props is not None:
+            for drop in paragraph_props.findall(_w("numPr")):
+                paragraph_props.remove(drop)  # 목록 문단 옆에 넣어도 본문 글은 목록이 아니다
+        for block in made.plain:
+            _apply_body_format(block, paragraph_props, run_props)
+        blocks = list(made.blocks)
+        before = element if position == "after" else element.getprevious()
+        after = element.getnext() if position == "after" else element
+        if blocks[0].tag == _w("tbl") and before is not None and before.tag == _w("tbl"):
+            blocks.insert(0, etree.Element(_w("p")))
+        if blocks[-1].tag == _w("tbl") and (
+            after is None or after.tag in (_w("tbl"), _w("sectPr"))
+        ):
+            blocks.append(etree.Element(_w("p")))  # 표 뒤에는 문단이 와야 한다
+        anchor = element
+        for block in blocks:
+            if position == "after":
+                anchor.addnext(block)
+                anchor = block
+            else:
+                element.addprevious(block)
+        self._dirty.add(reference.part)
+        self._paragraphs = None
+        parts = []
+        for count, word in (
+            (made.headings, "heading"),
+            (made.paragraphs, "paragraph"),
+            (made.list_items, "list item"),
+        ):
+            if count:
+                parts.append(f"{count} {word}{'s' if count > 1 else ''}")
+        if made.tables:
+            parts.append(f"{made.tables} table{'s' if made.tables > 1 else ''} ({made.rows} rows)")
+        note = f"inserted {', '.join(parts) or 'content'} {position} p{number}"
+        if made.images:
+            note += (
+                f"; {made.images} image(s) were written as their alt text in brackets, because "
+                "images cannot be added"
+            )
+        text = _shorten(" ".join(_paragraph_text(b) for b in made.blocks if b.tag == _w("p")))
+        return Change(index, number, len(blocks), "", text, kind=edit.op, note=note)
+
+    def _delete_table(self, index: int, edit: Edit) -> Change:
+        """``paragraph`` 가 든 (가장 안쪽) 표를 통째로 지운다."""
+        paragraph = self._paragraph(index, edit.paragraph)
+        number = self._number(paragraph)
+        table = next(paragraph.element.iterancestors(_w("tbl")), None)
+        if table is None:
+            raise EditError(
+                f"Edit {index}: paragraph p{number} is not in a table. Set paragraph to a "
+                "paragraph inside the table, such as one labeled (표1 1행 1열).",
+                index,
+            )
+        found = re.findall(r"표\d+", paragraph.location or "")
+        label = found[-1] if found else "the table"
+        tracked = {_w(n) for n in ("ins", "del", "moveFrom", "moveTo", "cellIns", "cellDel")}
+        if any(e.tag in tracked for e in table.iter()):
+            raise EditError(
+                f"Edit {index}: {label} has tracked changes. Ask the user to accept or reject "
+                "them in Word first.",
+                index,
+            )
+        comments = {_w(n) for n in ("commentRangeStart", "commentRangeEnd", "commentReference")}
+        if any(e.tag in comments for e in table.iter()):
+            raise EditError(
+                f"Edit {index}: {label} has a comment. Ask the user to delete the comment in "
+                "Word first.",
+                index,
+            )
+        depth = 0
+        for element in table.iter(_w("fldChar")):
+            kind = element.get(_w("fldCharType"))
+            depth += 1 if kind == "begin" else -1 if kind == "end" else 0
+        if depth != 0:
+            raise EditError(
+                f"Edit {index}: {label} has a field that continues outside it, so it cannot be "
+                "deleted.",
+                index,
+            )
+        rows = list(table.iterchildren(_w("tr")))
+        first_row = (
+            " | ".join(self._cell_text(c) for c, _, _ in _row_cells(rows[0])) if rows else ""
+        )
+        columns = max((len(_row_cells(row)) for row in rows), default=0)
+        parent = table.getparent()
+        assert parent is not None
+        _drop_bookmark_partners(self._roots[paragraph.part], table)
+        previous, following = table.getprevious(), table.getnext()
+        if _keeps_structure(parent, without=table) and not (
+            previous is not None
+            and following is not None
+            and previous.tag == _w("tbl")
+            and following.tag == _w("tbl")
+        ):
+            parent.remove(table)
+        else:
+            # 칸의 유일한 내용이거나 지우면 앞뒤 표가 붙는 자리: 빈 문단을 남긴다.
+            table.addprevious(etree.Element(_w("p")))
+            parent.remove(table)
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        summary = _shorten(first_row)
+        note = f"deleted {label} ({len(rows)} rows x {columns} columns): {summary!r}"
+        return Change(index, number, 1, summary, "", kind=edit.op, note=note)
+
+    # --- 표 열 ----------------------------------------------------------------------------------
+
+    def _column_of(self, index: int, edit: Edit) -> tuple[Paragraph, etree._Element, int, int, str]:
+        """수정의 ``paragraph`` 가 든 칸의 표와 격자 열 범위. ``(문단, w:tbl, 시작, 끝, "표1")``."""
+        paragraph, row, _ = self._row_of(index, edit)
+        table = row.getparent()
+        assert table is not None
+        cell = next(paragraph.element.iterancestors(_w("tc")))
+        start, end = next((a, b) for c, a, b in _row_cells(row) if c is cell)
+        found = re.search(r"표\d+", paragraph.location or "")
+        label = found.group(0) if found else "the table"
+        tracked = {_w(n) for n in ("ins", "del", "moveFrom", "moveTo", "cellIns", "cellDel")}
+        if any(e.tag in tracked for e in table.iter()):
+            raise EditError(
+                f"Edit {index}: {label} has tracked changes, so its columns cannot be changed "
+                "yet. Ask the user to accept or reject them in Word first.",
+                index,
+            )
+        if any(c.tag != _w("tr") and c.tag in (_w("sdt"), _w("customXml")) for c in table):
+            raise EditError(
+                f"Edit {index}: {label} has rows inside content controls, so its columns cannot "
+                "be changed.",
+                index,
+            )
+        return paragraph, table, start, end, label
+
+    @staticmethod
+    def _grid_widths(table: etree._Element) -> tuple[etree._Element | None, list[int]]:
+        """표 격자(``w:tblGrid``)와 열 너비. 격자가 행과 맞지 않으면 너비는 빈 목록 (너비는 고치지 않는다)."""
+        grid = table.find(_w("tblGrid"))
+        columns = 0
+        for row in table.iterchildren(_w("tr")):
+            cells = _row_cells(row)
+            after = _int_val(row.find(f"{_w('trPr')}/{_w('gridAfter')}"), 0)
+            columns = max(columns, (cells[-1][2] if cells else 0) + after)
+        if grid is None:
+            return None, []
+        widths = [_int_val_attr(c, "w") for c in grid.iterchildren(_w("gridCol"))]
+        if len(widths) != columns or not all(widths):
+            return grid, []
+        return grid, widths
+
+    @staticmethod
+    def _sync_cell_widths(table: etree._Element, widths: list[int]) -> None:
+        for row in table.iterchildren(_w("tr")):
+            for cell, a, b in _row_cells(row):
+                _set_cell_width(cell, sum(widths[a:b]))
+
+    def _cell_text(self, cell: etree._Element | None) -> str:
+        if cell is None:
+            return ""
+        return " ".join(x.text for x in self.paragraphs if _within(x.element, cell) and x.text)
+
+    def _column_header(self, rows: list[etree._Element], column: int) -> str:
+        """열 이름: 위에서부터 그 열만 덮는(가로 병합이 아닌) 첫 칸의 글자."""
+        for row in rows:
+            cell = next((c for c, a, b in _row_cells(row) if a == column and b == column + 1), None)
+            if cell is not None:
+                return _shorten(self._cell_text(cell))
+        return ""
+
+    def _insert_column(self, index: int, edit: Edit) -> Change:
+        """``paragraph`` 가 든 칸의 열 앞이나 뒤에 열을 넣는다. ``cells`` 는 위에서 아래로 행마다 값."""
+        paragraph, table, start, end, label = self._column_of(index, edit)
+        position = self._position(index, edit)
+        boundary = end if position == "after" else start
+        rows = list(table.iterchildren(_w("tr")))
+        values = [c.replace("\r\n", "\n") for c in (edit.cells or ())]
+        if len(values) > len(rows):
+            raise EditError(
+                f"Edit {index}: cells has {len(values)} values, but {label} has only {len(rows)} "
+                "rows. Give one value per row, from top to bottom (including the header row).",
+                index,
+            )
+        for value in values:
+            if "\n" in value or _FORBIDDEN_CHARS.search(value) or WALL in value:
+                raise EditError(
+                    f"Edit {index}: cell values cannot contain paragraph breaks, control "
+                    f"characters or {WALL} (use {LINE_BREAK} for a line break inside a cell).",
+                    index,
+                )
+        values += [""] * (len(rows) - len(values))
+        # ("widen", 걸친 칸) 또는 ("after"·"before", 기준 칸): 기준 칸의 뒤나 앞에 새 칸을 넣는다.
+        plan: list[tuple[str, etree._Element]] = []
+        for number, row in enumerate(rows, 1):
+            cells = _row_cells(row)
+            before = _int_val(row.find(f"{_w('trPr')}/{_w('gridBefore')}"), 0)
+            last = cells[-1][2] if cells else before
+            if not cells or boundary < before or boundary > last:
+                raise EditError(
+                    f"Edit {index}: row {number} of {label} has an irregular shape (cells that "
+                    "start late or end early) where the column would go, so the column cannot "
+                    "be added.",
+                    index,
+                )
+            spanning = next((c for c, a, b in cells if a < boundary < b), None)
+            if spanning is not None:
+                plan.append(("widen", spanning))
+                continue
+            ends = {b: c for c, _, b in cells}
+            starts = {a: c for c, a, _ in cells}
+            if position == "after" and boundary in ends or boundary not in starts:
+                plan.append(("after", ends[boundary]))
+            else:
+                plan.append(("before", starts[boundary]))
+        grid, widths = self._grid_widths(table)
+        reference_column = end - 1 if position == "after" else start
+        ignored = 0
+        for (action, element), value in zip(plan, values, strict=True):
+            if action == "widen":
+                _set_span(element, _span(element) + 1)
+                ignored += 1 if value.strip() else 0
+                continue
+            new = _blank_cell(element, value)
+            _set_span(new, 1)
+            if action == "after":
+                element.addnext(new)
+            else:
+                element.addprevious(new)
+        if (
+            grid is not None and widths
+        ):  # 격자가 행과 맞을 때만 너비를 고친다 (표 전체 너비는 그대로)
+            new_col = etree.Element(_w("gridCol"))
+            columns = list(grid.iterchildren(_w("gridCol")))
+            if boundary < len(columns):
+                columns[boundary].addprevious(new_col)
+            else:
+                columns[-1].addnext(new_col)
+            total = sum(widths)
+            widths.insert(boundary, widths[reference_column])
+            widths = _scaled(widths, total)
+            for column, width in zip(grid.iterchildren(_w("gridCol")), widths, strict=True):
+                column.set(_w("w"), str(width))
+            self._sync_cell_widths(table, widths)
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        header = self._column_header(rows, reference_column)
+        where = (
+            f" {position} {header!r}" if header else f" {position} column {reference_column + 1}"
+        )
+        note = f"inserted a column{where} in {label}"
+        if any(v.strip() for v in values):
+            note += f": {_shorten(' | '.join(values))!r}"
+        if ignored:
+            note += (
+                f" ({ignored} value(s) were left out because those rows have a cell merged "
+                "across the new column, which was widened instead)"
+            )
+        return Change(index, self._number(paragraph), 1, "", "", kind=edit.op, note=note)
+
+    def _delete_column(self, index: int, edit: Edit) -> Change:
+        """``paragraph`` 가 든 칸의 열을 지운다. 걸친 가로 병합 칸은 좁힌다."""
+        paragraph, table, start, end, label = self._column_of(index, edit)
+        rows = list(table.iterchildren(_w("tr")))
+        grid, widths = self._grid_widths(table)
+        header = self._column_header(rows, start)
+        removed: list[etree._Element] = []
+        narrowed: list[tuple[etree._Element, int]] = []
+        for number, row in enumerate(rows, 1):
+            cells = _row_cells(row)
+            before = _int_val(row.find(f"{_w('trPr')}/{_w('gridBefore')}"), 0)
+            last = cells[-1][2] if cells else before
+            if start < before or end > last:
+                raise EditError(
+                    f"Edit {index}: row {number} of {label} has an irregular shape (cells that "
+                    "start late or end early) at this column, so it cannot be deleted.",
+                    index,
+                )
+            kept = 0
+            for cell, a, b in cells:
+                overlap = max(0, min(b, end) - max(a, start))
+                if overlap == 0:
+                    kept += 1
+                elif overlap == b - a:
+                    removed.append(cell)
+                else:
+                    narrowed.append((cell, b - a - overlap))
+                    kept += 1
+            if kept == 0:
+                raise EditError(
+                    f"Edit {index}: this is the only column of {label}. Use delete_table to "
+                    "remove the whole table.",
+                    index,
+                )
+        comments = {_w(n) for n in ("commentRangeStart", "commentRangeEnd", "commentReference")}
+        for cell in removed:
+            if any(e.tag in comments for e in cell.iter()):
+                raise EditError(
+                    f"Edit {index}: a cell in this column has a comment. Ask the user to delete "
+                    "the comment in Word first.",
+                    index,
+                )
+            depth = 0
+            for element in cell.iter(_w("fldChar")):
+                kind = element.get(_w("fldCharType"))
+                depth += 1 if kind == "begin" else -1 if kind == "end" else 0
+            if depth != 0:
+                raise EditError(
+                    f"Edit {index}: a cell in this column has a field that continues outside "
+                    "it, so the column cannot be deleted.",
+                    index,
+                )
+        values = [self._cell_text(cell) for cell in removed]
+        root = self._roots[paragraph.part]
+        for cell in removed:
+            _drop_bookmark_partners(root, cell)
+            parent = cell.getparent()
+            assert parent is not None
+            parent.remove(cell)
+        for cell, span in narrowed:
+            _set_span(cell, span)
+        if grid is not None and widths:
+            for column in list(grid.iterchildren(_w("gridCol")))[start:end]:
+                grid.remove(column)
+            total = sum(widths)
+            widths = _scaled(widths[:start] + widths[end:], total)
+            for column, width in zip(grid.iterchildren(_w("gridCol")), widths, strict=True):
+                column.set(_w("w"), str(width))
+            self._sync_cell_widths(table, widths)
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        name = f"{header!r}" if header else f"column {start + 1}"
+        summary = _shorten(" | ".join(values))
+        note = f"deleted column {name} of {label}: {summary!r}"
+        return Change(index, self._number(paragraph), 1, summary, "", kind=edit.op, note=note)
 
     def _merge(self, index: int, edit: Edit) -> Change:
         """문단과 바로 다음 문단을 합친다. 앞 문단의 문단 서식을 쓴다."""
@@ -2409,38 +3371,50 @@ class DocxDocument:
         self._dirty.add(name)
 
     def _create_comments_part(self, name: str | None) -> str:
-        """빈 메모 부분을 만들고 내용 형식에 등록한다.
+        """빈 메모 부분을 만들고 내용 형식에 등록한다 (``_create_part`` 참고)."""
+        root = etree.Element(_w("comments"), nsmap={"w": W})
+        return self._create_part("comments", name, root, _COMMENTS_TYPE)
 
-        ``name`` 은 관계는 있는데 파일이 없을 때의 그 이름이다. 없으면 ``word/comments.xml`` 로 만들고 본문
-        관계도 더한다.
+    def _create_part(
+        self, kind: str, name: str | None, root: etree._Element, content_type: str
+    ) -> str:
+        """본문과 ``kind`` 관계로 이어질 새 부분을 만들고 내용 형식에 등록한다.
+
+        ``name`` 은 관계는 있는데 파일이 없을 때의 그 이름이다. 없으면 본문 옆에 ``{kind}.xml`` 로 만들고
+        본문 관계도 더한다.
         """
         main = self._parts[0][0]
         linked = name is not None
         if name is None:
             folder = main.rsplit("/", 1)[0] + "/" if "/" in main else ""
-            name = f"{folder}comments.xml"
-        self._roots[name] = etree.Element(_w("comments"), nsmap={"w": W})
-        self._register_type(name)
+            name = f"{folder}{kind}.xml"
+        self._roots[name] = root
+        self._register_type(name, content_type)
         if linked:
             return name
-        rels_name = _rels_name(main)
-        rels = self._part_root(rels_name)
-        if rels is None:
-            rels = etree.Element(f"{{{_PKG_REL}}}Relationships", nsmap={None: _PKG_REL})
-            self._roots[rels_name] = rels
+        rels = self._main_rels()
         used = {rel.get("Id") for rel in rels}
         number = 1
         while f"rId{number}" in used:
             number += 1
         rel = etree.SubElement(rels, f"{{{_PKG_REL}}}Relationship")
         rel.set("Id", f"rId{number}")
-        rel.set("Type", _REL_BASE + "comments")
-        rel.set("Target", "comments.xml")
-        self._dirty.add(rels_name)
+        rel.set("Type", _REL_BASE + kind)
+        rel.set("Target", f"{kind}.xml")
+        self._dirty.add(_rels_name(main))
         return name
 
-    def _register_type(self, name: str) -> None:
-        """``[Content_Types].xml`` 에 메모 부분의 내용 형식을 등록한다 (이미 있으면 그대로)."""
+    def _main_rels(self) -> etree._Element:
+        """본문 부분의 관계 (없으면 만든다)."""
+        name = _rels_name(self._parts[0][0])
+        rels = self._part_root(name)
+        if rels is None:
+            rels = etree.Element(f"{{{_PKG_REL}}}Relationships", nsmap={None: _PKG_REL})
+            self._roots[name] = rels
+        return rels
+
+    def _register_type(self, name: str, content_type: str) -> None:
+        """``[Content_Types].xml`` 에 새 부분의 내용 형식을 등록한다 (이미 있으면 그대로)."""
         types = self._part_root("[Content_Types].xml")
         if types is None:
             return
@@ -2448,7 +3422,7 @@ class DocxDocument:
             return
         override = etree.SubElement(types, f"{{{_CONTENT_TYPES}}}Override")
         override.set("PartName", f"/{name}")
-        override.set("ContentType", _COMMENTS_TYPE)
+        override.set("ContentType", content_type)
         self._dirty.add("[Content_Types].xml")
 
     def _review(self, index: int, edit: Edit, *, accept: bool) -> Change:
@@ -2762,7 +3736,17 @@ def _find_all(text: str, value: str) -> list[int]:
 
 
 _ID = re.compile(rb'w:id="(\d+)"')
-_UNTRACKABLE_OPS = {"merge", "move_paragraph", "set_style", "insert_row", "delete_row"}
+_UNTRACKABLE_OPS = {
+    "merge",
+    "move_paragraph",
+    "set_style",
+    "insert_row",
+    "delete_row",
+    "insert_column",
+    "delete_column",
+    "delete_table",
+    "insert_markdown",
+}
 """추적 모드에서 아직 추적으로 남길 수 없는 수정 종류."""
 
 
@@ -3181,6 +4165,28 @@ class _ParagraphEditor:
             _write_run(run, tokens)
 
 
+def _level_formats(parent: etree._Element) -> dict[int, str]:
+    """``w:lvl`` 들의 수준(0부터) → 번호 형식."""
+    levels = {}
+    for level in parent.iterchildren(_w("lvl")):
+        fmt = level.find(_w("numFmt"))
+        if fmt is not None:
+            levels[_int_val_attr(level, "ilvl")] = fmt.get(_w("val"), "")
+    return levels
+
+
+def _list_kind(paragraph: etree._Element, formats: dict[str, dict[int, str]]) -> str | None:
+    """목록 문단의 종류 (``"번호"`` | ``"글머리표"``). 목록이 아니거나 정의를 알 수 없으면 ``None``."""
+    level = _list_level(paragraph)
+    if level is None:
+        return None
+    num = paragraph.find(f"{_w('pPr')}/{_w('numPr')}/{_w('numId')}")
+    fmt = formats.get(num.get(_w("val"), "") if num is not None else "", {}).get(level - 1)
+    if not fmt or fmt == "none":
+        return None
+    return "글머리표" if fmt == "bullet" else "번호"
+
+
 def _list_level(paragraph: etree._Element) -> int | None:
     """문단 서식의 목록 번호(``w:numPr``)로 본 목록 수준 (1부터). ``numId`` 0 은 목록을 끈 것이다."""
     numbering = paragraph.find(f"{_w('pPr')}/{_w('numPr')}")
@@ -3276,10 +4282,11 @@ def _format_line(paragraph: Paragraph) -> str | None:
 def _format_paragraph(paragraph: Paragraph, formatting: bool = False) -> str:
     labels = [x for x in (paragraph.location, paragraph.style) if x]
     if not paragraph.text.strip() and _in_table(paragraph):
-        labels.append("빈 칸")
+        labels.append("위 칸과 병합" if _continued_cell(paragraph.element) is not None else "빈 칸")
     if paragraph.list_level is not None:
         level = paragraph.list_level
-        labels.append("목록" if level == 1 else f"목록 {level}수준")
+        name = f"{paragraph.list_kind} 목록" if paragraph.list_kind else "목록"
+        labels.append(name if level == 1 else f"{name} {level}수준")
     if paragraph.tracked:
         who = ", ".join(paragraph.track_authors) or "작성자 모름"
         labels.append(" · ".join([f"변경 추적: {who}", *paragraph.track_notes]))
