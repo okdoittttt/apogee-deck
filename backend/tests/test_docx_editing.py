@@ -558,7 +558,47 @@ def test_paragraph_numbers_refer_to_the_view_before_the_call():
     changes, failures = doc.apply_some([Edit("가나", "가\n나"), Edit("다", "라", paragraph="p2")])
     assert failures == []
     assert [x.text for x in doc.paragraphs] == ["가", "나", "라"]
-    assert changes[0].note == "split into 2 paragraphs" and changes[1].line == 2
+    assert changes[0].note == "split into 2 paragraphs: '가' | '나'" and changes[1].line == 2
+
+
+def test_replace_all_skips_only_links_that_show_an_address():
+    address = f'<w:hyperlink r:id="rIdL">{r("https://docs.openwebui.com/x")}</w:hyperlink>'
+    named = f'<w:hyperlink r:id="rIdM">{r("openwebui 문서")}</w:hyperlink>'
+    data = make_docx(
+        p(r("소개, "), address)
+        + p(r("주소 www.openwebui.com 참고, "), named)
+        + p(r("openwebui 와 openwebui"))
+    )
+    doc = DocxDocument.from_bytes(data)
+    (change,) = doc.apply_edits([Edit("openwebui", "오픈웹UI", replace_all=True)])
+    assert [x.text for x in doc.paragraphs] == [
+        "소개, https://docs.openwebui.com/x",
+        "주소 www.오픈웹UI.com 참고, 오픈웹UI 문서",
+        "오픈웹UI 와 오픈웹UI",
+    ]
+    assert (change.count, change.skipped, change.places) == (4, 1, (2, 2, 3, 3))
+    assert change.in_urls == (2,)
+
+
+def test_address_link_text_changes_when_old_text_is_the_address():
+    link = f'<w:hyperlink r:id="rIdL">{r("https://docs.오픈웹UI.com/x")}</w:hyperlink>'
+    doc = DocxDocument.from_bytes(make_docx(p(r("링크 "), link)))
+    edits = [Edit("https://docs.오픈웹UI.com", "https://docs.openwebui.com", replace_all=True)]
+    doc.apply_edits(edits)
+    assert doc.paragraphs[0].text == "링크 https://docs.openwebui.com/x"
+
+
+def test_replace_all_only_inside_address_links_fails():
+    link = f'<w:hyperlink r:id="rIdL">{r("https://openwebui.com")}</w:hyperlink>'
+    doc = DocxDocument.from_bytes(make_docx(p(r("링크 "), link)))
+    _, (failure,) = doc.apply_some([Edit("openwebui", "X", replace_all=True)])
+    assert "hyperlinks that show a web address" in str(failure)
+
+
+def test_split_note_shows_each_piece():
+    doc = DocxDocument.from_bytes(make_docx(p(r("첫 문장입니다. " + "둘째 문장" * 10))))
+    (change,) = doc.apply_edits([Edit("입니다. 둘째", "입니다.\n둘째")])
+    assert change.note.startswith("split into 2 paragraphs: '첫 문장입니다.' | '둘째 문장")
 
 
 def test_merge_joins_with_a_space_and_keeps_formatting():

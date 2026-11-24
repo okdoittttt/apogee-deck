@@ -30,6 +30,13 @@ BOM = b"\xef\xbb\xbf"
 SNIPPET_CHARS = 80
 """바뀐 곳 요약(``Change``)에 보여줄 전/후 글자 수의 상한."""
 
+_URL = re.compile(r"(?:https?://|www\.)[!-~]+", re.IGNORECASE)
+"""글자 안의 웹 주소. ``replace_all`` 이 주소 안을 바꿨으면 결과에 알린다.
+
+ASCII 만 주소로 본다. 한국어 문서는 주소 바로 뒤에 조사를 붙여 쓰는 일이 많아서(``https://a.com에서``)
+공백까지를 주소로 보면 뒤 글자까지 주소로 잘못 본다.
+"""
+
 _LINE_PREFIX = re.compile(r"\s*\[L\d+\]")
 """보기 도구(``numbered_lines``)가 줄 앞에 붙이는 번호. 에이전트가 ``old_text`` 에 잘못 넣는 경우를 찾는다."""
 
@@ -127,6 +134,11 @@ class Change:
         kind: 수정 종류 (``Edit.op``).
         note: 결과에 덧붙일 설명 (영어). 글자 바꾸기가 아니면 바뀐 내용을 이 한 줄로 설명한다
             (예: ``"deleted paragraph p7: '…'"``).
+        places: 바꾼 곳마다의 줄(문단) 번호. 같은 줄에서 여러 번 바꾸면 그 번호가 여러 번 들어 있다.
+            ``replace_all`` 이 여러 곳을 바꿨을 때 어디가 바뀌었는지 보여주는 데 쓴다.
+        in_urls: ``replace_all`` 이 웹 주소 안에서 바꾼 곳의 줄(문단) 번호. 바꾸기는 하되 에이전트가
+            의도한 것인지 확인하도록 결과에 알린다.
+        skipped: 바꾸지 않고 건너뛴 곳의 수 (DOCX 에서 주소가 보이는 하이퍼링크 안).
     """
 
     index: int
@@ -136,6 +148,9 @@ class Change:
     after: str
     kind: str = "replace"
     note: str = ""
+    places: tuple[int, ...] = ()
+    in_urls: tuple[int, ...] = ()
+    skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -210,6 +225,46 @@ def _shorten(value: str) -> str:
     return value if len(value) <= SNIPPET_CHARS else value[: SNIPPET_CHARS - 1] + "…"
 
 
+def snippets(old: str, new: str) -> tuple[str, str]:
+    """바뀐 곳 요약에 보여줄 전/후 글자.
+
+    앞부분이 같은 긴 글자는 그대로 자르면 전/후가 똑같아 보인다. 그래서 처음 달라지는 자리가 잘리는
+    범위 밖이면 그 조금 앞부터 ``…`` 를 붙여 보여준다.
+
+    Args:
+        old: 바뀌기 전 글자.
+        new: 바뀐 뒤 글자.
+
+    Returns:
+        ``(전, 후)``. 각각 ``SNIPPET_CHARS`` 까지.
+    """
+    same = 0
+    for a, b in zip(old, new, strict=False):
+        if a != b:
+            break
+        same += 1
+    lead = 20
+    if same > SNIPPET_CHARS - lead and min(len(old), len(new)) > SNIPPET_CHARS:
+        start = same - lead
+        return _shorten("…" + old[start:]), _shorten("…" + new[start:])
+    return _shorten(old), _shorten(new)
+
+
+def targets_url(old: str) -> bool:
+    """찾을 글자가 웹 주소 자체를 가리키는지. 그러면 주소 안을 바꾸는 것이 의도이므로 알리지 않는다."""
+    return "://" in old or old.lower().startswith("www.")
+
+
+def url_spans(text: str) -> list[tuple[int, int]]:
+    """글자 안의 웹 주소 위치 ``(시작, 끝)`` 목록."""
+    return [match.span() for match in _URL.finditer(text)]
+
+
+def in_url(spans: Sequence[tuple[int, int]], start: int, end: int) -> bool:
+    """``[start, end)`` 가 웹 주소와 겹치는지."""
+    return any(start < url_end and url_start < end for url_start, url_end in spans)
+
+
 def _not_found(index: int, old: str) -> EditError:
     message = f"Edit {index}: old_text was not found in the document."
     if _LINE_PREFIX.match(old):
@@ -235,9 +290,23 @@ def _apply_one(text: str, index: int, edit: Edit) -> tuple[str, Change]:
     if first < 0:
         raise _not_found(index, old)
     line = text.count("\n", 0, first) + 1
+    places: tuple[int, ...] = ()
+    in_urls: tuple[int, ...] = ()
     if edit.replace_all:
-        count = text.count(old)
-        text = text.replace(old, new)
+        spans = [] if targets_url(old) else url_spans(text)
+        starts: list[int] = []
+        position = first
+        while position >= 0:
+            starts.append(position)
+            position = text.find(old, position + len(old))
+        places = tuple(text.count("\n", 0, start) + 1 for start in starts)
+        in_urls = tuple(
+            line for line, start in zip(places, starts, strict=True)
+            if in_url(spans, start, start + len(old))
+        )
+        count = len(starts)
+        for start in reversed(starts):
+            text = text[:start] + new + text[start + len(old) :]
     elif text.find(old, first + 1) >= 0:
         raise EditError(
             f"Edit {index}: old_text appears more than once in the document. Include "
@@ -248,7 +317,8 @@ def _apply_one(text: str, index: int, edit: Edit) -> tuple[str, Change]:
     else:
         count = 1
         text = text[:first] + new + text[first + len(old) :]
-    return text, Change(index, line, count, _shorten(old), _shorten(new))
+    before, after = snippets(old, new)
+    return text, Change(index, line, count, before, after, places=places, in_urls=in_urls)
 
 
 def apply_some(text: str, edits: Sequence[Edit]) -> tuple[str, list[Change], list[EditError]]:

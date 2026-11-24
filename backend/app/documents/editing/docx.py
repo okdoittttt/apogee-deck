@@ -27,7 +27,17 @@ from typing import Literal
 
 from lxml import etree
 
-from app.documents.editing.text import EDIT_OPS, SNIPPET_CHARS, Change, Edit, EditError
+from app.documents.editing.text import (
+    EDIT_OPS,
+    SNIPPET_CHARS,
+    Change,
+    Edit,
+    EditError,
+    in_url,
+    snippets,
+    targets_url,
+    url_spans,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 """WordprocessingML 네임스페이스."""
@@ -129,6 +139,28 @@ _HEADING = re.compile(r"heading (\d)$", re.IGNORECASE)
 
 def _shorten(value: str) -> str:
     return value if len(value) <= SNIPPET_CHARS else value[: SNIPPET_CHARS - 1] + "…"
+
+
+def _head(value: str, size: int = 30) -> str:
+    """나뉜 문단을 알아볼 수 있을 만큼의 앞부분."""
+    return value if len(value) <= size else value[: size - 1] + "…"
+
+
+def _in_address_link(paragraph: "Paragraph", start: int, end: int) -> bool:
+    """``[start, end)`` 가 웹 주소를 글자로 보여주는 하이퍼링크(``w:hyperlink``)에 걸치는지."""
+    for glyph in paragraph.glyphs[start:end]:
+        scope = glyph.scope
+        if scope is None or scope.tag != _w("hyperlink"):
+            continue
+        shown = "".join(g.char for g in paragraph.glyphs if g.scope is scope).strip()
+        if url_spans(shown)[:1] == [(0, len(shown))]:
+            return True
+    return False
+
+
+def _paragraph_text(paragraph: etree._Element) -> str:
+    """문단 요소의 ``w:t`` 글자를 이어 붙인 것 (결과 요약용)."""
+    return "".join(t.text or "" for t in paragraph.iter(_w("t")))
 
 
 # --- run 을 토큰으로 ------------------------------------------------------------------------------
@@ -917,6 +949,24 @@ class DocxDocument:
         hits = [(p, start) for p in targets for start in _find_all(p.text, old)]
         if not hits:
             raise self._not_found(index, old, targets, edit.paragraph)
+        skipped = 0
+        in_urls: list[int] = []
+        if edit.replace_all and not targets_url(old):
+            # 주소가 보이는 하이퍼링크의 글자를 바꾸면 보이는 주소와 실제 링크(관계 파일)가 어긋난다.
+            # 링크 대상은 고칠 수 없으니 건너뛴다. 일반 글자 속 주소는 바꾸고 결과에 알린다.
+            kept = [(p, s) for p, s in hits if not _in_address_link(p, s, s + len(old))]
+            skipped = len(hits) - len(kept)
+            if not kept:
+                raise EditError(
+                    f"Edit {index}: all {len(hits)} matches are inside hyperlinks that show a web "
+                    "address. Changing that text would no longer match where the link goes, and "
+                    "link targets cannot be changed yet.",
+                    index,
+                )
+            hits = kept
+            in_urls = [
+                self._number(p) for p, s in hits if in_url(url_spans(p.text), s, s + len(old))
+            ]
         if len(hits) > 1 and not edit.replace_all:
             raise EditError(
                 f"Edit {index}: old_text appears {len(hits)} times. Include more surrounding text "
@@ -928,6 +978,7 @@ class DocxDocument:
             self._check_untracked(index, paragraph)
         first = self._number(hits[0][0])
         count = 0
+        places: list[int] = []
         # 같은 문단 안에서는 뒤에서부터 고쳐야 앞쪽 글자 위치가 그대로다. replace_all 은 겹치지 않게.
         by_paragraph: dict[int, tuple[Paragraph, list[int]]] = {}
         for paragraph, start in hits:
@@ -940,14 +991,30 @@ class DocxDocument:
             for start in reversed(starts):
                 editor.replace(start, old, new)
                 count += 1
+            places.extend([self._number(paragraph)] * len(starts))
             editor.commit()
-            added += len(self._split(index, paragraph)) - 1
+            pieces = self._split(index, paragraph)
+            added += len(pieces) - 1
             self._dirty.add(paragraph.part)
         self._paragraphs = None
-        note = f"split into {added + 1} paragraphs" if added and len(by_paragraph) == 1 else ""
-        if added and len(by_paragraph) > 1:
+        note = ""
+        if added and len(by_paragraph) == 1:
+            heads = " | ".join(repr(_head(_paragraph_text(piece))) for piece in pieces)
+            note = f"split into {added + 1} paragraphs: {heads}"
+        elif added:
             note = f"{added} new paragraphs from line breaks"
-        return Change(index, first, count, _shorten(old), _shorten(new), note=note)
+        before, after = snippets(old, new)
+        return Change(
+            index,
+            first,
+            count,
+            before,
+            after,
+            note=note,
+            places=tuple(places),
+            in_urls=tuple(in_urls),
+            skipped=skipped,
+        )
 
     def _fill(self, index: int, paragraph: Paragraph, new: str) -> Change:
         """빈 문단(빈 표 칸 등)에 글자를 넣는다. 서식은 문단의 run 이나 문단 기호 서식을 따른다."""

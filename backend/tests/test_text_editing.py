@@ -14,6 +14,7 @@ from app.documents.editing.text import (
     decode,
     encode,
     numbered_lines,
+    snippets,
 )
 from app.documents.formats import DocumentKind
 from app.documents.parser import parse
@@ -136,6 +137,39 @@ def test_replace_all():
     edited, changes = apply_edits("x 2024\ny 2024\n", [Edit("2024", "2025", replace_all=True)])
     assert edited == "x 2025\ny 2025\n"
     assert (changes[0].line, changes[0].count) == (1, 2)
+
+
+def test_replace_all_lists_every_line():
+    _, changes = apply_edits("a\nb 2024\nc 2024 2024\n", [Edit("2024", "X", replace_all=True)])
+    assert changes[0].places == (2, 3, 3) and changes[0].line == 2
+
+
+def test_replace_all_changes_addresses_too_and_points_them_out():
+    text = "old.com 소개\n주소 https://old.com/a 와 www.old.com\n"
+    edited, changes = apply_edits(text, [Edit("old.com", "new.com", replace_all=True)])
+    assert edited == "new.com 소개\n주소 https://new.com/a 와 www.new.com\n"
+    assert (changes[0].count, changes[0].in_urls) == (3, (2, 2))
+
+
+def test_address_ends_before_korean_text():
+    text = "자료는 https://a.com/x에서openwebui 설명"
+    _, changes = apply_edits(text, [Edit("openwebui", "X", replace_all=True)])
+    assert changes[0].in_urls == ()
+
+
+def test_no_address_warning_when_old_text_is_an_address():
+    text = "https://docs.a.com/1 https://docs.a.com/2"
+    edits = [Edit("https://docs.a.com", "https://docs.b.com", replace_all=True)]
+    _, changes = apply_edits(text, edits)
+    assert changes[0].in_urls == ()
+
+
+def test_snippets_start_near_the_first_difference():
+    old = "가" * 100 + ". 나머지"
+    before, after = snippets(old, "가" * 100 + ".\n나머지")
+    assert before.startswith("…") and after.startswith("…")
+    assert before != after and len(before) <= SNIPPET_CHARS
+    assert snippets("짧은 글", "짧은 말") == ("짧은 글", "짧은 말")
 
 
 def test_replace_all_still_needs_a_match():

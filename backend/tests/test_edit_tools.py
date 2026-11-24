@@ -134,7 +134,27 @@ async def test_edit_replace_all_summary(monkeypatch):
         ),
         config=CONFIG,
     )
-    assert "1. line 1, 2 places: '2024' -> '2025'" in message.content
+    assert "1. 2 places in 2 lines (1, 2): '2024' -> '2025'" in message.content
+
+
+async def test_edit_replace_all_lists_paragraphs_and_skipped_addresses(monkeypatch):
+    data = b"2024 a\nb\n2024 2024 https://x.example/2024\n"
+    source, _, _ = install(monkeypatch, data=data)
+    tool = document_tools.make_edit_document(Settings())
+    message = await tool.ainvoke(
+        call(
+            "edit_document",
+            {
+                "document_id": str(source.id),
+                "edits": [{"old_text": "2024", "new_text": "2025", "replace_all": True}],
+            },
+        ),
+        config=CONFIG,
+    )
+    assert (
+        "1. 4 places in 2 lines (1, 3 (x3)): '2024' -> '2025' (1 of them inside web addresses "
+        "(line 3): check that the user wanted those changed)" in message.content
+    )
 
 
 async def test_failed_edit_is_an_error_and_saves_nothing(monkeypatch):
@@ -330,7 +350,7 @@ async def test_edit_docx_structure_ops_and_partial_failure(monkeypatch):
         config=CONFIG,
     )
     content = message.content
-    assert "(split into 2 paragraphs)" in content
+    assert "(split into 2 paragraphs: " in content
     assert "2. inserted a table row after 표1 4행: '광주 | 9억 | 정하늘'" in content
     assert "3. deleted paragraph p19: '자세한 내용은 영업팀 위키를 참고한다.'" in content
     assert "Not applied" in content and "- Edit 4: paragraph p99 does not exist" in content
