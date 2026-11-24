@@ -31,7 +31,7 @@ from sqlalchemy.orm import defer
 from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.documents import service as documents
 from app.documents.editing import text
-from app.documents.editing.docx import DocxDocument
+from app.documents.editing.docx import DEFAULT_AUTHOR, DocxDocument
 from app.documents.editing.text import Change, Edit, EditError, TextShape
 from app.documents.formats import MIME_TYPES, DocumentKind, safe_filename
 from app.documents.service import storage_key
@@ -73,6 +73,8 @@ class Revision:
         status: 수정본 상태. 텍스트 형식은 늘 ``ready``. DOCX 는 파싱을 기다린 결과
             (``ready`` | ``processing`` 시간 안에 못 끝남 | ``failed``).
         failures: 적용하지 못한 수정의 이유 (영어, 수정 순서대로). 나머지 수정만 수정본에 들어갔다.
+        tracked: 변경 내용 추적으로 남겼는지 (DOCX). 사용자가 Word 에서 하나씩 수락·거절할 수 있다.
+        author: 추적 기록·메모의 작성자 (DOCX).
     """
 
     id: uuid.UUID
@@ -84,6 +86,8 @@ class Revision:
     changes: list[Change]
     status: str = "ready"
     failures: list[str] = field(default_factory=list)
+    tracked: bool = False
+    author: str = ""
 
 
 def revision_filename(filename: str, revision: int) -> str:
@@ -266,6 +270,8 @@ async def create_revision(
     edits: Sequence[Edit],
     max_bytes: int,
     parse_wait: float = 0.0,
+    track_changes: bool | None = None,
+    author: str = DEFAULT_AUTHOR,
 ) -> Revision:
     """문서에 수정을 적용해 수정본을 만든다. 원본은 바꾸지 않는다.
 
@@ -287,6 +293,9 @@ async def create_revision(
         edits: 적용할 수정 (순서대로).
         max_bytes: 수정본의 최대 크기 (``Settings.document_max_bytes``).
         parse_wait: DOCX 수정본의 파싱을 기다릴 최대 시간(초).
+        track_changes: DOCX 를 변경 내용 추적으로 고칠지. ``None`` 이면 원본에 Word 의 "변경 내용 추적" 이
+            켜져 있을 때만 추적한다. 텍스트 형식에서 ``True`` 면 오류.
+        author: DOCX 추적 기록·메모의 작성자.
 
     Returns:
         만든 수정본.
@@ -308,13 +317,20 @@ async def create_revision(
             "changes are not lost; look at it with view_document_for_edit first."
         )
     content: str | None
+    tracked = False
     if isinstance(loaded, EditableDocx):
-        changes, failures = loaded.document.apply_some(edits)
+        tracked = loaded.document.tracks_revisions if track_changes is None else track_changes
+        changes, failures = loaded.document.apply_some(edits, track=tracked, author=author)
         if not changes:
             raise text.combine_failures(failures)
         new_data = loaded.document.to_bytes()
         content, status = None, "processing"
     else:
+        if track_changes:
+            raise EditError(
+                "Tracked changes only work for Word documents. Edit this file without "
+                "track_changes."
+            )
         before, shape = loaded.text, loaded.shape
         content, changes, failures = text.apply_some(before, edits)
         if not changes:
@@ -363,6 +379,8 @@ async def create_revision(
         changes=changes,
         status=status,
         failures=[str(f) for f in failures],
+        tracked=tracked,
+        author=author if tracked else "",
     )
 
 

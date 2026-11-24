@@ -193,3 +193,24 @@ async def test_docx_structure_edit_request(monkeypatch):
     assert "(표1 5행 1열) 광주" in revised.view(1, 100).text
     (step,) = [s for s in steps if s["type"] == "tool"]
     assert ToolStep.model_validate(step).documents[0].document_id == str(doc.id)
+
+
+async def test_docx_review_request_with_tracked_changes(monkeypatch):
+    # "고친 곳을 Word 에서 확인할 수 있게 고쳐 주고, 의견은 메모로 남겨 줘."
+    source, session, storage = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {"old_text": "120억", "new_text": "125억"},
+            {"op": "comment", "old_text": "전년보다", "new_text": "비교 기준 연도를 적어 주세요."},
+        ],
+        "track_changes": True,
+    }
+    events, _ = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done" and "tracked changes" in finished.output
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    text = revised.view(1, 100).text
+    assert "12{-0-}{+5+}억" in text and "비교 기준 연도를 적어 주세요." in text

@@ -22,8 +22,9 @@ import zipfile
 from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Any, Literal
 
 from lxml import etree
 
@@ -51,9 +52,14 @@ _REL_OFFICE_DOCUMENT = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
 )
 _REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+_CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
+_COMMENTS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 
 WALL = "￼"
 """고칠 수 없는 자리(그림, 각주 번호 등)를 보기에서 나타내는 글자 (OBJECT REPLACEMENT CHARACTER)."""
+
+_TRACK_MARKS = re.compile(r"\{[+-]|[+-]\}")
+"""보기의 추적 표기. 에이전트가 ``old_text`` 에 표기째 복사하는 실수를 찾는다."""
 
 _PARAGRAPH_PREFIX = re.compile(r"\s*\[p\d+\]", re.IGNORECASE)
 """보기(``view``)가 문단 앞에 붙이는 번호. 에이전트가 ``old_text`` 에 잘못 넣는 경우를 찾는다."""
@@ -91,6 +97,7 @@ _RUN_SILENT = {
         "lastRenderedPageBreak",
         "softHyphen",
         "annotationRef",
+        "commentReference",
     )
 }
 
@@ -128,6 +135,16 @@ _TRANSPARENT = {_w("smartTag"), _w("customXml"), _w("dir"), _w("bdo")}
 # 변경 내용 추적 기록. 보이는 글자(ins, moveTo)와 지워진 글자(del, moveFrom).
 _TRACKED_SHOWN = {_w("ins"), _w("moveTo")}
 _TRACKED_HIDDEN = {_w("del"), _w("moveFrom")}
+# 메모 범위 표시. 보기에서 메모가 가리키는 글자를 찾는 데 쓴다.
+_COMMENT_RANGE = {_w("commentRangeStart"), _w("commentRangeEnd")}
+DEFAULT_AUTHOR = "AI 에이전트"
+"""에이전트가 남기는 변경 추적 기록·메모의 기본 작성자."""
+FORMAT_CHANGE = "\0format"
+"""``_Glyph.tracked`` 에서 서식 변경 기록이 있는 run 의 글자를 뜻하는 값 (작성자 이름과 겹치지 않게)."""
+_COMMENT_CHARS = 120
+"""보기에 보여줄 메모 내용 글자 수의 상한."""
+_ANCHOR_CHARS = 40
+"""보기에 보여줄 메모 범위 글자 수의 상한."""
 
 _SKIPPABLE_BLOCK = {
     _w(n) for n in ("bookmarkStart", "bookmarkEnd", "proofErr", "permStart", "permEnd")
@@ -416,6 +433,8 @@ class _Glyph:
         index: run 토큰 목록에서의 위치.
         wall: 고칠 수 없는 글자인지 (그림, 필드 결과, 각주 번호 등).
         scope: 글자를 둘러싼 가장 가까운 하이퍼링크·콘텐츠 컨트롤 (없으면 ``None``).
+        tracked: 추적 기록 안의 글자면 그 기록. 넣은 글자(``w:ins``·``w:moveTo``)는 작성자 이름,
+            서식 변경 기록(``w:rPrChange``)이 있는 run 의 글자는 ``FORMAT_CHANGE``. 아니면 ``None``.
     """
 
     char: str
@@ -423,6 +442,7 @@ class _Glyph:
     index: int
     wall: bool
     scope: etree._Element | None
+    tracked: str | None = None
 
 
 @dataclass
@@ -438,6 +458,12 @@ class Paragraph:
         list_level: 목록(글머리표·번호) 문단이면 수준 (1부터). 목록이 아니면 ``None``.
         element: 문단 XML 요소 (``w:p``).
         part: 문단이 든 XML 부분 이름 (예: ``"word/document.xml"``).
+        marked: 추적 표기를 넣은 보기 글자 (넣은 글자 ``{+…+}``, 지운 글자 ``{-…-}``).
+            추적 기록이 없으면 ``text`` 와 같다. 보기에만 쓰고, ``old_text`` 는 ``text`` 에서 찾는다.
+        track_authors: 추적 기록을 남긴 사람.
+        track_notes: 글자로 보여줄 수 없는 추적 기록 설명 (예: ``"서식 바뀜"``).
+        comments: 이 문단에 표시(``w:commentReference``)가 있는 메모.
+        deleted_at: 숨긴 지운 기록의 ``(text 의 글자 위치, 작성자)``.
     """
 
     number: int
@@ -449,6 +475,28 @@ class Paragraph:
     part: str
     glyphs: list[_Glyph] = field(repr=False, default_factory=list)
     list_level: int | None = None
+    marked: str = ""
+    track_authors: tuple[str, ...] = ()
+    track_notes: tuple[str, ...] = ()
+    comments: tuple["Comment", ...] = ()
+    deleted_at: tuple[tuple[int, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class Comment:
+    """문서에 달린 메모 하나.
+
+    Attributes:
+        id: 메모 id (``w:comment`` 의 ``w:id``). 보기에서는 ``c3`` 처럼 보인다.
+        author: 작성자.
+        text: 메모 내용 (문단은 `` / `` 로 잇는다).
+        anchor: 메모가 가리키는 본문 글자. 범위가 없거나 찾지 못하면 빈 글자.
+    """
+
+    id: str
+    author: str
+    text: str
+    anchor: str = ""
 
 
 class _FieldState:
@@ -465,34 +513,136 @@ class _FieldState:
             self.depth -= 1
 
 
-def _flatten(paragraph: etree._Element, fields: _FieldState) -> tuple[list[_Glyph], bool]:
-    """문단을 글자 목록으로 펼친다. ``(글자 목록, 변경 추적 기록이 있는지)``."""
-    glyphs: list[_Glyph] = []
-    tracked = False
+@dataclass
+class _Flat:
+    """문단을 펼친 결과.
+
+    Attributes:
+        glyphs: 보기 글자 (변경 추적은 수락한 모습: 넣은 글자는 있고 지운 글자는 없다).
+        tracked: 변경 추적 기록(글자·서식·문단 기호)이 있는지.
+        marked: 추적 표기를 넣은 보기 글자 (넣은 글자 ``{+…+}``, 지운 글자 ``{-…-}``).
+        authors: 추적 기록을 남긴 사람 (나온 순서, 중복 없음).
+        notes: 글자로 보여줄 수 없는 추적 기록의 설명 (예: ``"서식 바뀜"``).
+        comments: 메모 표시 ``(종류, 메모 id, 글자 위치)``. 종류는 ``start``·``end``·``ref``.
+        deleted_at: 숨긴 지운 기록(``w:del``·``w:moveFrom``)의 ``(글자 위치, 작성자)``. 위치는 그 앞 글자 수.
+    """
+
+    glyphs: list[_Glyph]
+    tracked: bool = False
+    marked: str = ""
+    authors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    comments: list[tuple[str, str, int]] = field(default_factory=list)
+    deleted_at: list[tuple[int, str]] = field(default_factory=list)
+
+
+def _deleted_text(element: etree._Element) -> str:
+    """지운 기록(``w:del``·``w:moveFrom``) 안의 글자."""
+    parts = []
+    for node in element.iter(_w("delText"), _w("t"), _w("tab")):
+        parts.append("\t" if node.tag == _w("tab") else node.text or "")
+    return "".join(parts)
+
+
+class _CommentState:
+    """메모 범위 글자 모으기. 범위는 문단을 넘을 수 있어 문서 전체를 훑는 동안 이어진다.
+
+    Attributes:
+        parts: 메모 id → 지금까지 모은 범위 글자.
+        open: 아직 끝나지 않은 범위의 메모 id.
+    """
+
+    def __init__(self) -> None:
+        self.parts: dict[str, list[str]] = {}
+        self.open: set[str] = set()
+
+
+def _attach_comments(
+    events: list[tuple[str, str, int]],
+    text: str,
+    state: _CommentState,
+    comments: dict[str, tuple[str, str]],
+) -> tuple["Comment", ...]:
+    """문단의 메모 표시로 이 문단에 보여줄 메모를 만든다. 메모는 표시(``w:commentReference``)가 있는 문단에 붙인다."""
+    found: list[Comment] = []
+    begins = {comment_id: 0 for comment_id in state.open}  # 앞 문단에서 이어진 범위는 문단 처음부터
+    for kind, comment_id, position in events:
+        if kind == "start":
+            state.parts[comment_id] = []
+            state.open.add(comment_id)
+            begins[comment_id] = position
+        elif kind == "end" and comment_id in state.open:
+            state.parts[comment_id].append(text[begins.pop(comment_id, 0) : position])
+            state.open.discard(comment_id)
+        elif kind == "ref" and comment_id in comments:
+            author, body = comments[comment_id]
+            anchor = "".join(state.parts.pop(comment_id, [])).strip()
+            found.append(Comment(comment_id, author, body, anchor))
+    for comment_id, position in begins.items():  # 다음 문단으로 이어지는 범위
+        state.parts[comment_id].append(text[position:] + " ")
+    return tuple(found)
+
+
+def _flatten(paragraph: etree._Element, fields: _FieldState) -> _Flat:
+    """문단을 글자 목록으로 펼친다. 추적 표기를 넣은 글자와 메모 위치도 함께 모은다."""
+    flat = _Flat([])
+    glyphs = flat.glyphs
+    marked: list[str] = []
+
+    def add(glyph: _Glyph) -> None:
+        glyphs.append(glyph)
+        marked.append(glyph.char)
+
+    def note(element: etree._Element, label: str | None = None) -> None:
+        flat.tracked = True
+        author = element.get(_w("author"))
+        if author and author not in flat.authors:
+            flat.authors.append(author)
+        if label and label not in flat.notes:
+            flat.notes.append(label)
 
     def wall(scope: etree._Element | None, char: str = WALL) -> None:
-        glyphs.append(_Glyph(char, None, -1, True, scope))
+        add(_Glyph(char, None, -1, True, scope, track))
+
+    track: str | None = None  # 지금 펼치는 글자를 감싼 넣기 기록의 작성자
 
     def run(element: etree._Element, scope: etree._Element | None, forced_wall: bool) -> None:
+        props = element.find(_w("rPr"))
+        change = props.find(_w("rPrChange")) if props is not None else None
+        tracked = track
+        if change is not None:
+            note(change, "서식 바뀜")
+            tracked = FORMAT_CHANGE
         for index, token in enumerate(_tokens(element)):
             if token.kind == "x":
                 assert token.element is not None
                 tag = token.element.tag
                 if tag == _w("fldChar"):
                     fields.update(token.element)
+                elif tag == _w("commentReference"):
+                    flat.comments.append(("ref", token.element.get(_w("id"), ""), len(glyphs)))
                 elif tag == _w("noBreakHyphen"):
-                    glyphs.append(_Glyph("-", element, index, True, scope))
+                    add(_Glyph("-", element, index, True, scope, tracked))
                 elif tag not in _RUN_SILENT:
-                    glyphs.append(_Glyph(WALL, element, index, True, scope))
+                    add(_Glyph(WALL, element, index, True, scope, tracked))
                 continue
             locked = forced_wall or fields.depth > 0
-            glyphs.append(_Glyph(token.char, element, index, locked, scope))
+            add(_Glyph(token.char, element, index, locked, scope, tracked))
 
     def walk(parent: etree._Element, scope: etree._Element | None, forced_wall: bool) -> None:
-        nonlocal tracked
+        nonlocal track
         for child in parent:
             tag = child.tag
-            if not isinstance(tag, str) or tag in _PARAGRAPH_SILENT:
+            if not isinstance(tag, str):
+                continue
+            if tag in _COMMENT_RANGE:
+                kind = "start" if tag == _w("commentRangeStart") else "end"
+                flat.comments.append((kind, child.get(_w("id"), ""), len(glyphs)))
+                continue
+            if tag == _w("pPr"):
+                paragraph_props(child)
+                continue
+            if tag in _PARAGRAPH_SILENT:
                 continue
             if tag == _w("r"):
                 run(child, scope, forced_wall)
@@ -508,16 +658,38 @@ def _flatten(paragraph: etree._Element, fields: _FieldState) -> tuple[list[_Glyp
                 # 필드 결과 글자는 보여주되 고치지 않는다 (Word 가 다시 계산하는 값).
                 walk(child, scope, True)
             elif tag in _TRACKED_SHOWN:
-                tracked = True
+                note(child)
+                marked.append("{+")
+                outer, track = track, child.get(_w("author")) or "?"
                 walk(child, scope, forced_wall)
+                track = outer
+                marked.append("+}")
             elif tag in _TRACKED_HIDDEN:
-                tracked = True
+                note(child)
+                flat.deleted_at.append((len(glyphs), child.get(_w("author")) or "?"))
+                marked.append("{-" + _deleted_text(child) + "-}")
             else:
                 # 수식, mc:AlternateContent, 알 수 없는 요소: 통째로 벽 하나.
                 wall(scope)
 
+    def paragraph_props(props: etree._Element) -> None:
+        for element in props.iter(_w("pPrChange"), _w("numberingChange")):
+            note(element, "문단 서식 바뀜")
+        mark = props.find(_w("rPr"))
+        if mark is None:
+            return
+        for element in mark:
+            if element.tag == _w("ins"):
+                note(element, "문단 넣음·나눔 추적")
+            elif element.tag == _w("del"):
+                note(element, "문단 합침 추적")
+            elif element.tag == _w("rPrChange"):
+                note(element, "서식 바뀜")
+
     walk(paragraph, None, False)
-    return glyphs, tracked
+    # 이어진 같은 종류 표기는 하나로 (Word·LibreOffice 는 run 마다 기록을 나눠 저장한다).
+    flat.marked = "".join(marked).replace("+}{+", "").replace("-}{-", "")
+    return flat
 
 
 # --- 패키지 ---------------------------------------------------------------------------------------
@@ -604,6 +776,10 @@ class DocxDocument:
         self._dirty: set[str] = set()
         self._paragraphs: list[Paragraph] | None = None
         self._marked_total = 0
+        self._track = False
+        self._author = DEFAULT_AUTHOR
+        self._date = ""
+        self._next_id: int | None = None
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DocxDocument":
@@ -700,6 +876,46 @@ class DocxDocument:
                 names[style.get(_w("styleId"), "")] = label.get(_w("val"), "")
         return names
 
+    def _part_root(self, name: str) -> etree._Element | None:
+        """ZIP 항목의 XML (고치면 저장되도록 ``_roots`` 에 둔다). 없으면 ``None``."""
+        if name not in self._roots:
+            if name not in self._data:
+                return None
+            self._roots[name] = _parse_xml(self._data[name])
+        return self._roots[name]
+
+    def _related(self, kind: str) -> str | None:
+        """본문 부분과 ``kind`` 관계(예: ``"comments"``)로 이어진 ZIP 항목 이름."""
+        main = self._parts[0][0]
+        rels = self._part_root(_rels_name(main))
+        if rels is None:
+            return None
+        for rel in rels.iter(f"{{{_PKG_REL}}}Relationship"):
+            if rel.get("TargetMode") != "External" and rel.get("Type") == _REL_BASE + kind:
+                return _resolve(main, rel.get("Target", ""))
+        return None
+
+    @property
+    def tracks_revisions(self) -> bool:
+        """Word 에서 "변경 내용 추적" 이 켜진 문서인지 (``word/settings.xml`` 의 ``w:trackRevisions``)."""
+        name = self._related("settings")
+        root = self._part_root(name) if name else None
+        flag = root.find(_w("trackRevisions")) if root is not None else None
+        return flag is not None and flag.get(_w("val"), "true") not in ("false", "0", "off")
+
+    def _comments(self) -> dict[str, tuple[str, str]]:
+        """메모 부분(``comments.xml``)의 메모 ``{id: (작성자, 내용)}``. 없으면 빈 사전."""
+        name = self._related("comments")
+        root = self._part_root(name) if name else None
+        if root is None:
+            return {}
+        result = {}
+        for comment in root.iter(_w("comment")):
+            lines = ["".join(t.text or "" for t in p.iter(_w("t"))) for p in comment.iter(_w("p"))]
+            text = " / ".join(line.strip() for line in lines if line.strip())
+            result[comment.get(_w("id"), "")] = (comment.get(_w("author"), ""), text)
+        return result
+
     # --- 문단 ------------------------------------------------------------------------------------
 
     def _style_label(self, paragraph: etree._Element) -> str | None:
@@ -753,22 +969,31 @@ class DocxDocument:
         if self._paragraphs is None:
             result: list[Paragraph] = []
             tables = [0]
+            comments = self._comments()
+            state = _CommentState()
             for name, label in self._parts:
                 fields = _FieldState()
                 blocks = self._walk_blocks(self._roots[name], tables, label, label)
                 for element, where in blocks:
-                    glyphs, tracked = _flatten(element, fields)
+                    flat = _flatten(element, fields)
+                    text = "".join(g.char for g in flat.glyphs)
+                    found = _attach_comments(flat.comments, text, state, comments)
                     result.append(
                         Paragraph(
                             number=len(result) + 1,
                             location=where,
                             style=self._style_label(element),
                             list_level=_list_level(element),
-                            text="".join(g.char for g in glyphs),
-                            tracked=tracked,
+                            text=text,
+                            tracked=flat.tracked,
                             element=element,
                             part=name,
-                            glyphs=glyphs,
+                            glyphs=flat.glyphs,
+                            marked=flat.marked,
+                            track_authors=tuple(flat.authors),
+                            track_notes=tuple(flat.notes),
+                            comments=found,
+                            deleted_at=tuple(flat.deleted_at),
                         )
                     )
             self._paragraphs = result
@@ -797,7 +1022,7 @@ class DocxDocument:
         for paragraph in paragraphs[first - 1 :]:
             if len(shown) >= max(limit, 1):
                 break
-            if paragraph.text.strip() or _in_table(paragraph):
+            if _shown(paragraph):
                 line = _format_paragraph(paragraph)
                 size += len(line) + (1 if shown else 0)
                 if shown and max_chars is not None and size > max_chars:
@@ -808,7 +1033,14 @@ class DocxDocument:
 
     # --- 수정 ------------------------------------------------------------------------------------
 
-    def apply_some(self, edits: Sequence[Edit]) -> tuple[list[Change], list[EditError]]:
+    def apply_some(
+        self,
+        edits: Sequence[Edit],
+        *,
+        track: bool = False,
+        author: str = DEFAULT_AUTHOR,
+        date: str | None = None,
+    ) -> tuple[list[Change], list[EditError]]:
         r"""수정을 순서대로 적용하고, 적용할 수 없는 수정은 그 수정만 되돌리고 건너뛴다.
 
         수정 안의 문단 번호(``paragraph``, ``target``)는 모두 **이 호출을 시작할 때의 번호**다. 앞 수정이
@@ -818,6 +1050,11 @@ class DocxDocument:
         Args:
             edits: 적용할 수정 (1개 이상).
 
+            track: 변경 내용 추적으로 남길지 (Word 에서 하나씩 수락·거절할 수 있게). 추적할 수 없는 수정은
+                실패한다.
+            author: 추적 기록·메모의 작성자. 이 이름으로 넣은 추적 글자는 다시 고칠 수 있다.
+            date: 추적 기록·메모의 시각 (``2026-11-24T10:00:00Z``). 없으면 지금 시각.
+
         Returns:
             ``(성공한 수정의 바뀐 곳 요약, 실패한 수정의 오류)``.
 
@@ -826,6 +1063,8 @@ class DocxDocument:
         """
         if not edits:
             raise EditError("No edits were given.")
+        self._track, self._author = track, author
+        self._date = date or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._mark()
         changes: list[Change] = []
         failures: list[EditError] = []
@@ -841,13 +1080,14 @@ class DocxDocument:
             self._unmark()
         return changes, failures
 
-    def apply_edits(self, edits: Sequence[Edit]) -> list[Change]:
+    def apply_edits(self, edits: Sequence[Edit], **options: Any) -> list[Change]:
         r"""수정을 순서대로 적용한다. 하나라도 실패하면 아무것도 적용하지 않는다.
 
         문단 번호와 ``old_text`` 를 찾는 규칙은 ``apply_some`` 과 같다.
 
         Args:
             edits: 적용할 수정 (1개 이상).
+            **options: ``apply_some`` 의 ``track``·``author``·``date``.
 
         Returns:
             바뀐 곳 요약.
@@ -856,7 +1096,7 @@ class DocxDocument:
             EditError: 수정이 없거나, 어느 수정이든 적용할 수 없을 때 (첫 실패의 오류).
         """
         snapshot = self._snapshot()
-        changes, failures = self.apply_some(edits)
+        changes, failures = self.apply_some(edits, **options)
         if failures:
             self._restore(snapshot)
             raise failures[0]
@@ -885,6 +1125,7 @@ class DocxDocument:
                 element.attrib.pop(_MARK, None)
 
     def _apply(self, index: int, edit: Edit) -> Change:
+        self._refuse_tracking(index, edit)
         if edit.op == "replace":
             return self._replace(index, edit)
         if edit.op == "merge":
@@ -901,6 +1142,10 @@ class DocxDocument:
             return self._delete_row(index, edit)
         if edit.op == "set_style":
             return self._set_style(index, edit)
+        if edit.op in ("accept_changes", "reject_changes"):
+            return self._review(index, edit, accept=edit.op == "accept_changes")
+        if edit.op == "comment":
+            return self._comment(index, edit)
         raise EditError(
             f"Edit {index}: unknown op {edit.op!r}. Use one of: {', '.join(sorted(EDIT_OPS))}.",
             index,
@@ -974,8 +1219,7 @@ class DocxDocument:
                 "search only one paragraph, or set replace_all to change every occurrence.",
                 index,
             )
-        for paragraph, _ in hits:
-            self._check_untracked(index, paragraph)
+        own = {(id(p.element), s): self._check_range(index, p, s, len(old), new) for p, s in hits}
         first = self._number(hits[0][0])
         count = 0
         places: list[int] = []
@@ -987,13 +1231,28 @@ class DocxDocument:
                 starts.append(start)
         added = 0
         for paragraph, starts in by_paragraph.values():
-            editor = _ParagraphEditor(paragraph, index)
-            for start in reversed(starts):
-                editor.replace(start, old, new)
-                count += 1
+            if not self._track:
+                editor = _ParagraphEditor(paragraph, index, self._author)
+                for start in reversed(starts):
+                    editor.replace(start, old, new)
+                editor.commit()
+            else:
+                # 뒤에서부터 하나씩 바로 고친다: 앞쪽 글자의 run·토큰 위치는 그대로 남는다.
+                for start in reversed(starts):
+                    if own[(id(paragraph.element), start)]:
+                        # 우리가 추적으로 넣은 글자는 Word 처럼 그 넣기 기록 안을 바로 고친다.
+                        editor = _ParagraphEditor(paragraph, index, self._author)
+                        editor.replace(start, old, new)
+                        editor.commit()
+                    else:
+                        self._tracked_replace(index, paragraph, start, old, new)
+            count += len(starts)
             places.extend([self._number(paragraph)] * len(starts))
-            editor.commit()
+            _drop_empty_records(paragraph.element)
             pieces = self._split(index, paragraph)
+            if self._track:
+                for piece in pieces[:-1]:
+                    self._mark_paragraph(piece, "ins")
             added += len(pieces) - 1
             self._dirty.add(paragraph.part)
         self._paragraphs = None
@@ -1040,7 +1299,21 @@ class DocxDocument:
         if props is not None:
             run.append(props)
         _write_run(run, _text_tokens(new))
-        added = len(self._split(index, paragraph)) - 1
+        if self._track:
+            # 나눌 자리 표시는 넣기 기록 밖(문단 바로 아래)에 있어야 하므로 줄마다 run 을 나눈다.
+            run.getparent().remove(run)
+            for k, line in enumerate(new.split("\n")):
+                if k:
+                    element.append(_new_run(props, [_Token("x", "", _split_marker())]))
+                if line:
+                    record = self._record("ins")
+                    record.append(_new_run(props, _text_tokens(line)))
+                    element.append(record)
+        pieces = self._split(index, paragraph)
+        if self._track:
+            for piece in pieces[:-1]:
+                self._mark_paragraph(piece, "ins")
+        added = len(pieces) - 1
         self._dirty.add(paragraph.part)
         self._paragraphs = None
         note = "filled an empty paragraph" + (f", split into {added + 1}" if added else "")
@@ -1079,7 +1352,7 @@ class DocxDocument:
             pieces.append(_split_at(current, run, marker))
         if len(pieces) > 1:
             for piece in pieces:
-                glyphs, _ = _flatten(piece, _FieldState())
+                glyphs = _flatten(piece, _FieldState()).glyphs
                 if not "".join(g.char for g in glyphs).strip():
                     raise EditError(
                         f"Edit {index}: the line breaks in new_text would leave an empty paragraph "
@@ -1175,6 +1448,11 @@ class DocxDocument:
             if run_props is not None:
                 run.append(deepcopy(run_props))
             _write_run(run, _text_tokens(line))
+            if self._track:
+                record = self._record("ins")
+                run.addprevious(record)
+                record.append(run)
+                self._mark_paragraph(new, "ins")
             if position == "after":
                 anchor.addnext(new)
                 anchor = new
@@ -1214,6 +1492,8 @@ class DocxDocument:
     def _delete_paragraph(self, index: int, edit: Edit) -> Change:
         """문단을 지운다. 지우면 구조가 깨지는 자리(칸의 마지막 문단 등)면 글자만 비운다."""
         paragraph = self._paragraph(index, edit.paragraph)
+        if self._track:
+            return self._tracked_delete(index, paragraph)
         number = self._number(paragraph)
         self._check_movable(index, paragraph, "deleted")
         element = paragraph.element
@@ -1559,6 +1839,459 @@ class DocxDocument:
             f"(p{self._number(second)}): {_shorten(merged.text)!r}",
         )
 
+    # --- 변경 추적으로 남기기 -----------------------------------------------------------------
+
+    def _record(self, kind: str) -> etree._Element:
+        """작성자·시각·새 id 를 단 추적 기록 요소 (``ins``·``del``)."""
+        element = etree.Element(_w(kind))
+        element.set(_w("id"), str(self._new_id()))
+        element.set(_w("author"), self._author)
+        element.set(_w("date"), self._date)
+        return element
+
+    def _new_id(self) -> int:
+        """문서 안에서 겹치지 않는 새 ``w:id``. 모든 XML 부분의 ``w:id`` 최댓값 다음부터 쓴다."""
+        if self._next_id is None:
+            found = [0]
+            for name, data in self._data.items():
+                if name.endswith(".xml") and name not in self._roots:
+                    found += [int(x) for x in _ID.findall(data)]
+            for root in self._roots.values():
+                found += [int(x) for x in _ID.findall(etree.tostring(root))]
+            self._next_id = max(found) + 1
+        value = self._next_id
+        self._next_id += 1
+        return value
+
+    def _mark_paragraph(self, paragraph: etree._Element, kind: str) -> None:
+        """문단 기호에 추적 기록(``w:pPr/w:rPr/w:ins|del``)을 단다."""
+        props = paragraph.find(_w("pPr"))
+        if props is None:
+            props = etree.Element(_w("pPr"))
+            paragraph.insert(0, props)
+        mark = props.find(_w("rPr"))
+        if mark is None:
+            mark = etree.Element(_w("rPr"))
+            after = [c for c in props if c.tag in (_w("sectPr"), _w("pPrChange"))]
+            if after:
+                after[0].addprevious(mark)
+            else:
+                props.append(mark)
+        mark.insert(0, self._record(kind))
+
+    def _check_range(
+        self, index: int, paragraph: Paragraph, start: int, length: int, new: str
+    ) -> bool:
+        """바꿀 범위가 추적 기록에 닿는지 확인한다. 범위가 모두 우리가 추적으로 넣은 글자면 ``True``.
+
+        다른 사람의 추적 기록(넣은 글자, 서식 변경, 숨은 지운 글자 자리)에 닿으면 거절한다. 추적 기록이 있는
+        문단은 나누지 않는다.
+        """
+        number = self._number(paragraph)
+        span = paragraph.glyphs[start : start + length]
+        marks = {g.tracked for g in span}
+        foreign = {m for m in marks if m is not None and m != self._author}
+        touches_deleted = any(
+            start < at < start + length and who != self._author for at, who in paragraph.deleted_at
+        )
+        if foreign or touches_deleted:
+            raise EditError(
+                f"Edit {index}: the text to change in paragraph p{number} overlaps tracked "
+                "changes (shown as {+ +} / {- -} or a 서식 바뀜 label) that were not made by you. "
+                f'Accept or reject them first (op "accept_changes" or "reject_changes" with '
+                f'paragraph "p{number}"), or change only the text around them.',
+                index,
+            )
+        if "\n" in new and paragraph.tracked:
+            raise EditError(
+                f"Edit {index}: paragraph p{number} has tracked changes, so it cannot be split. "
+                "Accept or reject them first.",
+                index,
+            )
+        return marks == {self._author}
+
+    def _tracked_replace(
+        self, index: int, paragraph: Paragraph, start: int, old: str, new: str
+    ) -> None:
+        r"""``start`` 의 ``old`` 를 ``new`` 로 바꾸되, 지운 글자는 ``w:del``, 넣은 글자는 ``w:ins`` 로 남긴다.
+
+        달라진 부분만 기록한다 (바꾸기 알고리즘과 같은 비교). ``\n`` 은 나눌 자리 표시로 넣고, 문단 기호의
+        추적은 호출한 쪽이 나눈 뒤에 단다.
+        """
+        number = self._number(paragraph)
+        glyphs = paragraph.glyphs
+        span = glyphs[start : start + len(old)]
+        for _, i1, i2, j1, j2 in reversed(_diff_ops(old, new, span)):
+            begin, end, text = start + i1, start + i2, new[j1:j2]
+            removed = glyphs[begin:end]
+            _check_change(index, number, removed, text)
+            if removed:
+                source = removed[0].run
+                groups: list[list[Any]] = []  # [run, 첫 토큰, 마지막 토큰]
+                for glyph in removed:
+                    if groups and groups[-1][0] is glyph.run:
+                        groups[-1][2] = glyph.index
+                    else:
+                        groups.append([glyph.run, glyph.index, glyph.index])
+                spot: tuple[etree._Element, int] | None = None  # 넣을 자리: 맨 오른쪽 조각 뒤
+                for run, low, high in reversed(groups):
+                    piece = _cut_run(run, low, high + 1)
+                    holder = piece.getparent()
+                    assert holder is not None
+                    if _record_author(piece) == self._author:
+                        # 우리가 추적으로 넣은 글자를 지우면 기록 없이 없앤다 (Word 와 같다).
+                        at = holder.index(piece)
+                        holder.remove(piece)
+                        spot = spot or (holder, at)
+                        continue
+                    record = self._record("del")
+                    piece.addprevious(record)
+                    record.append(piece)
+                    for node in piece.iter(_w("t"), _w("instrText")):
+                        node.tag = _w("delText") if node.tag == _w("t") else _w("delInstrText")
+                    spot = spot or (holder, holder.index(record) + 1)
+                assert spot is not None
+                parent, position = spot
+            else:
+                glyph, after = _insert_anchor(
+                    glyphs, begin, (start, start + len(old)), self._author
+                )
+                if glyph is None:
+                    raise EditError(
+                        f"Edit {index}: there is no plain text next to this position in paragraph "
+                        f"p{number} to take formatting from.",
+                        index,
+                    )
+                source = glyph.run
+                if after:
+                    _split_run(source, glyph.index + 1)
+                    parent, position = source.getparent(), source.getparent().index(source) + 1
+                else:
+                    right = _split_run(source, glyph.index)
+                    target = right if right is not None else source
+                    parent, position = target.getparent(), target.getparent().index(target)
+            if not text:
+                continue
+            assert source is not None and parent is not None
+            props = source.find(_w("rPr"))
+            # 우리 넣기 기록 안이면 새 글자도 그 기록에 그대로 들어간다 (기록을 겹치지 않는다).
+            inside_own = parent.tag in _TRACKED_SHOWN and parent.get(_w("author")) == self._author
+            for k, segment in enumerate(text.split("\n")):
+                if k:
+                    # 문단을 나눌 자리 표시는 넣기 기록 밖에 둔다 (나눌 때 문단 바로 아래여야 한다).
+                    marker = _new_run(props, [_Token("x", "", _split_marker())])
+                    parent.insert(position, marker)
+                    position += 1
+                if segment:
+                    run = _new_run(props, _text_tokens(segment))
+                    if not inside_own:
+                        record = self._record("ins")
+                        record.append(run)
+                        run = record
+                    parent.insert(position, run)
+                    position += 1
+
+    def _tracked_delete(self, index: int, paragraph: Paragraph) -> Change:
+        """문단 지우기를 추적으로 남긴다: 글자를 모두 ``w:del`` 로 감싸고 문단 기호에 ``w:del`` 을 단다."""
+        number = self._number(paragraph)
+        self._check_untracked(index, paragraph)
+        element = paragraph.element
+        following = element.getnext()
+        while following is not None and following.tag in _SKIPPABLE_BLOCK:
+            following = following.getnext()
+        if (
+            following is None
+            or following.tag != _w("p")
+            or element.find(f"{_w('pPr')}/{_w('sectPr')}") is not None
+        ):
+            raise EditError(
+                f"Edit {index}: paragraph p{number} is the last paragraph of a table cell, "
+                "section or document, so deleting it cannot be tracked. Delete its text instead "
+                "(replace with an empty new_text).",
+                index,
+            )
+        if any(g.wall and g.run is None for g in paragraph.glyphs):
+            raise EditError(
+                f"Edit {index}: paragraph p{number} contains an object (such as an equation) "
+                "whose deletion cannot be tracked.",
+                index,
+            )
+        runs = [
+            r
+            for r in element.iter(_w("r"))
+            if not any(a.tag == _w("r") for a in r.iterancestors())
+            and _closest_paragraph(r) is element
+        ]
+        for run in runs:
+            record = self._record("del")
+            run.addprevious(record)
+            record.append(run)
+            for node in run.iter(_w("t"), _w("instrText")):
+                node.tag = _w("delText") if node.tag == _w("t") else _w("delInstrText")
+        self._mark_paragraph(element, "del")
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        note = f"deleted paragraph p{number} as a tracked change: {_shorten(paragraph.text)!r}"
+        return Change(
+            index, number, 1, _shorten(paragraph.text), "", kind="delete_paragraph", note=note
+        )
+
+    def _refuse_tracking(self, index: int, edit: Edit) -> None:
+        """추적 모드에서 아직 추적할 수 없는 수정을 거절한다 (추적 없이 몰래 고치지 않는다)."""
+        if self._track and edit.op in _UNTRACKABLE_OPS:
+            raise EditError(
+                f'Edit {index}: op "{edit.op}" cannot be made as a tracked change yet. Ask the '
+                "user whether to make it without tracking (track_changes false).",
+                index,
+            )
+
+    # --- 메모 ----------------------------------------------------------------------------------
+
+    def _comment(self, index: int, edit: Edit) -> Change:
+        """``old_text``(없으면 문단 전체)에 메모를 단다. 메모 내용은 ``new_text``."""
+        body = edit.new_text.replace("\r\n", "\n").strip()
+        if not body:
+            raise EditError(
+                f"Edit {index}: new_text is the comment text and cannot be empty.", index
+            )
+        if _FORBIDDEN_CHARS.search(body):
+            raise EditError(f"Edit {index}: new_text contains control characters.", index)
+        old = edit.old_text.replace("\r\n", "\n")
+        if not old:
+            if not edit.paragraph:
+                raise EditError(
+                    f"Edit {index}: set old_text to the text to comment on, or paragraph (for "
+                    'example "p12") to comment on a whole paragraph.',
+                    index,
+                )
+            paragraph = self._paragraph(index, edit.paragraph)
+            start, end = 0, len(paragraph.glyphs)
+            if not paragraph.text.strip():
+                raise EditError(
+                    f"Edit {index}: paragraph {edit.paragraph} is empty, so there is nothing to "
+                    "comment on.",
+                    index,
+                )
+        else:
+            target = self._paragraph(index, edit.paragraph) if edit.paragraph else None
+            targets = [target] if target is not None else self.paragraphs
+            hits = [(p, s) for p in targets for s in _find_all(p.text, old)]
+            if not hits:
+                raise self._not_found(index, old, targets, edit.paragraph)
+            if len(hits) > 1:
+                raise EditError(
+                    f"Edit {index}: old_text appears {len(hits)} times. Include more surrounding "
+                    'text or set paragraph (for example "p12") so that it matches one place.',
+                    index,
+                )
+            (paragraph, start), end = hits[0], hits[0][1] + len(old)
+        number = self._number(paragraph)
+        comment_id = str(self._new_id())
+        reference = self._reference_run(comment_id)
+        range_start = etree.Element(_w("commentRangeStart"))
+        range_end = etree.Element(_w("commentRangeEnd"))
+        for marker in (range_start, range_end):
+            marker.set(_w("id"), comment_id)
+        element = paragraph.element
+        if old:
+            first, last = paragraph.glyphs[start], paragraph.glyphs[end - 1]
+            if first.run is None or last.run is None or first.scope is not last.scope:
+                raise EditError(
+                    f"Edit {index}: the text to comment on in paragraph p{number} starts or ends "
+                    "at an object or crosses the edge of a hyperlink. Choose text inside or "
+                    "outside the link.",
+                    index,
+                )
+            _split_run(last.run, last.index + 1)
+            right = _split_run(first.run, first.index)
+            begin = right if right is not None else first.run
+            finish = right if right is not None and first.run is last.run else last.run
+            begin.addprevious(range_start)
+            finish.addnext(range_end)
+            range_end.addnext(reference)
+        else:
+            props = element.find(_w("pPr"))
+            element.insert(0 if props is None else element.index(props) + 1, range_start)
+            element.append(range_end)
+            element.append(reference)
+        self._add_comment(comment_id, body)
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        anchor = paragraph.text[start:end]
+        note = f"commented on p{number} {_shorten(anchor)!r}: {_shorten(body)!r}"
+        return Change(index, number, 1, _shorten(anchor), _shorten(body), kind="comment", note=note)
+
+    def _reference_run(self, comment_id: str) -> etree._Element:
+        """본문에 메모 표시를 하는 run (``w:commentReference``)."""
+        run = etree.Element(_w("r"))
+        style = self._style_id("annotation reference")
+        if style:
+            props = etree.SubElement(run, _w("rPr"))
+            etree.SubElement(props, _w("rStyle")).set(_w("val"), style)
+        etree.SubElement(run, _w("commentReference")).set(_w("id"), comment_id)
+        return run
+
+    def _style_id(self, name: str) -> str | None:
+        """스타일 이름(소문자 비교)의 id. 문서에 없으면 ``None``."""
+        return next((i for i, n in self._styles.items() if n.lower() == name), None)
+
+    def _add_comment(self, comment_id: str, body: str) -> None:
+        """메모 부분에 메모를 더한다. 메모 부분이 없으면 만들고 관계·내용 형식을 등록한다."""
+        name = self._related("comments")
+        root = self._part_root(name) if name else None
+        if root is None:
+            name = self._create_comments_part(name)
+            root = self._roots[name]
+        comment = etree.SubElement(root, _w("comment"))
+        comment.set(_w("id"), comment_id)
+        comment.set(_w("author"), self._author)
+        comment.set(_w("date"), self._date)
+        initials = "".join(word[0] for word in self._author.split() if word)[:4]
+        if initials:
+            comment.set(_w("initials"), initials)
+        text_style = self._style_id("annotation text")
+        reference_style = self._style_id("annotation reference")
+        for k, line in enumerate(body.split("\n")):
+            paragraph = etree.SubElement(comment, _w("p"))
+            if text_style:
+                props = etree.SubElement(paragraph, _w("pPr"))
+                etree.SubElement(props, _w("pStyle")).set(_w("val"), text_style)
+            if k == 0:
+                mark = etree.SubElement(paragraph, _w("r"))
+                if reference_style:
+                    style = etree.SubElement(etree.SubElement(mark, _w("rPr")), _w("rStyle"))
+                    style.set(_w("val"), reference_style)
+                etree.SubElement(mark, _w("annotationRef"))
+            if line:
+                paragraph.append(_new_run(None, _text_tokens(line.replace("\t", " "))))
+        self._dirty.add(name)
+
+    def _create_comments_part(self, name: str | None) -> str:
+        """빈 메모 부분을 만들고 내용 형식에 등록한다.
+
+        ``name`` 은 관계는 있는데 파일이 없을 때의 그 이름이다. 없으면 ``word/comments.xml`` 로 만들고 본문
+        관계도 더한다.
+        """
+        main = self._parts[0][0]
+        linked = name is not None
+        if name is None:
+            folder = main.rsplit("/", 1)[0] + "/" if "/" in main else ""
+            name = f"{folder}comments.xml"
+        self._roots[name] = etree.Element(_w("comments"), nsmap={"w": W})
+        self._register_type(name)
+        if linked:
+            return name
+        rels_name = _rels_name(main)
+        rels = self._part_root(rels_name)
+        if rels is None:
+            rels = etree.Element(f"{{{_PKG_REL}}}Relationships", nsmap={None: _PKG_REL})
+            self._roots[rels_name] = rels
+        used = {rel.get("Id") for rel in rels}
+        number = 1
+        while f"rId{number}" in used:
+            number += 1
+        rel = etree.SubElement(rels, f"{{{_PKG_REL}}}Relationship")
+        rel.set("Id", f"rId{number}")
+        rel.set("Type", _REL_BASE + "comments")
+        rel.set("Target", "comments.xml")
+        self._dirty.add(rels_name)
+        return name
+
+    def _register_type(self, name: str) -> None:
+        """``[Content_Types].xml`` 에 메모 부분의 내용 형식을 등록한다 (이미 있으면 그대로)."""
+        types = self._part_root("[Content_Types].xml")
+        if types is None:
+            return
+        if any(o.get("PartName") == f"/{name}" for o in types):
+            return
+        override = etree.SubElement(types, f"{{{_CONTENT_TYPES}}}Override")
+        override.set("PartName", f"/{name}")
+        override.set("ContentType", _COMMENTS_TYPE)
+        self._dirty.add("[Content_Types].xml")
+
+    def _review(self, index: int, edit: Edit, *, accept: bool) -> Change:
+        """변경 추적 기록을 수락하거나 거절한다. ``paragraph`` 가 없으면 문서 전체(본문·머리글·바닥글)."""
+        verb = "accept" if accept else "reject"
+        if edit.paragraph:
+            paragraph = self._paragraph(index, edit.paragraph)
+            number = self._number(paragraph)
+            scope = [paragraph.element]
+            where = f"paragraph p{number}"
+            regions = [(paragraph.part, paragraph.element)]
+        else:
+            number = 1
+            regions = [(name, self._roots[name]) for name, _ in self._parts]
+            scope = [p for _, root in regions for p in root.iter(_w("p"))]
+            where = "the document"
+        for _, region in regions:
+            for element in region.iter():
+                parent = element.getparent()
+                unsupported = element.tag in _UNSUPPORTED_TRACKING or (
+                    element.tag in _TRACKED_ALL and parent is not None and parent.tag == _w("trPr")
+                )
+                if unsupported:
+                    raise EditError(
+                        f"Edit {index}: {where} has tracked changes to tables, sections or "
+                        f"numbering, which cannot be {verb}ed here yet. Ask the user to "
+                        f"{verb} them in Word, or {verb} the changes of one paragraph at a time "
+                        "with paragraph.",
+                        index,
+                    )
+        count = 0
+        for element in scope:
+            count += _review_content(element, accept)
+        joins: list[etree._Element] = []
+        for element in scope:
+            mark = element.find(f"{_w('pPr')}/{_w('rPr')}")
+            if mark is None:
+                continue
+            for record in list(mark):
+                if record.tag not in _TRACKED_ALL:
+                    continue
+                count += 1
+                inserted = record.tag in _TRACKED_SHOWN
+                mark.remove(record)
+                if inserted != accept:  # 넣은 문단 기호를 거절하거나, 지운 문단 기호를 수락
+                    joins.append(element)
+        for element in reversed(joins):
+            self._join_next(index, element)
+        if not count:
+            raise EditError(f"Edit {index}: {where} has no tracked changes to {verb}.", index)
+        for name, _ in regions:
+            self._dirty.add(name)
+        self._paragraphs = None
+        note = f"{verb}ed {count} tracked change{'s' if count > 1 else ''} in {where}"
+        if joins:
+            note += f" ({len(joins)} paragraph{'s' if len(joins) > 1 else ''} joined)"
+        return Change(index, number, count, "", "", kind=edit.op, note=note)
+
+    def _join_next(self, index: int, element: etree._Element) -> None:
+        """문단 기호가 없어진 문단을 다음 문단 앞에 붙인다 (Word 와 같이 다음 문단의 서식을 따른다)."""
+        following = element.getnext()
+        while following is not None and following.tag in _SKIPPABLE_BLOCK:
+            following = following.getnext()
+        props = element.find(_w("pPr"))
+        if (
+            following is None
+            or following.tag != _w("p")
+            or (props is not None and props.find(_w("sectPr")) is not None)
+        ):
+            raise EditError(
+                f"Edit {index}: a tracked paragraph break at the end of a table cell, section "
+                "or document cannot be handled here. Ask the user to handle it in Word.",
+                index,
+            )
+        target_props = following.find(_w("pPr"))
+        position = 0 if target_props is None else following.index(target_props) + 1
+        for child in list(element):
+            if child.tag == _w("pPr"):
+                continue
+            following.insert(position, child)
+            position += 1
+        parent = element.getparent()
+        assert parent is not None
+        parent.remove(element)
+
     def _check_untracked(self, index: int, paragraph: Paragraph) -> None:
         if paragraph.tracked:
             raise EditError(
@@ -1585,6 +2318,12 @@ class DocxDocument:
             )
         elif _PARAGRAPH_PREFIX.match(old):
             message += " Do not include paragraph number prefixes such as [p12] in old_text."
+        elif _TRACK_MARKS.search(old):
+            message += (
+                " Do not copy the tracked change marks {+ +} and {- -}: old_text is searched in "
+                "the text with tracked changes accepted (inserted text kept without marks, "
+                "deleted text left out)."
+            )
         else:
             message += (
                 " Copy it exactly from the view, including spaces and punctuation, "
@@ -1608,6 +2347,12 @@ class DocxDocument:
                 if info.filename in self._dirty:
                     data = _serialize(self._roots[info.filename], data)
                 zf.writestr(info, data, compress_type=info.compress_type)
+            for name, root in self._roots.items():  # 이번에 새로 만든 부분 (예: 메모)
+                if name not in self._data:
+                    data = _serialize(
+                        root, b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                    )
+                    zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
         return buffer.getvalue()
 
 
@@ -1621,6 +2366,222 @@ def _find_all(text: str, value: str) -> list[int]:
     return found
 
 
+_ID = re.compile(rb'w:id="(\d+)"')
+_UNTRACKABLE_OPS = {"merge", "move_paragraph", "set_style", "insert_row", "delete_row"}
+"""추적 모드에서 아직 추적으로 남길 수 없는 수정 종류."""
+
+
+def _diff_ops(old: str, new: str, span: list[_Glyph]) -> list[tuple[str, int, int, int, int]]:
+    """``old`` → ``new`` 로 바꿀 때 고칠 부분 (``SequenceMatcher`` opcodes, 같은 부분 제외).
+
+    많이 다르면 통째로 바꾼다 (글자 조각마다 서식이 흩어지지 않게). 고칠 수 없는 글자가 있으면 그 글자를
+    지키도록 글자 단위로 비교한다.
+    """
+    matcher = SequenceMatcher(None, old, new, autojunk=False)
+    if matcher.ratio() < WHOLE_REPLACE_RATIO and not any(g.wall for g in span):
+        return [("replace", 0, len(old), 0, len(new))]
+    return [op for op in matcher.get_opcodes() if op[0] != "equal"]
+
+
+def _check_change(index: int, number: int, removed: list[_Glyph], text: str) -> None:
+    """글자 바꾸기 한 조각을 적용할 수 있는지 (벽 글자, 링크 경계, 새 벽 글자)."""
+    if WALL in text:
+        raise EditError(
+            f"Edit {index}: new_text contains {WALL}, which stands for an image or other object. "
+            "Objects cannot be added.",
+            index,
+        )
+    if any(g.wall for g in removed):
+        raise EditError(
+            f"Edit {index}: the text to change in paragraph p{number} touches an image, field, "
+            f"footnote mark or symbol (shown as {WALL} or a field value) that cannot be edited. "
+            "Narrow old_text so that it changes only plain text around it.",
+            index,
+        )
+    if len({id(g.scope) for g in removed}) > 1:
+        raise EditError(
+            f"Edit {index}: the text to change in paragraph p{number} crosses the edge of a "
+            "hyperlink or content control. Change the text inside and outside it separately.",
+            index,
+        )
+
+
+def _insert_anchor(
+    glyphs: list[_Glyph], begin: int, match: tuple[int, int], own: str
+) -> tuple[_Glyph | None, bool]:
+    """넣을 글자가 서식을 따를 글자와, 그 글자 뒤(``True``)에 넣을지 앞에 넣을지.
+
+    ``old_text`` 안의 바로 앞 글자, 바로 뒤 글자, 밖의 바로 앞, 바로 뒤 순서로 본다. 고칠 수 없는 글자와
+    남의 추적 글자는 따르지 않는다.
+    """
+    low, high = match
+    candidates = [
+        (begin - 1, True, begin - 1 >= low),
+        (begin, False, begin < high),
+        (begin - 1, True, True),
+        (begin, False, True),
+    ]
+    for position, after, allowed in candidates:
+        if not allowed or not 0 <= position < len(glyphs):
+            continue
+        glyph = glyphs[position]
+        if not glyph.wall and glyph.run is not None and glyph.tracked in (None, own):
+            return glyph, after
+    return None, False
+
+
+def _new_run(props: etree._Element | None, tokens: list[_Token]) -> etree._Element:
+    """서식(추적 기록은 뺀 사본)과 토큰으로 새 run 을 만든다."""
+    run = etree.Element(_w("r"))
+    if props is not None:
+        run.append(_without_tracking(deepcopy(props)))
+    _write_run(run, tokens)
+    return run
+
+
+def _split_run(run: etree._Element, at: int) -> etree._Element | None:
+    """Run 을 토큰 ``at`` 앞에서 둘로 나눈다. 원래 요소가 앞쪽을 갖고, 새로 만든 뒤쪽 run 을 돌려준다.
+
+    ``at`` 이 처음이나 끝이면 나누지 않고 ``None``. 앞쪽 토큰의 위치가 그대로라서 앞 글자를 가리키는
+    ``_Glyph`` 는 계속 맞다.
+    """
+    tokens = _tokens(run)
+    if at <= 0 or at >= len(tokens):
+        return None
+    props = run.find(_w("rPr"))
+    right = etree.Element(_w("r"))
+    if props is not None:
+        right.append(deepcopy(props))
+    _write_run(right, tokens[at:])
+    run.addnext(right)
+    _write_run(run, tokens[:at])
+    return right
+
+
+def _cut_run(run: etree._Element, low: int, high: int) -> etree._Element:
+    """Run 의 토큰 ``[low, high)`` 만 든 run 을 떼어 낸다 (앞·뒤는 따로 남는다)."""
+    _split_run(run, high)
+    middle = _split_run(run, low)
+    return middle if middle is not None else run
+
+
+def _record_author(run: etree._Element) -> str | None:
+    """Run 을 감싼 넣기 기록(``w:ins``·``w:moveTo``)의 작성자. 감싸지 않았으면 ``None``."""
+    parent = run.getparent()
+    while parent is not None and parent.tag != _w("p"):
+        if parent.tag in _TRACKED_SHOWN:
+            return parent.get(_w("author")) or "?"
+        parent = parent.getparent()
+    return None
+
+
+def _closest_paragraph(element: etree._Element) -> etree._Element | None:
+    """요소를 감싼 가장 가까운 문단 (글상자 안 문단과 구분하려고)."""
+    return next((a for a in element.iterancestors(_w("p"))), None)
+
+
+def _drop_empty_records(paragraph: etree._Element) -> None:
+    """글자를 모두 지워 비게 된 추적 기록(``w:ins`` 등)을 지운다."""
+    for record in list(paragraph.iter(*_TRACKED_SHOWN, *_TRACKED_HIDDEN)):
+        parent = record.getparent()
+        if parent is not None and parent.tag != _w("rPr") and len(record) == 0:
+            parent.remove(record)
+
+
+_TRACKED_ALL = _TRACKED_SHOWN | _TRACKED_HIDDEN
+_UNSUPPORTED_TRACKING = {
+    _w(n)
+    for n in (
+        "cellIns",
+        "cellDel",
+        "cellMerge",
+        "tblPrChange",
+        "tblPrExChange",
+        "tblGridChange",
+        "trPrChange",
+        "tcPrChange",
+        "sectPrChange",
+        "numberingChange",
+        "customXmlInsRangeStart",
+        "customXmlDelRangeStart",
+        "customXmlMoveFromRangeStart",
+        "customXmlMoveToRangeStart",
+    )
+}
+"""수락·거절을 아직 다루지 않는 추적 기록 (표·구역·번호 구조)."""
+_MOVE_RANGES = {
+    _w(n) for n in ("moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd")
+}
+
+
+def _unwrap(element: etree._Element) -> None:
+    """요소를 벗기고 안의 내용을 그 자리에 둔다."""
+    parent = element.getparent()
+    if parent is None:
+        return
+    position = parent.index(element)
+    for child in list(element):
+        parent.insert(position, child)
+        position += 1
+    parent.remove(element)
+
+
+def _review_content(paragraph: etree._Element, accept: bool) -> int:
+    """문단 안 글자·서식의 추적 기록을 수락(``accept``)하거나 거절한다. 다룬 기록 수.
+
+    문단 기호의 기록(``w:pPr/w:rPr/w:ins`` 등)은 다루지 않는다 (문단을 합쳐야 해서 호출한 쪽이 한다).
+    """
+    count = 0
+    for record in list(paragraph.iter(*_TRACKED_ALL)):
+        parent = record.getparent()
+        if parent is None or parent.tag in (_w("rPr"), _w("trPr")):
+            continue
+        count += 1
+        shown = record.tag in _TRACKED_SHOWN
+        if shown != accept:  # 넣은 글자 거절, 지운 글자 수락: 글자째 없앤다
+            parent.remove(record)
+            continue
+        if not shown:  # 지운 글자 거절: 되살린다
+            for node in record.iter(_w("delText"), _w("delInstrText")):
+                node.tag = _w("t") if node.tag == _w("delText") else _w("instrText")
+        _unwrap(record)
+    for change in list(paragraph.iter(_w("rPrChange"))):
+        count += 1
+        props = change.getparent()
+        assert props is not None
+        if not accept:
+            old = change.find(_w("rPr"))
+            keep = [c for c in props if c.tag in _TRACKED_ALL]
+            for child in list(props):
+                props.remove(child)
+            for child in keep:
+                props.append(child)
+            for child in old if old is not None else []:
+                props.append(deepcopy(child))
+        else:
+            props.remove(change)
+    for change in list(paragraph.iter(_w("pPrChange"))):
+        count += 1
+        props = change.getparent()
+        assert props is not None
+        if not accept:
+            old = change.find(_w("pPr"))
+            keep = [c for c in props if c.tag in (_w("rPr"), _w("sectPr"))]
+            for child in list(props):
+                props.remove(child)
+            for child in old if old is not None else []:
+                props.append(deepcopy(child))
+            for child in keep:
+                props.append(child)
+        else:
+            props.remove(change)
+    for marker in list(paragraph.iter(*_MOVE_RANGES)):
+        parent = marker.getparent()
+        if parent is not None:
+            parent.remove(marker)
+    return count
+
+
 class _ParagraphEditor:
     """문단 하나의 글자를 run 토큰 단위로 고친다.
 
@@ -1628,13 +2589,15 @@ class _ParagraphEditor:
     ``commit`` 이 바뀐 run 만 XML 로 다시 쓴다.
     """
 
-    def __init__(self, paragraph: Paragraph, index: int) -> None:
+    def __init__(self, paragraph: Paragraph, index: int, own: str = DEFAULT_AUTHOR) -> None:
         """문단을 고칠 준비를 한다.
 
         Args:
             paragraph: 고칠 문단.
             index: 수정 순서 (오류 메시지용).
+            own: 우리(에이전트)의 추적 기록 작성자. 넣을 글자는 남의 추적 글자의 서식을 따르지 않는다.
         """
+        self._own = own
         self._paragraph = paragraph
         self._glyphs = paragraph.glyphs
         self._index = index
@@ -1659,12 +2622,7 @@ class _ParagraphEditor:
         Raises:
             EditError: 고칠 수 없는 요소나 링크 경계에 걸리거나, ``￼`` 를 새로 넣을 때.
         """
-        matcher = SequenceMatcher(None, old, new, autojunk=False)
-        span = self._glyphs[start : start + len(old)]
-        if matcher.ratio() < WHOLE_REPLACE_RATIO and not any(g.wall for g in span):
-            ops = [("replace", 0, len(old), 0, len(new))]
-        else:
-            ops = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+        ops = _diff_ops(old, new, self._glyphs[start : start + len(old)])
         for _, i1, i2, j1, j2 in reversed(ops):
             self._change(start + i1, start + i2, new[j1:j2], (start, start + len(old)))
 
@@ -1751,7 +2709,7 @@ class _ParagraphEditor:
             if not allowed or not 0 <= position < len(self._glyphs):
                 continue
             glyph = self._glyphs[position]
-            if not glyph.wall and glyph.run is not None:
+            if not glyph.wall and glyph.run is not None and glyph.tracked in (None, self._own):
                 return glyph.run, glyph.index + offset
         return None
 
@@ -1788,8 +2746,27 @@ def _format_paragraph(paragraph: Paragraph) -> str:
         level = paragraph.list_level
         labels.append("목록" if level == 1 else f"목록 {level}수준")
     if paragraph.tracked:
-        labels.append("변경 추적 기록 있음 · 고칠 수 없음")
+        who = ", ".join(paragraph.track_authors) or "작성자 모름"
+        labels.append(" · ".join([f"변경 추적: {who}", *paragraph.track_notes]))
     prefix = f"[p{paragraph.number}]"
     if labels:
         prefix += " " + " ".join(f"({x})" for x in labels)
-    return f"{prefix} {paragraph.text}".rstrip(" ")
+    text = paragraph.marked if paragraph.tracked else paragraph.text
+    lines = [f"{prefix} {text}".rstrip(" ")]
+    for comment in paragraph.comments:
+        target = f" → {_head(comment.anchor, _ANCHOR_CHARS)!r}" if comment.anchor else ""
+        body = _head(comment.text, _COMMENT_CHARS)
+        lines.append(
+            f"    (메모 c{comment.id} · {comment.author or '작성자 모름'}: {body!r}{target})"
+        )
+    return "\n".join(lines)
+
+
+def _shown(paragraph: Paragraph) -> bool:
+    """보기에 보여줄 문단인지. 빈 문단은 번호만 차지하지만, 표 칸·지운 기록·메모가 있으면 보여준다."""
+    return bool(
+        paragraph.text.strip()
+        or _in_table(paragraph)
+        or (paragraph.tracked and paragraph.marked.strip())
+        or paragraph.comments
+    )

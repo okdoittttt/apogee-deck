@@ -167,7 +167,12 @@ DOCX_VIEW_LEGEND = (
     "it is and what it is (table cell, header or footer, heading, list item level): never include "
     f"them in old_text. {WALL} marks an image or other object, and field values such as page "
     "numbers or dates cannot be edited either. Tabs are shown as tab characters. (빈 칸) is an "
-    "empty table cell; other empty paragraphs are not shown but keep their number."
+    "empty table cell; other empty paragraphs are not shown but keep their number. In "
+    "paragraphs labeled (변경 추적: name) someone's tracked changes are shown as {+inserted+} "
+    "and {-deleted-} text; other labels there say what else was tracked (서식 바뀜: formatting, "
+    "문단 넣음·나눔 / 문단 합침: paragraphs added, split or joined). Those paragraphs cannot be "
+    "edited yet, and old_text never includes the marks. A line (메모 c3 · name: 'text' → "
+    "'target') under a paragraph is a comment on that paragraph, not document text."
 )
 """DOCX 보기 결과 끝에 붙이는 범례."""
 
@@ -251,6 +256,9 @@ class DocumentEdit(BaseModel):
         "insert_row",
         "delete_row",
         "set_style",
+        "comment",
+        "accept_changes",
+        "reject_changes",
     ] = Field(
         default="replace",
         description=(
@@ -260,14 +268,17 @@ class DocumentEdit(BaseModel):
             "delete_paragraph, move_paragraph (move paragraph before or after target), "
             "insert_row (add a table row with cells before or after the row that contains "
             "paragraph), delete_row (delete the table row that contains paragraph), set_style "
-            "(change paragraph to style)."
+            "(change paragraph to style), comment (add new_text as a comment on old_text, or on "
+            "the whole paragraph when old_text is empty), accept_changes / reject_changes "
+            "(accept or reject the tracked changes in paragraph, or in the whole document when "
+            "paragraph is empty)."
         ),
     )
     old_text: str = Field(
         default="",
         description=(
-            "replace only. Exact text to replace, copied from the document without the [L12] / "
-            "[p12] prefixes. Must appear exactly once unless replace_all is true; include nearby "
+            "replace and comment. Exact text to replace (or to comment on), copied from the "
+            "document without the [L12] / [p12] prefixes or tracked change marks {+ +} / {- -}. Must appear exactly once unless replace_all is true; include nearby "
             "words to make it unique. In text files it may span several lines; in Word documents "
             "it must stay inside one paragraph. In Word documents, leave it empty and set "
             "paragraph to put new_text into an empty paragraph (such as an empty table cell)."
@@ -278,7 +289,7 @@ class DocumentEdit(BaseModel):
         description=(
             "replace: text to put in its place (an empty string deletes old_text). In Word "
             "documents a line break in new_text splits the paragraph there. insert_paragraph: the "
-            "text of the new paragraph (one paragraph per line)."
+            "text of the new paragraph (one paragraph per line). comment: the comment text."
         ),
     )
     replace_all: bool = Field(
@@ -293,8 +304,10 @@ class DocumentEdit(BaseModel):
         default=None,
         description=(
             'Word documents only: a paragraph label from the view, such as "p12". For replace '
-            "it limits the search to that paragraph (optional); for the other kinds it is the "
-            "paragraph to act on (for insert_row and delete_row, any paragraph inside the row). "
+            "and comment it limits the search to that paragraph (optional); for accept_changes "
+            "and reject_changes it limits them to that paragraph (empty means the whole "
+            "document); for the other kinds it is the paragraph to act on (for insert_row and "
+            "delete_row, any paragraph inside the row). "
             "Labels always mean the numbers shown in the view before this call, even after "
             "earlier edits in the same call split or remove paragraphs."
         ),
@@ -355,7 +368,13 @@ def _format_revision(revision: editing.Revision) -> str:
         f"revision {revision.revision}. The previous version ({revision.source_document_id}) "
         "is unchanged."
     )
-    lines = [header, "Changes:"]
+    lines = [header]
+    if revision.tracked:
+        lines.append(
+            f"The changes were saved as tracked changes by {revision.author!r}: the user can "
+            "accept or reject each one in Word, and the view shows them as {+ +} / {- -}."
+        )
+    lines.append("Changes:")
     docx = revision.kind == "docx"
     for change in revision.changes:
         if change.kind != "replace":
@@ -366,7 +385,9 @@ def _format_revision(revision: editing.Revision) -> str:
         if change.skipped:
             notes.append(f"skipped {change.skipped} inside links that show a web address")
         if change.in_urls:
-            where = ", ".join(f"{'p' if docx else 'line '}{n}" for n in dict.fromkeys(change.in_urls))
+            where = ", ".join(
+                f"{'p' if docx else 'line '}{n}" for n in dict.fromkeys(change.in_urls)
+            )
             notes.append(
                 f"{len(change.in_urls)} of them inside web addresses ({where}): check that "
                 "the user wanted those changed"
@@ -419,14 +440,25 @@ def make_edit_document(settings: Settings) -> BaseTool:
 
     @tool(parse_docstring=True, response_format="content_and_artifact")
     async def edit_document(
-        document_id: str, edits: list[DocumentEdit], config: RunnableConfig
+        document_id: str,
+        edits: list[DocumentEdit],
+        config: RunnableConfig,
+        track_changes: bool | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Edit a TXT, MD, CSV or Word (DOCX) document attached to this conversation.
 
         Text files are changed by replacing text. Word documents keep their formatting (bold,
         colors, tables, images, headers): replace changes only the replaced characters, and
         other kinds of edits can split, merge, insert, delete or move paragraphs, add or delete
-        table rows, and change a paragraph's style (heading, normal text, list level).
+        table rows, change a paragraph's style (heading, normal text, list level), add
+        comments, and accept or reject tracked changes.
+
+        In Word documents, set track_changes to true when the user wants to review your changes
+        (for example "track changes", "so I can check them in Word", "mark what you changed"):
+        replace, insert_paragraph and delete_paragraph are then saved as tracked changes that the
+        user can accept or reject in Word, and other kinds of edits fail. Leave it unset to
+        follow the document's own Word setting. When the user only asks you to review or give
+        feedback, prefer comments over changing the text, unless they ask for changes.
 
         The original is never changed: each call saves a new revised version of the file,
         which the user can download, and returns its new document_id. Put all the changes
@@ -449,6 +481,9 @@ def make_edit_document(settings: Settings) -> BaseTool:
                 edit_document result (to edit the latest version).
             edits: The changes to apply, in order.
             config: Run configuration (injected, not visible to the model).
+            track_changes: Word documents only. true saves the changes as tracked changes (by
+                the author shown in the result), false makes them directly, unset follows the
+                document's Word setting.
         """
         parsed = [DocumentEdit.model_validate(e) if isinstance(e, dict) else e for e in edits]
         try:
@@ -474,6 +509,8 @@ def make_edit_document(settings: Settings) -> BaseTool:
                     ],
                     max_bytes=settings.document_max_bytes,
                     parse_wait=settings.document_edit_parse_wait_seconds,
+                    track_changes=track_changes,
+                    author=settings.document_edit_author,
                 )
         except EditError as exc:
             raise EditError(f"{exc} No changes were saved.", exc.index) from exc

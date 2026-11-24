@@ -84,6 +84,9 @@ EDIT_OPS = frozenset(
         "insert_row",
         "delete_row",
         "set_style",
+        "accept_changes",
+        "reject_changes",
+        "comment",
     }
 )
 """수정 종류. 텍스트 형식은 ``replace`` 만, 나머지는 DOCX 에서만 쓴다."""
@@ -98,9 +101,10 @@ class Edit:
     Attributes:
         old_text: 바꿀 글자. ``replace_all`` 이 아니면 문서 안에서 정확히 한 번 나와야 한다.
         new_text: 바꿔 넣을 글자. 빈 글자면 ``old_text`` 를 지운다. DOCX 에서는 ``\n`` 에서 문단을 나누고,
-            ``insert_paragraph`` 에서는 넣을 문단의 글자다.
+            ``insert_paragraph`` 에서는 넣을 문단의 글자, ``comment`` 에서는 메모 내용이다.
         replace_all: ``old_text`` 가 나오는 곳을 모두 바꿀지.
         paragraph: DOCX 에서 수정할(또는 기준이 되는) 문단 (예: ``"p12"``). 텍스트 형식에서는 무시한다.
+            ``accept_changes``·``reject_changes`` 에서 비우면 문서 전체다.
         op: 수정 종류 (``EDIT_OPS``). 기본은 글자 바꾸기.
         position: ``insert_paragraph``·``move_paragraph``·``insert_row`` 에서 기준의 앞(``"before"``)인지
             뒤(``"after"``)인지.
@@ -301,7 +305,8 @@ def _apply_one(text: str, index: int, edit: Edit) -> tuple[str, Change]:
             position = text.find(old, position + len(old))
         places = tuple(text.count("\n", 0, start) + 1 for start in starts)
         in_urls = tuple(
-            line for line, start in zip(places, starts, strict=True)
+            line
+            for line, start in zip(places, starts, strict=True)
             if in_url(spans, start, start + len(old))
         )
         count = len(starts)

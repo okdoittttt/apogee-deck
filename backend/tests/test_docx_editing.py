@@ -15,6 +15,8 @@ from app.documents.editing.docx import WALL, DocxDocument, W
 from app.documents.editing.text import Edit, EditError
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sales-report.docx"
+# LibreOffice 가 저장한 변경 추적·메모 시험 문서 (원본: fixtures/src/review-*.fodt).
+REVIEW_KO = Path(__file__).parent / "fixtures" / "review-ko.docx"
 
 _CONTENT_TYPES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -41,6 +43,8 @@ _DOC_RELS = (
     'relationships/hyperlink" Target="https://example.com" TargetMode="External"/>'
     '<Relationship Id="rIdS" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
     'relationships/styles" Target="styles.xml"/>'
+    '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+    'relationships/comments" Target="comments.xml"/>'
     "</Relationships>"
 )
 _NS = (
@@ -57,7 +61,12 @@ STYLES = (
 
 
 def make_docx(
-    body: str, *, header: str | None = None, macro: bool = False, styles: str | None = None
+    body: str,
+    *,
+    header: str | None = None,
+    macro: bool = False,
+    styles: str | None = None,
+    comments: str | None = None,
 ) -> bytes:
     """본문 XML 조각(``w:body`` 안)으로 최소한의 DOCX 를 만든다."""
     sect = '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>'
@@ -76,6 +85,8 @@ def make_docx(
             zf.writestr("word/header1.xml", f"<w:hdr {_NS}>{header}</w:hdr>")
         if styles is not None:
             zf.writestr("word/styles.xml", f"<w:styles {_NS}>{styles}</w:styles>")
+        if comments is not None:
+            zf.writestr("word/comments.xml", f"<w:comments {_NS}>{comments}</w:comments>")
     return buffer.getvalue()
 
 
@@ -172,8 +183,96 @@ def test_nested_tables_are_numbered_in_order():
 
 def test_tracked_paragraph_is_labelled():
     tracked = "<w:p><w:ins><w:r><w:t>새 글</w:t></w:r></w:ins><w:del><w:r><w:delText>옛 글</w:delText></w:r></w:del></w:p>"
-    text = DocxDocument.from_bytes(make_docx(tracked)).view(1, 10).text
-    assert text == "[p1] (변경 추적 기록 있음 · 고칠 수 없음) 새 글"
+    doc = DocxDocument.from_bytes(make_docx(tracked))
+    assert doc.view(1, 10).text == "[p1] (변경 추적: 작성자 모름) {+새 글+}{-옛 글-}"
+    assert doc.paragraphs[0].text == "새 글"
+
+
+def test_tracked_marks_show_authors_and_merge_adjacent_records():
+    ins = '<w:ins w:id="1" w:author="김민지">{}</w:ins>'
+    body = p(
+        r("매출 "),
+        '<w:del w:id="2" w:author="이준"><w:r><w:delText>120</w:delText></w:r></w:del>',
+        ins.format(r("13")),
+        ins.format(r("5")),
+        r("억"),
+    )
+    view = DocxDocument.from_bytes(make_docx(body)).view(1, 10).text
+    assert view == "[p1] (변경 추적: 이준, 김민지) 매출 {-120-}{+135+}억"
+
+
+def test_format_and_paragraph_mark_changes_are_tracked():
+    run_change = '<w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="가"><w:rPr/></w:rPrChange></w:rPr><w:t>굵게</w:t></w:r>'
+    para_change = (
+        '<w:p><w:pPr><w:pPrChange w:id="2" w:author="나"><w:pPr/></w:pPrChange>'
+        '<w:rPr><w:ins w:id="3" w:author="나"/></w:rPr></w:pPr>' + r("문단") + "</w:p>"
+    )
+    doc = DocxDocument.from_bytes(make_docx(p(run_change) + para_change))
+    first, second = doc.paragraphs
+    assert first.tracked and first.track_notes == ("서식 바뀜",)
+    assert second.track_notes == ("문단 서식 바뀜", "문단 넣음·나눔 추적")
+    with pytest.raises(EditError, match="tracked changes"):
+        doc.apply_edits([Edit("굵게", "얇게")])
+
+
+def test_fully_deleted_paragraph_is_shown():
+    body = '<w:p><w:del w:id="1" w:author="가"><w:r><w:delText>지운 문단</w:delText></w:r></w:del></w:p>'
+    view = DocxDocument.from_bytes(make_docx(body)).view(1, 10).text
+    assert view == "[p1] (변경 추적: 가) {-지운 문단-}"
+
+
+COMMENTS = (
+    '<w:comment w:id="3" w:author="김민지"><w:p><w:r><w:t>근거가</w:t></w:r></w:p>'
+    "<w:p><w:r><w:t>필요합니다</w:t></w:r></w:p></w:comment>"
+    '<w:comment w:id="4" w:author="이준"><w:p><w:r><w:t>확인</w:t></w:r></w:p></w:comment>'
+)
+REF = '<w:r><w:commentReference w:id="{}"/></w:r>'
+
+
+def test_comments_are_shown_under_their_paragraph():
+    body = p(
+        r("앞 "),
+        '<w:commentRangeStart w:id="3"/>',
+        r("120억"),
+        '<w:commentRangeEnd w:id="3"/>',
+        REF.format(3),
+        r(" 원"),
+    ) + p(r("점 메모"), REF.format(4))
+    doc = DocxDocument.from_bytes(make_docx(body, comments=COMMENTS))
+    assert doc.view(1, 10).text == (
+        "[p1] 앞 120억 원\n"
+        "    (메모 c3 · 김민지: '근거가 / 필요합니다' → '120억')\n"
+        "[p2] 점 메모\n"
+        "    (메모 c4 · 이준: '확인')"
+    )
+    assert doc.paragraphs[0].text == "앞 120억 원"  # 메모 표시는 벽 글자가 아니다
+    doc.apply_edits([Edit("120억 원", "135억 원")])
+    assert doc.paragraphs[0].text == "앞 135억 원"
+
+
+def test_comment_range_across_paragraphs():
+    body = (
+        p(r("첫 "), '<w:commentRangeStart w:id="3"/>', r("문단 끝"))
+        + p(r("가운데"))
+        + p(r("셋째"), '<w:commentRangeEnd w:id="3"/>', r(" 뒤"), REF.format(3))
+    )
+    doc = DocxDocument.from_bytes(make_docx(body, comments=COMMENTS))
+    (comment,) = doc.paragraphs[2].comments
+    assert comment.anchor == "문단 끝 가운데 셋째"
+
+
+def test_reference_without_comments_part_shows_nothing():
+    doc = DocxDocument.from_bytes(make_docx(p(r("글"), REF.format(3))))
+    assert doc.view(1, 10).text == "[p1] 글"
+
+
+def test_old_text_with_track_marks_gets_a_hint():
+    body = '<w:p><w:ins w:id="1" w:author="가"><w:r><w:t>새</w:t></w:r></w:ins></w:p>' + p(
+        r("보통")
+    )
+    doc = DocxDocument.from_bytes(make_docx(body))
+    _, (failure,) = doc.apply_some([Edit("{+새+}", "헌")])
+    assert "tracked change marks" in str(failure)
 
 
 def test_breaks_tabs_and_markers():
@@ -457,6 +556,18 @@ def test_header_is_editable():
     out = doc.to_bytes()
     with zipfile.ZipFile(io.BytesIO(out)) as zf:
         assert "사내 한정".encode() in zf.read("word/header1.xml")
+
+
+def test_review_fixture_reads_tracked_paragraphs_as_accepted():
+    doc = DocxDocument.from_bytes(REVIEW_KO.read_bytes())
+    paragraphs = doc.paragraphs
+    assert paragraphs[1].text == "2024년 매출은 135억 원이다."
+    assert [p.number for p in paragraphs if p.tracked] == [2, 4, 5, 6]
+    assert doc.view(1, 10).text.splitlines()[1:4] == [
+        "[p2] (변경 추적: 김민지) 2024년 매출은 {-120-}{+135+}억 원이다.",
+        "[p3] 2024년 매출은 120억 원이다.",
+        "    (메모 c0 · 김민지: '근거 자료가 필요합니다.' → '2024년 매출은')",
+    ]
 
 
 def test_fixture_mixed_edits():

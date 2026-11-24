@@ -176,7 +176,7 @@ async def test_edit_without_storage(monkeypatch):
 
 def test_edit_schema_describes_edits():
     schema = document_tools.make_edit_document(Settings()).tool_call_schema.model_json_schema()
-    assert set(schema["properties"]) == {"document_id", "edits"}
+    assert set(schema["properties"]) == {"document_id", "edits", "track_changes"}
     edit = schema["$defs"]["DocumentEdit"]
     assert set(edit["properties"]) == {
         "op",
@@ -189,7 +189,7 @@ def test_edit_schema_describes_edits():
         "style",
         "cells",
     }
-    assert "merge" in edit["properties"]["op"]["enum"]
+    assert {"merge", "comment", "accept_changes"} <= set(edit["properties"]["op"]["enum"])
     assert "[L12]" in edit["properties"]["old_text"]["description"]
     assert '"p12"' in edit["properties"]["paragraph"]["description"]
 
@@ -359,6 +359,48 @@ async def test_edit_docx_structure_ops_and_partial_failure(monkeypatch):
     (doc,) = session.added
     texts = [x.text for x in DocxDocument.from_bytes(storage.objects[doc.storage_key]).paragraphs]
     assert "광주" in texts and "자세한 내용은 영업팀 위키를 참고한다." not in texts
+
+
+async def test_edit_docx_with_tracked_changes(monkeypatch):
+    source, session, storage = install_docx(monkeypatch)
+    tool = document_tools.make_edit_document(Settings(document_edit_author="검토 에이전트"))
+    message = await tool.ainvoke(
+        call(
+            "edit_document",
+            {
+                "document_id": str(source.id),
+                "edits": [
+                    {"old_text": "원으로 전년보다", "new_text": "원으로 작년보다"},
+                    {"op": "comment", "old_text": "원으로", "new_text": "단위 확인"},
+                    {"op": "merge", "paragraph": "p1"},
+                ],
+                "track_changes": True,
+            },
+        ),
+        config=CONFIG,
+    )
+    content = message.content
+    assert "saved as tracked changes by '검토 에이전트'" in content
+    assert "commented on" in content and 'op "merge" cannot be made as a tracked change' in content
+    (doc,) = session.added
+    saved = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    tracked = [x for x in saved.paragraphs if x.tracked]
+    assert tracked and tracked[0].track_authors == ("검토 에이전트",)
+    assert any(x.comments for x in saved.paragraphs)
+
+
+async def test_track_changes_on_text_file_fails(monkeypatch):
+    source, session, _ = install(monkeypatch)
+    tool = document_tools.make_edit_document(Settings())
+    content = await failure(
+        tool,
+        {
+            "document_id": str(source.id),
+            "edits": [{"old_text": "2024", "new_text": "2025"}],
+            "track_changes": True,
+        },
+    )
+    assert "only work for Word documents" in content and session.added == []
 
 
 async def test_view_docx_shows_empty_table_cells(monkeypatch):
