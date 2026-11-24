@@ -815,11 +815,11 @@ function ChatApp({
           thinking: false,
           steps: [...(m.steps ?? []), { type: "tool", ...tool, output: null, status: "running" }],
         })),
-      onToolEnd: ({ id, output, status, sources }) =>
+      onToolEnd: ({ id, output, status, sources, documents }) =>
         updateAssistant((m) => ({
           ...m,
           steps: (m.steps ?? []).map((st) =>
-            st.type === "tool" && st.id === id ? { ...st, output, status, sources } : st,
+            st.type === "tool" && st.id === id ? { ...st, output, status, sources, documents } : st,
           ),
         })),
       onDone: ({ stop_reason, model, message_id }) => {

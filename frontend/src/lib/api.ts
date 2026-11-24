@@ -56,6 +56,16 @@ export interface DocumentSource {
 
 export type Source = WebSource | DocumentSource;
 
+/** 도구가 만든 문서 (edit_document 의 수정본). 답변 아래 다운로드 칩으로 보여준다. */
+export interface ToolDocument {
+  document_id: string;
+  filename: string; // 예: "보고서 (수정 2).md"
+  revision: number | null; // 원본 1, 고칠 때마다 1씩 커진다
+  source_document_id: string | null;
+  kind: string; // txt, md, csv ...
+  size_bytes: number | null;
+}
+
 /** 실행 단계: 도구 호출 하나. */
 export interface ToolStep {
   type: "tool";
@@ -67,6 +77,7 @@ export interface ToolStep {
   output: string | null;
   status: "running" | "done" | "error" | "interrupted";
   sources?: Source[];
+  documents?: ToolDocument[];
 }
 
 export type Step = ReasoningStep | ToolStep;
@@ -265,6 +276,7 @@ export interface ToolEndEvent {
   output: string;
   status: "done" | "error";
   sources?: Source[];
+  documents?: ToolDocument[];
 }
 
 export interface StreamHandlers {

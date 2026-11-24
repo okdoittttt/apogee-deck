@@ -12,6 +12,7 @@ import { citationNumber, citedNumbers, remarkCitations } from "@/lib/citations";
 import { normalizeMath } from "@/lib/math";
 import { FileChip } from "./FileChip";
 import { LogoIcon, ThumbDownIcon, ThumbUpIcon } from "./icons";
+import { EditedFiles } from "./EditedFiles";
 import { Citation, collectSources, Sources } from "./Sources";
 import { Steps } from "./Steps";
 
@@ -128,6 +129,7 @@ function AssistantMessage({
           </div>
         )}
         {showDots && <TypingDots />}
+        <EditedFiles steps={steps} />
         {/* 답변이 끝난 뒤에 인용한 출처를 앞으로 정리한다 (만드는 중에는 카드가 움직이지 않게 순서대로) */}
         <Sources steps={steps} cited={active ? null : cited} />
         {!active && (modelLabel || (onFeedback && message.serverId)) && (

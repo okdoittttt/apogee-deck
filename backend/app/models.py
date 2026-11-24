@@ -256,12 +256,20 @@ class Document(Base):
     - 프로젝트 문서 (``project_id`` 가 있음): 대화에 붙지 않고, 그 프로젝트의 모든 대화에서 읽을 수 있다.
       보관 기간 없이 사용자가 지울 때까지 둔다.
 
+    에이전트가 문서를 고친 수정본도 같은 테이블의 새 행이다 (``created_by == "agent"``). 원본은 바꾸지 않는다.
+    수정본은 원본과 같은 대화에 속하고 어느 메시지에도 붙지 않는다 (``message_id`` 가 ``None``). 그래서
+    읽기·다운로드·대화 삭제·보관 기간 정리를 원본과 똑같이 받는다. 수정본을 다시 고치면
+    ``source_document_id`` 로 원본 → v2 → v3 줄이 이어진다.
+
     Attributes:
         id: 문서 ID.
         user_id: 문서를 올린 사용자. 로그인 기능 전에 올린 문서는 ``None``.
         project_id: 속한 프로젝트 ID. 대화 첨부는 ``None``.
         conversation_id: 속한 대화 ID. 메시지로 보내기 전이나 프로젝트 문서는 ``None``.
-        message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전에는 ``None``.
+        message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전이나 수정본은 ``None``.
+        source_document_id: 이 수정본을 만든 직전 문서 ID. 올린 문서이거나 직전 문서가 지워졌으면 ``None``.
+        revision: 버전 번호. 올린 문서는 1, 고칠 때마다 직전 문서보다 1 크다.
+        created_by: 만든 쪽. ``user`` (사용자가 올림) | ``agent`` (에이전트가 고치거나 만듦).
         filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
         kind: 내용으로 확인한 형식 (``app.documents.formats.DocumentKind``).
         mime_type: 원본을 내려줄 때 쓰는 MIME 타입.
@@ -296,6 +304,11 @@ class Document(Base):
     message_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_by: Mapped[str] = mapped_column(String(20), default="user", server_default="user")
     filename: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(20))
     mime_type: Mapped[str] = mapped_column(String(150))

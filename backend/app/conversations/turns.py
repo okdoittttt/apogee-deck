@@ -157,6 +157,7 @@ async def run_turn(
                         "output": event.output,
                         "status": event.status,
                         "sources": event.sources,
+                        "documents": event.documents,
                     },
                 )
             elif isinstance(event, Finished):

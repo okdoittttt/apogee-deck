@@ -135,6 +135,26 @@ class DocumentSource(BaseModel):
     n: int | None = None
 
 
+class ToolDocument(BaseModel):
+    """도구가 만든 문서 (``edit_document`` 의 수정본). 화면에 다운로드 칩으로 보여준다.
+
+    Attributes:
+        document_id: 문서 ID (``GET /api/documents/{id}/file`` 로 받는다).
+        filename: 파일 이름 (예: ``"보고서 (수정 2).md"``).
+        revision: 버전 번호 (원본 1). 모르면 ``None``.
+        source_document_id: 이 문서를 만든 직전 문서 ID. 모르면 ``None``.
+        kind: 문서 형식 (``txt``, ``md``, ``csv`` ...).
+        size_bytes: 파일 크기. 모르면 ``None``.
+    """
+
+    document_id: str
+    filename: str
+    revision: int | None = None
+    source_document_id: str | None = None
+    kind: str = ""
+    size_bytes: int | None = None
+
+
 class ToolStep(BaseModel):
     """실행 단계: 도구 호출 하나.
 
@@ -148,6 +168,7 @@ class ToolStep(BaseModel):
         output: 도구 결과 (길이 제한됨). 끝나지 않았으면 ``None``.
         status: ``running`` / ``done`` / ``error`` / ``interrupted``.
         sources: 도구가 참고한 웹 페이지나 프로젝트 문서. 없으면 빈 목록.
+        documents: 도구가 만든 문서 (수정본). 없으면 빈 목록.
     """
 
     type: Literal["tool"] = "tool"
@@ -159,6 +180,7 @@ class ToolStep(BaseModel):
     output: str | None = None
     status: Literal["running", "done", "error", "interrupted"]
     sources: list[DocumentSource | Source] = []
+    documents: list[ToolDocument] = []
 
 
 Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]
