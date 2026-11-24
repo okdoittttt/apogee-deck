@@ -9,6 +9,11 @@ import {
   OpenDocumentProvider,
   type ViewerTarget,
 } from "@/components/DocumentViewer";
+import {
+  EditedDocumentPanel,
+  type EditedTarget,
+  OpenEditedProvider,
+} from "@/components/EditedDocumentPanel";
 import { LogoIcon, PlusIcon, SidebarIcon } from "@/components/icons";
 import { MessageList } from "@/components/MessageList";
 import { ModelPicker } from "@/components/ModelPicker";
@@ -117,11 +122,18 @@ function ChatApp({
   const [conversationId, setConversationId] = useState<string | null>(null);
   // 오른쪽 문서 보기 패널 (출처 카드, 프로젝트 문서 칩에서 연다)
   const [viewerTarget, setViewerTarget] = useState<OpenedTarget | null>(null);
-  const openDocument = useCallback(
-    (target: ViewerTarget) => setViewerTarget((prev) => ({ ...target, opened: (prev?.opened ?? 0) + 1 })),
-    [],
-  );
+  // 오른쪽 수정본 패널 (답변 아래 수정본·새 문서 칩에서 연다). 문서 보기 패널과 한 번에 하나만 연다.
+  const [editedTarget, setEditedTarget] = useState<EditedTarget | null>(null);
+  const openDocument = useCallback((target: ViewerTarget) => {
+    setEditedTarget(null);
+    setViewerTarget((prev) => ({ ...target, opened: (prev?.opened ?? 0) + 1 }));
+  }, []);
   const closeViewer = useCallback(() => setViewerTarget(null), []);
+  const openEdited = useCallback((target: EditedTarget) => {
+    setViewerTarget(null);
+    setEditedTarget(target);
+  }, []);
+  const closeEdited = useCallback(() => setEditedTarget(null), []);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -523,6 +535,7 @@ function ChatApp({
       setAttachments([]);
       discardDocuments();
       setViewerTarget(null);
+      setEditedTarget(null);
       setUrl(conversationPath(conv.id), history);
       if (isMobile) setSidebarOpen(false);
       // 응답을 만드는 중이면(새로고침, 다른 창·기기) 이어서 보여준다.
@@ -549,6 +562,7 @@ function ChatApp({
     setInput("");
     setError(null);
     setViewerTarget(null);
+    setEditedTarget(null);
     if (isMobile) setSidebarOpen(false);
   }
 
@@ -1051,6 +1065,7 @@ function ChatApp({
 
   return (
     <OpenDocumentProvider value={openDocument}>
+      <OpenEditedProvider value={openEdited}>
       <div className="flex h-dvh overflow-hidden bg-app text-fg">
         {/* Sidebar: 데스크톱은 밀어내기, 모바일은 오버레이 */}
         {sidebarOpen && isMobile && (
@@ -1243,8 +1258,12 @@ function ChatApp({
           )}
         </main>
         {viewerTarget && <DocumentViewer target={viewerTarget} onClose={closeViewer} />}
+        {editedTarget && (
+          <EditedDocumentPanel target={editedTarget} onClose={closeEdited} onNotice={setToast} />
+        )}
         <Toast message={toast} onClose={closeToast} />
       </div>
+      </OpenEditedProvider>
     </OpenDocumentProvider>
   );
 }

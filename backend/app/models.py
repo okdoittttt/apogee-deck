@@ -269,7 +269,8 @@ class Document(Base):
         message_id: 문서를 첨부한 사용자 메시지 ID. 보내기 전이나 수정본은 ``None``.
         source_document_id: 이 수정본을 만든 직전 문서 ID. 올린 문서이거나 직전 문서가 지워졌으면 ``None``.
         revision: 버전 번호. 올린 문서는 1, 고칠 때마다 직전 문서보다 1 크다.
-        created_by: 만든 쪽. ``user`` (사용자가 올림) | ``agent`` (에이전트가 고치거나 만듦).
+        created_by: 만든 쪽. ``user`` (사용자가 올리거나 화면에서 예전 버전으로 되돌림) |
+            ``agent`` (에이전트가 고치거나 만듦).
         filename: 사용자가 올린 파일 이름 (경로 부분은 뺀다).
         kind: 내용으로 확인한 형식 (``app.documents.formats.DocumentKind``).
         mime_type: 원본을 내려줄 때 쓰는 MIME 타입.

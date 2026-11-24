@@ -2,6 +2,7 @@
 
 import { documentFileUrl, type Step, type ToolDocument } from "@/lib/api";
 import { formatBytes, kindLabel } from "@/lib/documents";
+import { useOpenEdited } from "./EditedDocumentPanel";
 import { FileChip } from "./FileChip";
 
 /** 응답의 도구 단계에서 에이전트가 만든 문서(수정본, 새 문서)를 모은다. 같은 문서는 한 번만 넣는다. */
@@ -30,10 +31,11 @@ function editedMeta(doc: ToolDocument): string {
 }
 
 /**
- * 에이전트가 이번 답변에서 만든 수정본·새 문서를 답변 아래에 파일 칩으로 보여준다 (누르면 받기).
- * 수정했어도 원본은 그대로 남아 있으므로 칩은 받기만 한다.
+ * 에이전트가 이번 답변에서 만든 수정본·새 문서를 답변 아래에 파일 칩으로 보여준다.
+ * 누르면 오른쪽 패널(미리보기·바뀐 곳·버전)을 열고, 패널이 없는 화면에서는 바로 받는다.
  */
 export function EditedFiles({ steps }: { steps: Step[] }) {
+  const openEdited = useOpenEdited();
   const documents = collectDocuments(steps);
   if (documents.length === 0) return null;
   return (
@@ -44,6 +46,11 @@ export function EditedFiles({ steps }: { steps: Step[] }) {
           name={doc.filename}
           meta={editedMeta(doc)}
           href={documentFileUrl(doc.document_id)}
+          onOpen={
+            openEdited
+              ? () => openEdited({ documentId: doc.document_id, filename: doc.filename, kind: doc.kind })
+              : undefined
+          }
         />
       ))}
     </section>
