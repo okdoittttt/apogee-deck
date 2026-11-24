@@ -72,9 +72,9 @@ async def test_txt_without_trailing_newline_counts_last_line():
     assert created.line_count == 2
 
 
-@pytest.mark.parametrize("filename", ["보고서.docx", "표.xlsx", "noext", ".md", "a.pdf"])
+@pytest.mark.parametrize("filename", ["표.xlsx", "noext", ".md", "a.pdf"])
 async def test_rejects_unsupported_names(filename):
-    with pytest.raises(EditError, match=r"must end with \.txt, \.md or \.csv"):
+    with pytest.raises(EditError, match=r"must end with \.docx, \.txt, \.md or \.csv"):
         await create(filename, "내용")
 
 
@@ -183,9 +183,9 @@ async def test_create_tool_failure_is_error(monkeypatch):
     session.found = USER
     tool = document_tools.make_create_document(Settings())
     with pytest.raises(ToolError) as info:
-        await tool.ainvoke({"filename": "보고서.docx", "content": "x"}, config=CONFIG)
+        await tool.ainvoke({"filename": "보고서.pdf", "content": "x"}, config=CONFIG)
     message = handle_tool_error(info.value)
-    assert "must end with .txt, .md or .csv" in message
+    assert "must end with .docx, .txt, .md or .csv" in message
     assert message.endswith("No file was created.")
 
 

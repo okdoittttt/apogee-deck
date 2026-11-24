@@ -2770,3 +2770,15 @@ def _shown(paragraph: Paragraph) -> bool:
         or (paragraph.tracked and paragraph.marked.strip())
         or paragraph.comments
     )
+
+
+# --- 다른 모듈(새 DOCX 만들기)과 같이 쓰는 패키지 도우미 ----------------------------------------------
+
+parse_part = _parse_xml
+"""ZIP 항목의 XML 을 안전하게(외부 엔티티 없이) 읽는다."""
+serialize_part = _serialize
+"""XML 을 원본의 선언을 붙여 쓴다."""
+resolve_target = _resolve
+"""관계(rels)의 대상 경로를 ZIP 항목 이름으로 바꾼다."""
+rels_name = _rels_name
+"""부분의 관계 파일 이름 (예: ``word/_rels/document.xml.rels``)."""

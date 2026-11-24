@@ -532,13 +532,13 @@ def make_edit_document(settings: Settings) -> BaseTool:
 
 
 def make_create_document(settings: Settings) -> BaseTool:
-    """새 문서(TXT·MD·CSV)를 만들어 대화에 붙이는 도구를 만든다.
+    """새 문서(TXT·MD·CSV·DOCX)를 만들어 대화에 붙이는 도구를 만든다.
 
     만든 문서는 ``edit_document`` 의 수정본과 같은 artifact(``{"documents": [...]}``)로 화면에 준다
     (답변 아래 파일 칩). 만들 수 없으면 ``EditError`` 를 올려서 화면에 실패로 표시한다.
 
     Args:
-        settings: 앱 설정 (최대 크기).
+        settings: 앱 설정 (최대 크기, DOCX 파싱을 기다릴 시간, 문서 속성의 만든 이).
 
     Returns:
         ``create_document`` 도구.
@@ -546,25 +546,39 @@ def make_create_document(settings: Settings) -> BaseTool:
 
     @tool(parse_docstring=True, response_format="content_and_artifact")
     async def create_document(
-        filename: str, content: str, config: RunnableConfig
+        filename: str,
+        content: str,
+        config: RunnableConfig,
+        template_document_id: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Create a new TXT, Markdown or CSV file that the user can download.
+        """Create a new Word (DOCX), TXT, Markdown or CSV file that the user can download.
 
         Use it only when the user asks for a file or a document to download or keep (for
-        example "make a CSV of ...", "write this up as a markdown file"). For ordinary
-        questions, answer in the chat as usual instead of creating a file. Write the
-        complete content: the file is saved exactly as given. For CSV, put a header row
-        first, give every row the same number of columns, and quote values that contain
-        commas, quotes or line breaks. To change the file later, use edit_document with
-        the document_id this returns. If the content needs information you do not have
-        (for example the user's name), ask the user first instead of inserting a
-        placeholder.
+        example "make a Word report of ...", "make a CSV of ...", "write this up as a
+        markdown file"). For ordinary questions, answer in the chat as usual instead of
+        creating a file. Write the complete content.
+
+        For .docx, write the content in Markdown: # to ###### headings, paragraphs, **bold**,
+        *italic*, ~~strikethrough~~, `code`, [links](https://...), - and 1. lists (indent
+        to nest), tables with a header row, > quotes and ``` code blocks. It becomes a
+        formatted Word document. Images cannot be added. To write it on a Word document the
+        user attached as a template (keeping its headers, footers, styles and page setup),
+        set template_document_id; the template's own body is replaced. To fill blanks such
+        as {{name}} in an attached form instead, use edit_document on that form.
+
+        Other files are saved exactly as given. For CSV, put a header row first, give every
+        row the same number of columns, and quote values that contain commas, quotes or line
+        breaks. To change the file later, use edit_document with the document_id this
+        returns. If the content needs information you do not have (for example the user's
+        name), ask the user first instead of inserting a placeholder.
 
         Args:
-            filename: File name ending with .txt, .md or .csv, in the user's language
-                (for example "회의록.md").
-            content: The full text of the file.
+            filename: File name ending with .docx, .txt, .md or .csv, in the user's language
+                (for example "회의록.docx").
+            content: The full content of the file (Markdown for .docx).
             config: Run configuration (injected, not visible to the model).
+            template_document_id: .docx only: the document_id of an attached Word document
+                to use as the template.
         """
         try:
             async with SessionLocal() as session:
@@ -575,16 +589,41 @@ def make_create_document(settings: Settings) -> BaseTool:
                     filename=filename,
                     content=content,
                     max_bytes=settings.document_max_bytes,
+                    parse_wait=settings.document_edit_parse_wait_seconds,
+                    author=settings.document_edit_author,
+                    template_document_id=template_document_id or None,
                 )
         except EditError as exc:
             raise EditError(f"{exc} No file was created.", exc.index) from exc
-        text = (
-            f"Document created. document_id: {created.id}, filename: {created.filename} "
-            f"({created.kind.upper()}, {created.line_count} lines, {created.size_bytes:,} "
-            "bytes).\nThe app shows the file under your answer so the user can download it. "
-            "Briefly describe what is in it instead of repeating the whole content. To change "
-            "it, use edit_document with this document_id."
+        if created.kind == "docx":
+            size = f"{created.line_count} paragraphs, {created.tables} tables"
+        else:
+            size = f"{created.line_count} lines"
+        lines = [
+            (
+                f"Document created. document_id: {created.id}, filename: {created.filename} "
+                f"({created.kind.upper()}, {size}, {created.size_bytes:,} bytes)."
+            )
+        ]
+        if created.template_id is not None:
+            lines.append(f"It uses the template {created.template_id} (headers, footers, styles).")
+        lines.extend(created.notes)
+        lines.append(
+            "The app shows the file under your answer so the user can download it. Briefly "
+            "describe what is in it instead of repeating the whole content. To change it, use "
+            "edit_document with this document_id."
         )
+        if created.status == "processing":
+            lines.append(
+                "The file is saved and can be downloaded, but its text is still being prepared, "
+                "so read_document cannot show it yet."
+            )
+        elif created.status == "failed":
+            lines.append(
+                "The file is saved and can be downloaded, but its text could not be prepared. "
+                "Use view_document_for_edit to check it."
+            )
+        text = "\n".join(lines)
         artifact = {
             "documents": [
                 {

@@ -32,6 +32,7 @@ from app.core.storage import ObjectNotFoundError, ObjectStorage
 from app.documents import service as documents
 from app.documents.editing import text
 from app.documents.editing.docx import DEFAULT_AUTHOR, DocxDocument
+from app.documents.editing.docx_create import build_docx
 from app.documents.editing.text import Change, Edit, EditError, TextShape
 from app.documents.formats import MIME_TYPES, DocumentKind, safe_filename
 from app.documents.service import storage_key
@@ -48,6 +49,7 @@ NEW_DOCUMENT_KINDS = {
     "md": DocumentKind.MD,
     "markdown": DocumentKind.MD,
     "csv": DocumentKind.CSV,
+    "docx": DocumentKind.DOCX,
 }
 """새로 만들 수 있는 확장자 → 형식."""
 
@@ -393,7 +395,11 @@ class NewDocument:
         filename: 파일 이름.
         kind: 문서 형식.
         size_bytes: 파일 크기.
-        line_count: 줄 수 (에이전트에게 결과를 알려줄 때 쓴다).
+        line_count: 줄 수 (에이전트에게 결과를 알려줄 때 쓴다). DOCX 는 본문 문단 수.
+        tables: 표 수 (DOCX).
+        status: 문서 상태. 텍스트 형식은 늘 ``ready``, DOCX 는 파싱을 기다린 결과.
+        notes: 결과에 덧붙일 설명 (영어, DOCX 에서 넣지 못한 그림 등).
+        template_id: 양식으로 쓴 문서 ID (DOCX, 없으면 ``None``).
     """
 
     id: uuid.UUID
@@ -401,6 +407,10 @@ class NewDocument:
     kind: str
     size_bytes: int
     line_count: int
+    tables: int = 0
+    status: str = "ready"
+    notes: list[str] = field(default_factory=list)
+    template_id: uuid.UUID | None = None
 
 
 def new_document_shape(kind: DocumentKind) -> TextShape:
@@ -426,8 +436,11 @@ async def create_new_document(
     filename: str,
     content: str,
     max_bytes: int,
+    parse_wait: float = 0.0,
+    author: str = DEFAULT_AUTHOR,
+    template_document_id: str | None = None,
 ) -> NewDocument:
-    """새 문서(TXT·MD·CSV)를 만들어 지금 대화에 붙인다.
+    """새 문서(TXT·MD·CSV·DOCX)를 만들어 지금 대화에 붙인다.
 
     수정본처럼 대화에 속하고 어느 메시지에도 붙지 않는 문서로 기록한다 (``revision`` 1, 직전 문서 없음).
     그래서 받기·읽기·고치기(``edit_document``)·보관 기간 정리가 업로드한 문서와 똑같이 동작한다.
@@ -438,32 +451,53 @@ async def create_new_document(
         storage: 첨부 저장소.
         conversation_id: 지금 대화 ID (서버가 정한 값).
         filename: 파일 이름 (모델이 넘긴 값). 확장자로 형식을 정한다.
-        content: 파일 내용.
+        content: 파일 내용. DOCX 면 Markdown 으로 읽어 Word 문서로 만든다.
         max_bytes: 최대 크기 (``Settings.document_max_bytes``).
+        parse_wait: DOCX 를 파싱할 때 기다릴 최대 시간(초). 넘기면 파싱은 백그라운드에서 이어진다.
+        author: DOCX 문서 속성의 만든 이.
+        template_document_id: DOCX 의 양식으로 쓸 지금 대화의 DOCX (모델이 넘긴 값).
+            머리글·바닥글·스타일·쪽 설정을 그대로 두고 본문만 새로 쓴다.
 
     Returns:
         만든 문서.
 
     Raises:
         EditError: 확장자가 없거나 지원하지 않을 때, 내용이 비었거나 NUL 글자가 있을 때, CSV 가 올바른
-            표가 아닐 때, 너무 클 때, 대화를 찾을 수 없을 때.
+            표가 아닐 때, 너무 클 때, 대화를 찾을 수 없을 때, 양식이 지금 대화의 DOCX 가 아니거나
+            DOCX 가 아닌 파일에 양식을 줬을 때.
     """
     name = safe_filename(filename)
     stem, dot, ext = name.rpartition(".")
     kind = NEW_DOCUMENT_KINDS.get(ext.lower()) if dot and stem else None
     if kind is None:
         raise EditError(
-            f"Cannot create {name!r}: the filename must end with .txt, .md or .csv (other "
-            "formats cannot be created yet)."
+            f"Cannot create {name!r}: the filename must end with .docx, .txt, .md or .csv "
+            "(other formats cannot be created yet)."
         )
+    if template_document_id and kind is not DocumentKind.DOCX:
+        raise EditError("template_document_id only works when creating a .docx file.")
     body = content.replace("\r\n", "\n")
     if not body.strip():
         raise EditError("The content is empty. Write the full text of the document.")
     if "\x00" in body:
         raise EditError("The content contains NUL characters, which text files cannot have.")
-    if kind is DocumentKind.CSV:
-        text.check_new_csv(body)
-    data = text.encode(body, new_document_shape(kind))
+    template_id: uuid.UUID | None = None
+    created = None
+    if kind is DocumentKind.DOCX:
+        template = None
+        if template_document_id:
+            loaded = await load_editable(
+                session, storage, document_id=template_document_id, conversation_id=conversation_id
+            )
+            if not isinstance(loaded, EditableDocx):
+                raise EditError("The template must be a Word (DOCX) document.")
+            template, template_id = loaded.document.to_bytes(), loaded.source.id
+        created = build_docx(body, author=author, template=template)
+        data = created.data
+    else:
+        if kind is DocumentKind.CSV:
+            text.check_new_csv(body)
+        data = text.encode(body, new_document_shape(kind))
     if len(data) > max_bytes:
         raise EditError(
             f"The document would be {len(data):,} bytes, larger than the limit of "
@@ -487,13 +521,27 @@ async def create_new_document(
         mime_type=MIME_TYPES[kind],
         size_bytes=len(data),
         sha256=hashlib.sha256(data).hexdigest(),
-        status="ready",
-        content=body,
-        parsed_at=datetime.now(UTC),
+        status="ready" if created is None else "processing",
+        content=body if created is None else None,
+        parsed_at=datetime.now(UTC) if created is None else None,
     )
     doc.storage_key = storage_key(doc.id)
     await storage.put(doc.storage_key, data, doc.mime_type)
     session.add(doc)
     await session.commit()
-    lines = body.count("\n") + (0 if body.endswith("\n") else 1)
-    return NewDocument(doc.id, doc.filename, doc.kind, doc.size_bytes, lines)
+    if created is None:
+        lines = body.count("\n") + (0 if body.endswith("\n") else 1)
+        return NewDocument(doc.id, doc.filename, doc.kind, doc.size_bytes, lines)
+    task = documents.schedule_parse(doc.id, data, doc.kind, doc.filename)
+    status = await _wait_for_parse(session, doc.id, task, parse_wait)
+    return NewDocument(
+        doc.id,
+        doc.filename,
+        doc.kind,
+        doc.size_bytes,
+        created.paragraphs,
+        tables=created.tables,
+        status=status,
+        notes=created.notes,
+        template_id=template_id,
+    )
