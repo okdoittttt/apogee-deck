@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from pydantic import Field
 
 FAKE_TOOL = "get_current_time"
 FAKE_MEMORY_TOOL = "remember"
+_CALL_MARKER = re.compile(r"\[\[call:(\w+)\]\]\s*")
 
 
 @dataclass
@@ -47,6 +49,8 @@ class EchoChatModel(BaseChatModel):
       받은 다음 호출에서 결과를 담아 답한다.
     - ``REMEMBER_MARKER``: ``remember`` 도구가 바인딩되어 있으면 표시 뒤의 글을 기억으로 저장한다
       (카테고리 ``other``).
+    - ``[[call:<도구 이름>]] {JSON 인자}``: 그 도구가 바인딩되어 있으면 JSON 객체를 인자로 호출한다.
+      어떤 도구든 E2E 로 시험할 때 쓴다 (예: ``[[call:edit_document]] {"document_id": ...}``).
 
     Attributes:
         stream_delay_seconds: 스트리밍 시 조각 하나마다 기다리는 시간. "응답 생성 중" 상황을
@@ -93,6 +97,8 @@ class EchoChatModel(BaseChatModel):
             return _Plan(
                 "도구 결과를 확인했습니다." if thinking else "", f"{turn} 도구 결과: {result}", None
             )
+        if call := self._marked_call(last_human.text):
+            return _Plan("", f"{call['name']} 도구를 부를게요.", call)
         if self.TOOL_MARKER in last_human.text and FAKE_TOOL in self.tool_names:
             call = {
                 "id": f"call_{uuid.uuid4().hex[:12]}",
@@ -116,6 +122,19 @@ class EchoChatModel(BaseChatModel):
         )
         suffix = f" (+{n_images} image)" if n_images else ""
         return _Plan(reasoning if thinking else "", f"{turn} {last_human.text}{suffix}", None)
+
+    def _marked_call(self, text: str) -> dict[str, Any] | None:
+        """``[[call:<도구>]] {JSON}`` 표시가 있고 그 도구가 바인딩되어 있으면 도구 호출을 만든다."""
+        match = _CALL_MARKER.search(text)
+        if match is None or match.group(1) not in self.tool_names:
+            return None
+        try:
+            args, _ = json.JSONDecoder().raw_decode(text[match.end() :])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(args, dict):
+            return None
+        return {"id": f"call_{uuid.uuid4().hex[:12]}", "name": match.group(1), "args": args}
 
     def _generate(
         self,

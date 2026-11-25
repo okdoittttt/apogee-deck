@@ -31,6 +31,7 @@ from app.orchestration.events import (
     ToolFinished,
     ToolStarted,
     reasoning_text,
+    tool_documents,
     tool_output_text,
     tool_sources,
 )
@@ -424,6 +425,7 @@ def _tool_events(
                         output=tool_output_text(message.content),
                         status="error" if message.status == "error" else "done",
                         sources=tool_sources(message.artifact),
+                        documents=tool_documents(message.artifact),
                     )
                 )
     return events

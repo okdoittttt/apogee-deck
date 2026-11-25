@@ -71,12 +71,15 @@ class ToolFinished:
         status: ``"done"`` 또는 ``"error"``.
         sources: 화면에 출처로 보여줄 웹 페이지나 프로젝트 문서 (``tool_sources`` 참고).
             웹 검색처럼 출처가 있는 도구만 채운다.
+        documents: 도구가 만든 문서 (``tool_documents`` 참고). 화면에 파일 칩으로 보여준다.
+            문서를 고치는 도구만 채운다.
     """
 
     id: str
     output: str
     status: Literal["done", "error"]
     sources: list[dict[str, str | None]] = field(default_factory=list)
+    documents: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -180,6 +183,41 @@ def tool_sources(artifact: Any) -> list[dict[str, Any]]:
     return sources
 
 
+def tool_documents(artifact: Any) -> list[dict[str, Any]]:
+    """도구 결과의 artifact 에서 도구가 만든 문서(수정본) 목록을 꺼낸다.
+
+    문서를 만드는 도구(``edit_document``)는 ``{"documents": [...]}`` 를 artifact 로 돌려준다.
+    화면이 다운로드 주소를 만드는 값이라 문서 ID 는 UUID 형식만 남긴다.
+
+    Args:
+        artifact: ``ToolMessage.artifact``.
+
+    Returns:
+        ``{"document_id", "filename", "revision", "source_document_id", "kind", "size_bytes"}`` 목록.
+        없으면 빈 목록.
+    """
+    if not isinstance(artifact, dict):
+        return []
+    documents: list[dict[str, Any]] = []
+    for item in artifact.get("documents") or []:
+        if not isinstance(item, dict):
+            continue
+        document_id = _uuid_or_none(item.get("document_id"))
+        if document_id is None:
+            continue
+        documents.append(
+            {
+                "document_id": document_id,
+                "filename": str(item.get("filename") or "문서"),
+                "revision": _number_or_none(item.get("revision")),
+                "source_document_id": _uuid_or_none(item.get("source_document_id")),
+                "kind": str(item.get("kind") or ""),
+                "size_bytes": _number_or_none(item.get("size_bytes")),
+            }
+        )
+    return documents
+
+
 def _number_or_none(value: Any) -> int | None:
     """출처 번호. 양의 정수가 아니면 ``None``."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
@@ -279,6 +317,8 @@ class StepRecorder:
                     step["status"] = event.status
                     if event.sources:
                         step["sources"] = event.sources
+                    if event.documents:
+                        step["documents"] = event.documents
 
     def finalize(self, outcome: Literal["finished", "error", "interrupted"]) -> None:
         """응답이 끝났을 때 아직 실행 중으로 남은 도구의 상태를 정리한다.

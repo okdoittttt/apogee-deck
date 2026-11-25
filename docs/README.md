@@ -24,6 +24,7 @@ okdoitttt 의 구조와 동작을 그림과 함께 정리한 문서입니다. �
 | | [llm-providers.md](features/llm-providers.md) | 모델 목록, provider 별 모델 생성, 그래프 캐시 | 작성됨 |
 | | [memory.md](features/memory.md) | 장기 기억: 프로필, 기억, recall | 작성됨 |
 | | [documents.md](features/documents.md) | 첨부 문서: 형식 확인, 파싱, 상태 | 작성됨 |
+| | [document-editing.md](features/document-editing.md) | 문서 수정·생성: TXT·MD·CSV·DOCX 수정본, 새 문서(TXT·MD·CSV), 파일 칩 | 작성됨 |
 | | [projects-rag.md](features/projects-rag.md) | 프로젝트 문서: 요소, 청크, 하이브리드 검색 | 작성됨 |
 | | [auth-approval.md](features/auth-approval.md) | Google 로그인, 승인제, 관리자 화면 | 작성됨 |
 | | [images.md](features/images.md) | 채팅 이미지 저장과 checkpoint 참조 | 작성됨 |

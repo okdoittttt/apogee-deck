@@ -59,6 +59,9 @@ def render(name: str, /, **variables: Any) -> Prompt:
 
 - 검증: `make test` (LLM 없이 fake 모델로 실행), `make lint`, 스키마 변경 시 `make db-check`.
 - LLM 이 필요 없는 확인은 `LLM_PROVIDER=fake` 로 한다. 로컬 Ollama 모델은 노트북 메모리를 많이 쓴다.
+- **사용자의 테스트 결과(작은 표본)만 보고 동작을 바꾸는 수정을 하기 전에는 먼저 사용자에게 정확히 알리고 확인받는다.**
+  알릴 내용: 문제가 도구 결함·모델 실수·정보 부족 중 무엇인지, 바꿀 동작, 그 수정이 표본 밖에서도 맞는 근거, 다른 요청에 생길 수 있는 부작용.
+  결과에 정보를 더하는 수정처럼 동작이 바뀌지 않는 것은 예외지만, 그때도 무엇을 바꿨는지 알린다.
 - DB 스키마 변경은 `app/models.py` 수정 → `make db-revision m="..."` → 생성된 파일 검토.
 - 프롬프트는 `app/agents/<에이전트>/prompts/*.md` 와 `app/prompts/shared/` 에서 관리한다. 코드에서는 이름으로 부른다.
   그래프 노드 같은 비동기 코드에서는 `await prompts.arender(...)` 를 쓴다 (`render` 는 Langfuse 조회 때문에 이벤트 루프를 막을 수 있다).

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.text">
+<office:font-face-decls><style:font-face style:name="Apple SD Gothic Neo" svg:font-family="'Apple SD Gothic Neo'"/></office:font-face-decls>
+<office:styles><style:default-style style:family="paragraph"><style:text-properties style:font-name="Apple SD Gothic Neo" style:font-name-asian="Apple SD Gothic Neo" fo:font-size="12pt"/></style:default-style></office:styles>
+<office:automatic-styles><style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style></office:automatic-styles>
+<office:body><office:text>
+<text:tracked-changes text:track-changes="true">
+<text:changed-region xml:id="ct1" text:id="ct1"><text:deletion><office:change-info><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T10:00:00</dc:date></office:change-info><text:p>120</text:p></text:deletion></text:changed-region>
+<text:changed-region xml:id="ct2" text:id="ct2"><text:insertion><office:change-info><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T10:00:00</dc:date></office:change-info></text:insertion></text:changed-region>
+<text:changed-region xml:id="ct3" text:id="ct3"><text:insertion><office:change-info><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T10:01:00</dc:date></office:change-info></text:insertion></text:changed-region>
+<text:changed-region xml:id="ct4" text:id="ct4"><text:deletion><office:change-info><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T10:02:00</dc:date></office:change-info><text:p>Removed sentence.</text:p></text:deletion></text:changed-region>
+<text:changed-region xml:id="ct5" text:id="ct5"><text:format-change><office:change-info><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T10:03:00</dc:date></office:change-info></text:format-change></text:changed-region>
+</text:tracked-changes>
+<text:h text:outline-level="1">Sales report</text:h>
+<text:p>Revenue in 2024 was <text:change text:change-id="ct1"/><text:change-start text:change-id="ct2"/>135<text:change-end text:change-id="ct2"/> billion won.</text:p>
+<text:p><office:annotation office:name="c1"><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T11:00:00</dc:date><text:p>Needs a source.</text:p></office:annotation>Revenue in 2024 was <office:annotation-end office:name="c1"/>120 billion won.</text:p>
+<text:p><text:change-start text:change-id="ct3"/>This paragraph was inserted by a reviewer.</text:p><text:p><text:change-end text:change-id="ct3"/>The team grew to <text:change-start text:change-id="ct5"/><text:span text:style-name="B">12 people</text:span><text:change-end text:change-id="ct5"/>.<office:annotation><dc:creator>Kim Minji</dc:creator><dc:date>2026-11-20T11:05:00</dc:date><text:p>Check the headcount.</text:p></office:annotation></text:p>
+<text:p><text:change text:change-id="ct4"/>The team grew to 12 people.</text:p>
+</office:text></office:body></office:document>

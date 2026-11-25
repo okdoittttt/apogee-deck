@@ -34,6 +34,7 @@ erDiagram
     conversations o|--o{ documents : "conversation_id"
     messages o|--o{ documents : "message_id"
     projects o|--o{ documents : "project_id"
+    documents o|--o{ documents : "source_document_id"
     users o|--o{ documents : "user_id"
     messages ||--o{ message_images : "message_id"
     documents ||--o{ document_elements : "document_id"
@@ -159,6 +160,7 @@ erDiagram
     conversations o|--o{ documents : "conversation_id"
     messages o|--o{ documents : "message_id"
     projects o|--o{ documents : "project_id"
+    documents o|--o{ documents : "source_document_id"
     users o|--o{ documents : "user_id"
     documents ||--o{ document_elements : "document_id"
     documents ||--o{ document_chunks : "document_id"
@@ -182,6 +184,9 @@ erDiagram
         uuid project_id FK "nullable"
         uuid conversation_id FK "nullable"
         uuid message_id FK "nullable"
+        uuid source_document_id FK "nullable"
+        int revision
+        varchar_20 created_by
         varchar_255 filename
         varchar_20 kind
         varchar_150 mime_type

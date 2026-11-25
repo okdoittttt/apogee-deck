@@ -309,7 +309,9 @@ def format_hits(query: str, hits: list[SearchHit], document: str | None = None) 
         if hit.heading:
             meta.append(f"section: {hit.heading}")
         if hit.kind == "image":
-            meta.append("description of an image")
+            # 그림 id 는 Word 문서에 그림을 넣을 때 쓴다 (edit_document 의 image: "img:<id>").
+            image = f" (image: img:{hit.image_element_id})" if hit.image_element_id else ""
+            meta.append(f"description of an image{image}")
         elif hit.kind == "table":
             meta.append("table")
         lines.append(f"\n{source_marker(i)} {' | '.join(meta)}\n{hit.content}")

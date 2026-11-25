@@ -51,7 +51,7 @@
 | `meta` | `conversation_id`. 항상 첫 이벤트 |
 | `reasoning` | `text`. 추론 과정 조각 |
 | `tool_start` | `id`, `name`, `label`, `done_label`, `args` |
-| `tool_end` | `id`, `output`, `status`, `sources` |
+| `tool_end` | `id`, `output`, `status`, `sources`, `documents` (도구가 만든 수정본·새 문서, [문서 수정과 생성](features/document-editing.md#화면까지)) |
 | `delta` | `text`. 답변 텍스트 조각 |
 | `done` | `stop_reason`, `model`, `message_id`. 정상 종료 |
 | `error` | `message`, `error_id`, `transient`. 시간 상한을 넘겨 멈췄을 때는 `error_id` 가 없다 |

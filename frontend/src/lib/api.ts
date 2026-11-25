@@ -56,6 +56,16 @@ export interface DocumentSource {
 
 export type Source = WebSource | DocumentSource;
 
+/** 도구가 만든 문서 (edit_document 의 수정본). 답변 아래 다운로드 칩으로 보여준다. */
+export interface ToolDocument {
+  document_id: string;
+  filename: string; // 예: "보고서 (수정 2).md"
+  revision: number | null; // 원본 1, 고칠 때마다 1씩 커진다
+  source_document_id: string | null;
+  kind: string; // txt, md, csv ...
+  size_bytes: number | null;
+}
+
 /** 실행 단계: 도구 호출 하나. */
 export interface ToolStep {
   type: "tool";
@@ -67,6 +77,7 @@ export interface ToolStep {
   output: string | null;
   status: "running" | "done" | "error" | "interrupted";
   sources?: Source[];
+  documents?: ToolDocument[];
 }
 
 export type Step = ReasoningStep | ToolStep;
@@ -265,6 +276,7 @@ export interface ToolEndEvent {
   output: string;
   status: "done" | "error";
   sources?: Source[];
+  documents?: ToolDocument[];
 }
 
 export interface StreamHandlers {
@@ -423,6 +435,69 @@ export interface AppInfo {
 // --- 첨부 문서 ---
 
 export const documentFileUrl = (id: string) => `${API_URL}/api/documents/${id}/file`;
+
+/** 문서 버전 사슬(원본 → 수정 2 → …)의 한 버전. */
+export interface DocumentVersion {
+  id: string;
+  filename: string;
+  revision: number;
+  kind: string;
+  size_bytes: number;
+  status: DocumentInfo["status"];
+  created_by: "user" | "agent"; // user: 올리거나 되돌림, agent: 에이전트가 고치거나 만듦
+  source_document_id: string | null;
+  created_at: string;
+}
+
+/** 비교 블록 안의 글자 조각. */
+export interface ChangePart {
+  op: "equal" | "insert" | "delete";
+  text: string;
+}
+
+/** 직전 버전과 비교한 블록 하나 (문단 또는 줄). skipped 는 같은 블록 여럿을 접은 것. */
+export interface ChangeBlock {
+  kind: "same" | "changed" | "added" | "removed" | "skipped";
+  label: string; // p12, L3
+  where: string | null; // 표1 2행 1열 등
+  parts: ChangePart[];
+  skipped: number;
+}
+
+export interface DocumentChanges {
+  previous: DocumentVersion | null;
+  unit: "paragraph" | "line";
+  changed: number;
+  blocks: ChangeBlock[];
+}
+
+/** 문서가 든 버전 사슬을 오래된 순서로 읽는다. */
+export async function getDocumentVersions(id: string, signal?: AbortSignal): Promise<DocumentVersion[]> {
+  const res = await apiFetch(`/api/documents/${id}/versions`, { signal });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `버전 목록을 읽지 못했습니다 (${res.status})`);
+  return res.json();
+}
+
+/** 문서를 직전 버전과 비교한다. */
+export async function getDocumentChanges(id: string, signal?: AbortSignal): Promise<DocumentChanges> {
+  const res = await apiFetch(`/api/documents/${id}/changes`, { signal });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `변경이력을 읽지 못했습니다 (${res.status})`);
+  return res.json();
+}
+
+/** 예전 버전을 복사해 가장 새 버전 뒤에 새 수정본을 만든다. */
+export async function restoreDocumentVersion(id: string): Promise<DocumentVersion> {
+  const res = await apiFetch(`/api/documents/${id}/restore`, { method: "POST" });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `되돌리지 못했습니다 (${res.status})`);
+  return res.json();
+}
+
+/** 문서 원본 파일을 받는다 (미리보기용). */
+export async function getDocumentFile(id: string, signal?: AbortSignal): Promise<Blob> {
+  const res = await apiFetch(`/api/documents/${id}/file`, { signal });
+  if (!res.ok) throw new Error((await errorDetail(res)) || `파일을 받지 못했습니다 (${res.status})`);
+  return res.blob();
+}
 
 /** 문서를 올린다. 서버는 바로 processing 상태로 응답하고 백그라운드에서 파싱한다. */
 export async function uploadDocument(file: File, signal?: AbortSignal): Promise<DocumentInfo> {

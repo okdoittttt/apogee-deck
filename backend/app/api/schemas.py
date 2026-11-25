@@ -135,6 +135,26 @@ class DocumentSource(BaseModel):
     n: int | None = None
 
 
+class ToolDocument(BaseModel):
+    """도구가 만든 문서 (``edit_document`` 의 수정본). 화면에 다운로드 칩으로 보여준다.
+
+    Attributes:
+        document_id: 문서 ID (``GET /api/documents/{id}/file`` 로 받는다).
+        filename: 파일 이름 (예: ``"보고서 (수정 2).md"``).
+        revision: 버전 번호 (원본 1). 모르면 ``None``.
+        source_document_id: 이 문서를 만든 직전 문서 ID. 모르면 ``None``.
+        kind: 문서 형식 (``txt``, ``md``, ``csv`` ...).
+        size_bytes: 파일 크기. 모르면 ``None``.
+    """
+
+    document_id: str
+    filename: str
+    revision: int | None = None
+    source_document_id: str | None = None
+    kind: str = ""
+    size_bytes: int | None = None
+
+
 class ToolStep(BaseModel):
     """실행 단계: 도구 호출 하나.
 
@@ -148,6 +168,7 @@ class ToolStep(BaseModel):
         output: 도구 결과 (길이 제한됨). 끝나지 않았으면 ``None``.
         status: ``running`` / ``done`` / ``error`` / ``interrupted``.
         sources: 도구가 참고한 웹 페이지나 프로젝트 문서. 없으면 빈 목록.
+        documents: 도구가 만든 문서 (수정본). 없으면 빈 목록.
     """
 
     type: Literal["tool"] = "tool"
@@ -159,6 +180,7 @@ class ToolStep(BaseModel):
     output: str | None = None
     status: Literal["running", "done", "error", "interrupted"]
     sources: list[DocumentSource | Source] = []
+    documents: list[ToolDocument] = []
 
 
 Step = Annotated[ReasoningStep | ToolStep, Field(discriminator="type")]
@@ -327,6 +349,73 @@ class DocumentOut(BaseModel):
     image_fallback_count: int | None = None
     created_at: datetime
     parsed_at: datetime | None = None
+
+
+class DocumentVersionOut(BaseModel):
+    """문서 버전 사슬(원본 → 수정 2 → …)의 한 버전.
+
+    Attributes:
+        id: 문서 ID.
+        filename: 파일 이름.
+        revision: 버전 번호 (원본 1).
+        kind: 문서 형식.
+        size_bytes: 파일 크기.
+        status: 파싱 상태.
+        created_by: 만든 쪽 (``user`` 올리거나 되돌림 | ``agent`` 에이전트).
+        source_document_id: 직전 버전 ID.
+        created_at: 만든 시각.
+    """
+
+    id: uuid.UUID
+    filename: str
+    revision: int
+    kind: str
+    size_bytes: int
+    status: DocumentStatus
+    created_by: Literal["user", "agent"]
+    source_document_id: uuid.UUID | None = None
+    created_at: datetime
+
+
+class ChangePartOut(BaseModel):
+    """비교 블록 안의 글자 조각 (``equal`` 그대로, ``insert`` 넣음, ``delete`` 지움)."""
+
+    op: Literal["equal", "insert", "delete"]
+    text: str
+
+
+class ChangeBlockOut(BaseModel):
+    """비교 결과의 블록 하나 (문단 또는 줄).
+
+    Attributes:
+        kind: ``same`` | ``changed`` | ``added`` | ``removed`` | ``skipped`` (같은 블록을 접음).
+        label: 위치 (``p12``, ``L3``).
+        where: 덧붙일 위치 설명 (예: ``표1 2행 1열``).
+        parts: 글자 조각.
+        skipped: 접은 블록 수.
+    """
+
+    kind: Literal["same", "changed", "added", "removed", "skipped"]
+    label: str = ""
+    where: str | None = None
+    parts: list[ChangePartOut] = Field(default_factory=list)
+    skipped: int = 0
+
+
+class DocumentChangesOut(BaseModel):
+    """직전 버전과 비교한 결과.
+
+    Attributes:
+        previous: 직전 버전 (없으면 ``None``).
+        unit: 비교 단위 (``paragraph`` | ``line``).
+        changed: 바뀐 블록 수 (고침·넣음·지움).
+        blocks: 블록 목록.
+    """
+
+    previous: DocumentVersionOut | None = None
+    unit: Literal["paragraph", "line"]
+    changed: int
+    blocks: list[ChangeBlockOut]
 
 
 ProjectName = Annotated[str, Field(min_length=1, max_length=100, pattern=r"\S")]
@@ -657,4 +746,26 @@ def document_out(doc: Document, char_count: int | None) -> DocumentOut:
         image_fallback_count=doc.image_fallback_count,
         created_at=doc.created_at,
         parsed_at=doc.parsed_at,
+    )
+
+
+def version_out(doc: Document) -> DocumentVersionOut:
+    """DB 의 문서를 버전 목록 형식으로 바꾼다.
+
+    Args:
+        doc: 문서.
+
+    Returns:
+        버전 정보.
+    """
+    return DocumentVersionOut(
+        id=doc.id,
+        filename=doc.filename,
+        revision=doc.revision,
+        kind=doc.kind,
+        size_bytes=doc.size_bytes,
+        status=doc.status,
+        created_by=doc.created_by,
+        source_document_id=doc.source_document_id,
+        created_at=doc.created_at,
     )

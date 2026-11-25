@@ -17,7 +17,13 @@ from dataclasses import dataclass
 from langchain_core.tools import BaseTool
 
 from app.core.config import Settings
-from app.tools.documents import make_read_document, make_search_project
+from app.tools.documents import (
+    make_create_document,
+    make_edit_document,
+    make_read_document,
+    make_search_project,
+    make_view_document_for_edit,
+)
 from app.tools.memory import (
     make_forget,
     make_remember,
@@ -78,7 +84,9 @@ GROUPS: dict[str, ToolGroup] = {
         ),
         ToolGroup(
             "documents",
-            "Is `latest_message` asking about an attached file or a project document?",
+            "Is `latest_message` asking about an attached file or a project document, "
+            "asking to change, fix or add to an attached file, or asking to create a file "
+            "(text, markdown or CSV)?",
         ),
         ToolGroup(
             "memory",
@@ -132,6 +140,21 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "read_document": ToolSpec(
         make_read_document, ToolLabel(running="문서 읽는 중", done="문서 읽음"), "documents"
+    ),
+    "view_document_for_edit": ToolSpec(
+        make_view_document_for_edit,
+        ToolLabel(running="수정할 곳 보는 중", done="수정할 곳 봄"),
+        "documents",
+    ),
+    "edit_document": ToolSpec(
+        make_edit_document,
+        ToolLabel(running="문서 수정하는 중", done="문서 수정함"),
+        "documents",
+    ),
+    "create_document": ToolSpec(
+        make_create_document,
+        ToolLabel(running="문서 만드는 중", done="문서 만듦"),
+        "documents",
     ),
     "search_project": ToolSpec(
         make_search_project,

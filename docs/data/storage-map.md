@@ -95,7 +95,7 @@ flowchart TB
 
 | 키 | 내용 | 보관 |
 |---|---|---|
-| `documents/<문서 ID>` | 대화 첨부 원본 | **lifecycle 규칙으로 30일 뒤 자동 삭제** (`ATTACHMENT_RETENTION_DAYS`) |
+| `documents/<문서 ID>` | 대화 첨부 원본, 에이전트가 만든 수정본·새 문서 | **lifecycle 규칙으로 30일 뒤 자동 삭제** (`ATTACHMENT_RETENTION_DAYS`) |
 | `projects/<프로젝트 ID>/documents/<문서 ID>` | 프로젝트 문서 원본 | 지울 때까지 |
 | `projects/<프로젝트 ID>/images/<문서 ID>/<순서>` | 프로젝트 문서에서 뽑은 그림 | 지울 때까지 |
 | `images/<이미지 ID>` | 채팅에 첨부한 이미지 | 대화를 지울 때까지 |
