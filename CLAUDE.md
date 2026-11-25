@@ -12,7 +12,7 @@ LangGraph 기반 LLM 에이전트 웹앱 (개인 학습 프로젝트). 구조와
   - 성격이 다른 변경은 커밋을 나눈다. 한 파일에 섞여 있으면 중간 상태를 스테이징해서 나누고, 각 커밋 시점에서 테스트가 통과하는지 확인한다.
 - **commit 메시지에 Claude 트레일러를 넣지 않는다.** `Co-Authored-By: Claude …`, `🤖 Generated with Claude Code` 등 Claude/AI 관련 문구를 메시지 어디에도 넣지 않는다.
 - 이 저장소는 **개인 GitHub 계정 전용**이다. 회사 계정과 섞이면 안 된다.
-  - remote 는 SSH 별칭 `git@github.com-okdoittttt:okdoittttt/okdoitttt.git` 만 사용한다 (HTTPS 주소, 다른 별칭 금지).
+  - remote 는 SSH 별칭 `git@github.com-okdoittttt:okdoittttt/apogee-deck.git` 만 사용한다 (HTTPS 주소, 다른 별칭 금지).
   - 작성자는 저장소 로컬 설정 `okdoittttt <94339333+okdoittttt@users.noreply.github.com>` 이다. 전역 git 설정은 건드리지 않는다.
 - public 저장소다. commit 전에 비밀값(API 키 등)이 포함되지 않았는지 확인한다. `.env` 는 커밋하지 않는다.
 
