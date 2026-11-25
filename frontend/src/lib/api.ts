@@ -481,7 +481,7 @@ export async function getDocumentVersions(id: string, signal?: AbortSignal): Pro
 /** 문서를 직전 버전과 비교한다. */
 export async function getDocumentChanges(id: string, signal?: AbortSignal): Promise<DocumentChanges> {
   const res = await apiFetch(`/api/documents/${id}/changes`, { signal });
-  if (!res.ok) throw new Error((await errorDetail(res)) || `바뀐 곳을 읽지 못했습니다 (${res.status})`);
+  if (!res.ok) throw new Error((await errorDetail(res)) || `변경이력을 읽지 못했습니다 (${res.status})`);
   return res.json();
 }
 

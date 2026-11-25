@@ -36,7 +36,7 @@ type Tab = "preview" | "changes" | "versions";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "preview", label: "미리보기" },
-  { id: "changes", label: "바뀐 곳" },
+  { id: "changes", label: "변경이력" },
   { id: "versions", label: "버전" },
 ];
 
@@ -214,7 +214,7 @@ function Preview({ documentId, kind }: { documentId: string; kind: string }) {
   return <TextPreview text={file.text ?? ""} kind={kind} />;
 }
 
-// --- 바뀐 곳 -------------------------------------------------------------------------------------
+// --- 변경이력 -------------------------------------------------------------------------------------
 
 const BLOCK_STYLE: Record<string, string> = {
   changed: "border-amber-500/70",
@@ -393,7 +393,7 @@ function Versions({
                 </button>
               )}
               <a href={documentFileUrl(version.id)} className={SMALL_BUTTON}>
-                받기
+                다운로드
               </a>
               {version.id !== latest && (
                 <button
@@ -427,7 +427,7 @@ function Loading() {
 // --- 패널 ----------------------------------------------------------------------------------------
 
 /**
- * 에이전트가 만든 수정본·새 문서의 오른쪽 패널: 미리보기, 직전 버전과 바뀐 곳, 버전 목록과 되돌리기.
+ * 에이전트가 만든 수정본·새 문서의 오른쪽 패널: 미리보기, 직전 버전과의 변경이력, 버전 목록과 되돌리기.
  * 넓은 화면은 대화 옆에 붙고, 좁은 화면은 전체를 덮는다.
  */
 export function EditedDocumentPanel({
@@ -479,7 +479,7 @@ export function EditedDocumentPanel({
           href={documentFileUrl(shown.documentId)}
           className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs text-muted hover:bg-hover hover:text-fg"
         >
-          받기
+          다운로드
         </a>
         <button
           type="button"

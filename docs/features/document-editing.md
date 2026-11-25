@@ -20,7 +20,7 @@ flowchart LR
         create(["새 파일 만들어 달라고 하기"])
         chip(["답변 아래 파일 칩 받기"])
         again(["만든 파일 다시 고치기"])
-        panel(["미리보기·바뀐 곳·버전 보기"])
+        panel(["미리보기·변경이력·버전 보기"])
         restore(["예전 버전으로 되돌리기"])
     end
 
@@ -48,8 +48,8 @@ flowchart LR
 - 고칠 때마다 새 버전이 생깁니다: `보고서.md` → `보고서 (수정 2).md` → `보고서 (수정 3).md`. 원본은 그대로 남습니다.
 - 새로 만든 문서의 칩에는 "새 문서", 수정본의 칩에는 "수정본 v2" 가 붙습니다. 칩을 누르면 오른쪽 패널이 열립니다.
   - **미리보기**: Word 는 브라우저에서 그리고(`docx-preview`, 실제 Word 와 조금 다를 수 있음), TXT 는 글자, MD 는 Markdown, CSV 는 표로 보여 줍니다.
-  - **바뀐 곳**: 직전 버전과 문단(줄) 단위로 맞추고 바뀐 문단 안은 낱말 단위로, 지운 글자는 빨간 취소선, 넣은 글자는 초록으로 보여 줍니다. 서식만 바뀐 곳은 글자가 같아 나오지 않습니다.
-  - **버전**: 원본부터 최신까지 목록, 버전마다 보기·받기, "이 버전으로 되돌리기"(그 버전을 복사한 새 수정본을 최신 뒤에 붙임, 예전 버전은 남김).
+  - **변경이력**: 직전 버전과 문단(줄) 단위로 맞추고 바뀐 문단 안은 낱말 단위로, 지운 글자는 빨간 취소선, 넣은 글자는 초록으로 보여 줍니다. 서식만 바뀐 곳은 글자가 같아 나오지 않습니다.
+  - **버전**: 원본부터 최신까지 목록, 버전마다 보기·다운로드, "이 버전으로 되돌리기"(그 버전을 복사한 새 수정본을 최신 뒤에 붙임, 예전 버전은 남김).
 - 칩은 실행 단계(`messages.steps`)에 저장되어 새로고침해도 남습니다.
 
 ## 구조
@@ -312,7 +312,7 @@ DOCX 는 ZIP 안의 XML(`word/document.xml`, 머리글·바닥글)을 `lxml` 로
 3. SSE `tool_end` 의 `documents` 와 실행 단계(`ToolStep.documents`)로 화면에 갑니다.
 4. `EditedFiles` 가 답변 아래에 칩을 그립니다. 칩을 누르면 `EditedDocumentPanel` 이 열립니다(문서 보기 패널과 한 번에 하나만).
    - 미리보기·받기: `GET /api/documents/{id}/file`
-   - 바뀐 곳: `GET /api/documents/{id}/changes` (직전 버전과 원본 파일끼리 비교, `app/documents/editing/compare.py`)
+   - 변경이력: `GET /api/documents/{id}/changes` (직전 버전과 원본 파일끼리 비교, `app/documents/editing/compare.py`)
    - 버전: `GET /api/documents/{id}/versions` (같은 대화 안 `source_document_id` 사슬, 갈래가 있으면 가장 최근 것)
    - 되돌리기: `POST /api/documents/{id}/restore` (그 버전 파일과 파싱 결과를 복사한 새 행, `created_by='user'`, `source_document_id`=최신, 최신이면 409)
    - 모두 내 문서만(남의 문서는 404). 되돌린 뒤 에이전트가 예전 id 를 고치려 하면 "더 새 버전이 있음" 으로 새 id 를 안내받습니다.

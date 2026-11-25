@@ -32,7 +32,7 @@ function editedMeta(doc: ToolDocument): string {
 
 /**
  * 에이전트가 이번 답변에서 만든 수정본·새 문서를 답변 아래에 파일 칩으로 보여준다.
- * 누르면 오른쪽 패널(미리보기·바뀐 곳·버전)을 열고, 패널이 없는 화면에서는 바로 받는다.
+ * 누르면 오른쪽 패널(미리보기·변경이력·버전)을 열고, 패널이 없는 화면에서는 바로 받는다.
  */
 export function EditedFiles({ steps }: { steps: Step[] }) {
   const openEdited = useOpenEdited();
