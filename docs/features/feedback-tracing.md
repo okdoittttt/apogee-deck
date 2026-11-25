@@ -14,7 +14,7 @@ flowchart LR
     user(["사용자"])
     dev(["개발자"])
 
-    subgraph app["okdoitttt"]
+    subgraph app["Apogee Deck"]
         up(["응답에 👍 달기"])
         down(["응답에 👎 달고 의견 남기기"])
         cancel(["같은 버튼을 다시 눌러 취소"])

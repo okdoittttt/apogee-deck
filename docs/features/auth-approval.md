@@ -14,7 +14,7 @@ flowchart LR
     user(["사용자"])
     admin(["관리자<br/>ADMIN_EMAILS"])
 
-    subgraph app["okdoitttt"]
+    subgraph app["Apogee Deck"]
         login(["Google 로 로그인"])
         request(["가입 신청 (사유 입력)"])
         wait(["승인 대기 화면에서 기다리기"])

@@ -4,7 +4,7 @@ import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "okdoitttt",
+  title: "Apogee Deck",
   description: "LLM 기반 에이전트",
 };
 

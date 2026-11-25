@@ -99,7 +99,7 @@ function CenteredCard({ title, children }: { title: string; children: ReactNode 
       <div className="w-full max-w-[420px] rounded-2xl border border-line bg-surface p-7 shadow-sm">
         <div className="mb-5 flex items-center gap-2.5">
           <LogoIcon className="h-7 w-7" />
-          <span className="text-[17px] font-semibold tracking-tight">okdoitttt</span>
+          <span className="text-[17px] font-semibold tracking-tight">Apogee Deck</span>
         </div>
         <h1 className="mb-3 text-lg font-semibold">{title}</h1>
         <div className="space-y-4">{children}</div>
