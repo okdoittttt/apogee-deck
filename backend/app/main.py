@@ -95,7 +95,7 @@ async def prepare_storage() -> None:
         )
 
 
-app = FastAPI(title="okdoitttt API", lifespan=lifespan)
+app = FastAPI(title="Apogee Deck API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

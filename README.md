@@ -1,4 +1,4 @@
-# okdoitttt
+# Apogee Deck
 
 LangGraph 기반 LLM 에이전트 웹앱입니다. Claude 의 채팅·프로젝트 기능과 비슷한 개인 학습 프로젝트입니다.
 

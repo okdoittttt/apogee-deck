@@ -17,7 +17,7 @@ flowchart LR
     user(["사용자"])
     model(["모델 (chat 에이전트)"])
 
-    subgraph app["okdoitttt"]
+    subgraph app["Apogee Deck"]
         uc1(["대화에서 기억해 달라고 말하기"])
         uc2(["기억을 반영한 답 받기"])
         uc3(["프로필 보기·고치기"])

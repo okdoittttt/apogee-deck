@@ -14,7 +14,7 @@ flowchart LR
     user(["사용자"])
     admin(["관리자<br/>ADMIN_EMAILS"])
 
-    subgraph app["okdoitttt"]
+    subgraph app["Apogee Deck"]
         system["채팅 웹앱"]
     end
 

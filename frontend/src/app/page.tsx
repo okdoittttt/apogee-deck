@@ -74,7 +74,7 @@ const IDLE_WAIT_MAX_MS = 10000;
 const QUEUE_FULL_TEXT = "응답 생성 중에는 메시지를 1개까지만 대기열에 넣을 수 있습니다.";
 const QUEUE_PENDING_TEXT = "대기 메시지를 먼저 보내거나 삭제해 주세요.";
 const NAV_BLOCKED_TEXT = "대기 메시지가 전송된 뒤에 이동할 수 있습니다.";
-const APP_TITLE = "okdoitttt";
+const APP_TITLE = "Apogee Deck";
 
 /** 화면을 바꿀 때 주소를 어떻게 남길지: 기록에 쌓기, 지금 기록을 바꾸기, 그대로 두기(주소를 따라 연 경우). */
 type HistoryMode = "push" | "replace" | "none";

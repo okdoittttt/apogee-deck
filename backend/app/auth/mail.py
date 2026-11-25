@@ -18,7 +18,7 @@ from app.core.config import Settings
 logger = logging.getLogger(__name__)
 
 SMTP_TIMEOUT_SECONDS = 20
-APP_NAME = "okdoitttt"
+APP_NAME = "Apogee Deck"
 
 
 def build_message(settings: Settings, to: list[str], subject: str, body: str) -> EmailMessage:
