@@ -18,12 +18,14 @@
 
 import asyncio
 import hashlib
+import io
 import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -33,10 +35,11 @@ from app.documents import service as documents
 from app.documents.editing import text
 from app.documents.editing.docx import DEFAULT_AUTHOR, DocxDocument
 from app.documents.editing.docx_create import build_docx
+from app.documents.editing.docx_objects import ImageData
 from app.documents.editing.text import Change, Edit, EditError, TextShape
 from app.documents.formats import MIME_TYPES, DocumentKind, safe_filename
 from app.documents.service import storage_key
-from app.models import Conversation, Document
+from app.models import Conversation, Document, DocumentElement
 
 TEXT_KINDS = frozenset({DocumentKind.TXT, DocumentKind.MD, DocumentKind.CSV})
 """글자 그대로 고치는 텍스트 형식."""
@@ -111,6 +114,101 @@ def revision_filename(filename: str, revision: int) -> str:
     suffix = f" (수정 {revision})" + (f".{ext}" if ext else "")
     stem = _REVISION_SUFFIX.sub("", stem)
     return stem[: max(FILENAME_LIMIT - len(suffix), 1)] + suffix
+
+
+_IMAGE_REF = re.compile(
+    r"img:\s*\{?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.IGNORECASE
+)
+"""수정·Markdown 안의 프로젝트 그림 이름 (``img:<그림 요소 id>``)."""
+
+
+def image_refs(edits: Sequence[Edit], markdown: str = "") -> set[uuid.UUID]:
+    """수정이 넣으려는 프로젝트 그림의 요소 ID.
+
+    Args:
+        edits: 수정들 (``insert_image`` 의 ``image``, ``edit_image`` 의 ``target``,
+            ``insert_markdown`` 의 ``new_text`` 안 그림 주소를 본다).
+        markdown: 새로 만들 문서의 Markdown (``create_document``).
+
+    Returns:
+        그림 요소 ID.
+    """
+    values = [markdown]
+    for edit in edits:
+        values += [edit.image or "", edit.target or ""]
+        if edit.op == "insert_markdown":
+            values.append(edit.new_text)
+    return {uuid.UUID(m.group(1)) for value in values for m in _IMAGE_REF.finditer(value)}
+
+
+def picture_file(data: bytes) -> ImageData | None:
+    """저장된 그림을 Word 에 넣을 파일로. PNG·JPEG·GIF 는 그대로, 그 밖(WebP 등)은 PNG 로 바꾼다.
+
+    2019 이전 Word 는 WebP 를 보여 주지 못한다 (설계 기록 16.12 결정 2).
+
+    Args:
+        data: 그림 파일 내용.
+
+    Returns:
+        넣을 그림 파일. 그림으로 읽을 수 없으면 ``None``.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            kind = (image.format or "").lower()
+            width, height = image.size
+            if kind in ("png", "jpeg", "gif"):
+                return ImageData(data, kind, width, height)
+            alpha = "A" in image.getbands() or "transparency" in image.info
+            converted = image.convert("RGBA" if alpha else "RGB")
+            buffer = io.BytesIO()
+            converted.save(buffer, "PNG")
+            return ImageData(buffer.getvalue(), "png", width, height)
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+        return None
+
+
+async def project_images(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    project_id: uuid.UUID | None,
+    ids: set[uuid.UUID],
+) -> dict[str, ImageData]:
+    """프로젝트 문서의 그림 요소를 Word 에 넣을 파일로 읽는다.
+
+    그 프로젝트에 속한 문서의 그림만 읽는다. 모델이 다른 프로젝트의 그림 id 를 주면 찾지 못한 것으로 본다.
+
+    Args:
+        session: DB 세션.
+        storage: 저장소.
+        project_id: 대화가 속한 프로젝트 ID (서버가 정한 값). 없으면 빈 사전.
+        ids: 읽을 그림 요소 ID.
+
+    Returns:
+        ``{"img:<요소 id>": 그림 파일}``. 찾지 못했거나 읽을 수 없는 그림은 빠진다.
+    """
+    if project_id is None or not ids:
+        return {}
+    rows = await session.execute(
+        select(DocumentElement.id, DocumentElement.image_key)
+        .join(Document, Document.id == DocumentElement.document_id)
+        .where(
+            DocumentElement.id.in_(ids),
+            DocumentElement.kind == "image",
+            DocumentElement.image_key.is_not(None),
+            Document.project_id == project_id,
+        )
+    )
+    found: dict[str, ImageData] = {}
+    for element_id, key in rows.all():
+        try:
+            data = await storage.get(key)
+        except ObjectNotFoundError:
+            continue
+        picture = await asyncio.to_thread(picture_file, data)
+        if picture is not None:
+            found[f"img:{element_id}"] = picture
+    return found
 
 
 def _parse_id(value: str) -> uuid.UUID | None:
@@ -274,6 +372,7 @@ async def create_revision(
     parse_wait: float = 0.0,
     track_changes: bool | None = None,
     author: str = DEFAULT_AUTHOR,
+    project_id: uuid.UUID | None = None,
 ) -> Revision:
     """문서에 수정을 적용해 수정본을 만든다. 원본은 바꾸지 않는다.
 
@@ -298,6 +397,8 @@ async def create_revision(
         track_changes: DOCX 를 변경 내용 추적으로 고칠지. ``None`` 이면 원본에 Word 의 "변경 내용 추적" 이
             켜져 있을 때만 추적한다. 텍스트 형식에서 ``True`` 면 오류.
         author: DOCX 추적 기록·메모의 작성자.
+        project_id: 대화가 속한 프로젝트 ID (서버가 정한 값). 그 프로젝트 문서의 그림(``img:<id>``)만 넣을
+            수 있다.
 
     Returns:
         만든 수정본.
@@ -322,7 +423,10 @@ async def create_revision(
     tracked = False
     if isinstance(loaded, EditableDocx):
         tracked = loaded.document.tracks_revisions if track_changes is None else track_changes
-        changes, failures = loaded.document.apply_some(edits, track=tracked, author=author)
+        images = await project_images(session, storage, project_id, image_refs(edits))
+        changes, failures = loaded.document.apply_some(
+            edits, track=tracked, author=author, images=images
+        )
         if not changes:
             raise text.combine_failures(failures)
         new_data = loaded.document.to_bytes()
@@ -439,6 +543,7 @@ async def create_new_document(
     parse_wait: float = 0.0,
     author: str = DEFAULT_AUTHOR,
     template_document_id: str | None = None,
+    project_id: uuid.UUID | None = None,
 ) -> NewDocument:
     """새 문서(TXT·MD·CSV·DOCX)를 만들어 지금 대화에 붙인다.
 
@@ -457,6 +562,8 @@ async def create_new_document(
         author: DOCX 문서 속성의 만든 이.
         template_document_id: DOCX 의 양식으로 쓸 지금 대화의 DOCX (모델이 넘긴 값).
             머리글·바닥글·스타일·쪽 설정을 그대로 두고 본문만 새로 쓴다.
+        project_id: 대화가 속한 프로젝트 ID (서버가 정한 값). DOCX Markdown 의 ``![설명](img:<id>)`` 은 그
+            프로젝트 문서의 그림만 넣는다.
 
     Returns:
         만든 문서.
@@ -492,7 +599,8 @@ async def create_new_document(
             if not isinstance(loaded, EditableDocx):
                 raise EditError("The template must be a Word (DOCX) document.")
             template, template_id = loaded.document.to_bytes(), loaded.source.id
-        created = build_docx(body, author=author, template=template)
+        images = await project_images(session, storage, project_id, image_refs([], body))
+        created = build_docx(body, author=author, template=template, images=images)
         data = created.data
     else:
         if kind is DocumentKind.CSV:

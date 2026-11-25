@@ -19,7 +19,7 @@ DB 와 저장소를 모르는 순수 함수라 테스트하기 쉽다.
 import io
 import re
 import zipfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -28,6 +28,8 @@ from typing import Any, Literal
 
 from lxml import etree
 
+from app.documents.editing import docx_objects as obj
+from app.documents.editing.docx_objects import ImageData
 from app.documents.editing.text import (
     EDIT_OPS,
     SNIPPET_CHARS,
@@ -93,6 +95,30 @@ _FORBIDDEN_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _MARK = "okdoit-paragraph"
 """수정 호출 동안 문단(``w:p``)에 다는 임시 속성 (호출을 시작할 때의 번호). 호출이 끝나면 지운다."""
 
+_OBJECT = "okdoit-object"
+"""수정 호출 동안 그림(``w:drawing``)·각주 표시에 다는 임시 속성 (호출을 시작할 때의 이름, 예: ``g2``)."""
+
+_OBJECT_LABEL = re.compile(r"\[(?:그림 g|각주 f|미주 e|글상자 )\d+\]")
+"""보기가 고칠 수 없는 자리에 붙이는 이름표. ``old_text`` 에 들어 있으면 ``￼`` 로 바꿔 찾는다."""
+
+_OBJECT_REF = re.compile(r"\[?\s*(?:그림|각주|미주)?\s*([gfe])\s*(\d+)\s*\]?", re.IGNORECASE)
+
+_NOTE_LABELS = {"footnote": "각주", "endnote": "미주"}
+"""각주·미주 부분의 위치 표시 (``_parts`` 의 표시이기도 하다)."""
+_NOTE_LETTERS = {"footnote": "f", "endnote": "e"}
+_NOTE_TYPES = {
+    "footnote": "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+    "endnote": "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+}
+_PART_TYPES = {
+    "header": "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    "footer": "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+}
+_SETTINGS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"
+_REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+_FALLBACK = f"{{{obj.MC}}}Fallback"
+_NOTE_KINDS = {label: kind for kind, label in _NOTE_LABELS.items()}
+
 _SPLIT = "okdoit-split"
 """문단을 나눌 자리에 잠깐 넣는 ``w:br`` 의 표시 속성. 바꾸기를 마친 뒤 그 자리에서 문단을 나눈다."""
 
@@ -119,6 +145,9 @@ _RUN_SILENT = {
         "softHyphen",
         "annotationRef",
         "commentReference",
+        # 각주·미주 안의 번호 자리. 보기에서는 위치 표시(``(각주 f1)``)가 대신한다.
+        "footnoteRef",
+        "endnoteRef",
     )
 }
 
@@ -683,6 +712,7 @@ class _Glyph:
         scope: 글자를 둘러싼 가장 가까운 하이퍼링크·콘텐츠 컨트롤 (없으면 ``None``).
         tracked: 추적 기록 안의 글자면 그 기록. 넣은 글자(``w:ins``·``w:moveTo``)는 작성자 이름,
             서식 변경 기록(``w:rPrChange``)이 있는 run 의 글자는 ``FORMAT_CHANGE + 작성자``. 아니면 ``None``.
+        label: 벽 글자 중 보기에서 이름표로 보여줄 요소의 이름 (예: ``"그림 g1"``, ``"각주 f2"``).
     """
 
     char: str
@@ -691,6 +721,7 @@ class _Glyph:
     wall: bool
     scope: etree._Element | None
     tracked: str | None = None
+    label: str | None = None
 
 
 @dataclass
@@ -713,6 +744,7 @@ class Paragraph:
         track_notes: 글자로 보여줄 수 없는 추적 기록 설명 (예: ``"서식 바뀜"``).
         comments: 이 문단에 표시(``w:commentReference``)가 있는 메모.
         deleted_at: 숨긴 지운 기록의 ``(text 의 글자 위치, 작성자)``.
+        objects: 문단 아래에 보여줄 개체 설명 줄 (예: ``"그림 g1 · 12.0×8.0cm · 대체 글자 '구성도'"``).
     """
 
     number: int
@@ -730,6 +762,7 @@ class Paragraph:
     track_notes: tuple[str, ...] = ()
     comments: tuple["Comment", ...] = ()
     deleted_at: tuple[tuple[int, str], ...] = ()
+    objects: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -792,10 +825,22 @@ class _Flat:
     deleted_at: list[tuple[int, str]] = field(default_factory=list)
 
 
+_DELETED_OBJECTS = {
+    _w("drawing"): "[그림]",
+    _w("footnoteReference"): "[각주]",
+    _w("endnoteReference"): "[미주]",
+}
+"""지운 기록 안의 개체를 보기에서 나타내는 글자 (지운 개체는 이름이 없다)."""
+
+
 def _deleted_text(element: etree._Element) -> str:
-    """지운 기록(``w:del``·``w:moveFrom``) 안의 글자."""
+    """지운 기록(``w:del``·``w:moveFrom``) 안의 글자. 지운 그림·각주 표시는 ``[그림]`` 처럼 보인다."""
     parts = []
-    for node in element.iter(_w("delText"), _w("t"), _w("tab")):
+    for node in element.iter(_w("delText"), _w("t"), _w("tab"), *_DELETED_OBJECTS):
+        if node.tag in _DELETED_OBJECTS:
+            if node.tag != _w("drawing") or obj.is_picture(node):
+                parts.append(_DELETED_OBJECTS[node.tag])
+            continue
         parts.append("\t" if node.tag == _w("tab") else node.text or "")
     return "".join(parts)
 
@@ -887,15 +932,23 @@ def _structure_notes(paragraph: etree._Element) -> list[tuple[str, str]]:
     return found
 
 
-def _flatten(paragraph: etree._Element, fields: _FieldState) -> _Flat:
-    """문단을 글자 목록으로 펼친다. 추적 표기를 넣은 글자와 메모 위치도 함께 모은다."""
+def _flatten(
+    paragraph: etree._Element,
+    fields: _FieldState,
+    labels: Mapping[etree._Element, str] | None = None,
+) -> _Flat:
+    """문단을 글자 목록으로 펼친다. 추적 표기를 넣은 글자와 메모 위치도 함께 모은다.
+
+    ``labels`` 는 벽 글자로 펼칠 요소(그림·각주 표시·글상자) → 보기 이름표 (``DocxDocument._labels``).
+    """
     flat = _Flat([])
     glyphs = flat.glyphs
     marked: list[str] = []
+    names = labels or {}
 
     def add(glyph: _Glyph) -> None:
         glyphs.append(glyph)
-        marked.append(glyph.char)
+        marked.append(f"[{glyph.label}]" if glyph.label else glyph.char)
 
     def note(element: etree._Element, label: str | None = None) -> None:
         flat.tracked = True
@@ -928,7 +981,8 @@ def _flatten(paragraph: etree._Element, fields: _FieldState) -> _Flat:
                 elif tag == _w("noBreakHyphen"):
                     add(_Glyph("-", element, index, True, scope, tracked))
                 elif tag not in _RUN_SILENT:
-                    add(_Glyph(WALL, element, index, True, scope, tracked))
+                    label = names.get(token.element)
+                    add(_Glyph(WALL, element, index, True, scope, tracked, label))
                 continue
             locked = forced_wall or fields.depth > 0
             add(_Glyph(token.char, element, index, locked, scope, tracked))
@@ -1091,6 +1145,10 @@ class DocxDocument:
         self._date = ""
         self._next_id: int | None = None
         self._next_hex: int | None = None
+        self._next_shape: int | None = None
+        self._media: dict[str, bytes] = {}  # 이번에 더한 그림 파일
+        self._removed: set[str] = set()  # 이번에 지운 ZIP 항목 (쓰지 않게 된 그림 파일)
+        self._images: Mapping[str, ImageData] = {}
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DocxDocument":
@@ -1119,6 +1177,7 @@ class DocxDocument:
         main = cls._main_part(contents)
         parts: list[tuple[str, str | None]] = [(main, None)]
         parts += cls._header_footer_parts(main, contents)
+        parts += cls._note_parts(main, contents)
         styles = cls._style_names(main, contents)
         return cls(entries, parts, styles)
 
@@ -1173,6 +1232,17 @@ class DocxDocument:
             for kind in ("header", "footer")
             for n, name in enumerate(found[kind], 1)
         ]
+
+    @classmethod
+    def _note_parts(cls, main: str, contents: dict[str, bytes]) -> list[tuple[str, str | None]]:
+        """각주·미주 부분 (있는 것만). 위치 표시는 ``_NOTE_LABELS`` 이고, 문단은 각주마다 따로 센다."""
+        rels = cls._relationships(main, contents)
+        found = []
+        for kind, label in _NOTE_LABELS.items():
+            name = next((t for k, t in rels.values() if k == f"{kind}s"), None)
+            if name is not None and name in contents:
+                found.append((name, label))
+        return found
 
     @classmethod
     def _style_names(cls, main: str, contents: dict[str, bytes]) -> dict[str, str]:
@@ -1282,6 +1352,8 @@ class DocxDocument:
         if match := _HEADING.match(name):
             return f"제목 {match.group(1)}"
         lowered = name.lower()
+        if re.fullmatch(r"toc \d", lowered):
+            return "목차"
         if lowered == "title":
             return "문서 제목"
         if lowered == "subtitle":
@@ -1321,26 +1393,28 @@ class DocxDocument:
 
     @property
     def paragraphs(self) -> list[Paragraph]:
-        """모든 문단 (본문 → 머리글 → 바닥글 순서, 빈 문단 포함)."""
+        """모든 문단 (본문 → 머리글 → 바닥글 → 각주 → 미주 → 글상자 순서, 빈 문단 포함)."""
         if self._paragraphs is None:
             result: list[Paragraph] = []
             tables = [0]
             comments = self._comments()
             formats = self._list_formats()
             state = _CommentState()
-            for name, label in self._parts:
+            labels, details = self._labels()
+
+            def add(name: str, container: etree._Element, label: str | None) -> None:
                 fields = _FieldState()
-                blocks = self._walk_blocks(self._roots[name], tables, label, label)
-                for element, where in blocks:
-                    flat = _flatten(element, fields)
-                    for label, author in _structure_notes(element):
+                for element, where in self._walk_blocks(container, tables, label, label):
+                    flat = _flatten(element, fields, labels)
+                    for note, author in _structure_notes(element):
                         flat.tracked = True
                         if author and author not in flat.authors:
                             flat.authors.append(author)
-                        if label not in flat.notes:
-                            flat.notes.append(label)
+                        if note not in flat.notes:
+                            flat.notes.append(note)
                     text = "".join(g.char for g in flat.glyphs)
                     found = _attach_comments(flat.comments, text, state, comments)
+                    objects = tuple(details[g.label] for g in flat.glyphs if g.label in details)
                     result.append(
                         Paragraph(
                             number=len(result) + 1,
@@ -1358,11 +1432,104 @@ class DocxDocument:
                             track_notes=tuple(flat.notes),
                             comments=found,
                             deleted_at=tuple(flat.deleted_at),
+                            objects=objects,
                         )
                     )
+
+            for name, label in self._parts:
+                kind = _NOTE_KINDS.get(label or "")
+                if kind is None:
+                    add(name, self._roots[name], label)
+                    continue
+                for key, note in self._notes(kind):
+                    add(name, note, f"{label} {key}")
+            numbers = {x.element: x.number for x in result}
+            for n, (name, content, _) in enumerate(self._textboxes(), 1):
+                owner = _closest_paragraph(content)
+                where = f"글상자 {n}" + (f" · p{numbers[owner]} 안" if owner in numbers else "")
+                add(name, content, where)
             _group_replies(result, comments)
             self._paragraphs = result
         return self._paragraphs
+
+    # --- 문서 요소: 그림·각주·글상자 ---------------------------------------------------------------
+
+    def _notes(self, kind: str) -> list[tuple[str, etree._Element]]:
+        """각주(``kind="footnote"``)·미주의 ``(이름 "f1", 요소)``. 본문에 표시가 나온 순서, 구분선은 뺀다."""
+        name = self._related(f"{kind}s")
+        root = self._part_root(name) if name else None
+        if root is None:
+            return []
+        entries = {
+            e.get(_w("id"), ""): e
+            for e in root.iterchildren(_w(kind))
+            if e.get(_w("type"), "normal") == "normal"
+        }
+        order: list[str] = []
+        for part, _ in self._parts:
+            for ref in self._roots[part].iter(_w(f"{kind}Reference")):
+                note_id = ref.get(_w("id"), "")
+                if note_id in entries and note_id not in order:
+                    order.append(note_id)
+        order += [i for i in entries if i not in order]
+        letter = _NOTE_LETTERS[kind]
+        return [(f"{letter}{n}", entries[i]) for n, i in enumerate(order, 1)]
+
+    def _textboxes(self) -> list[tuple[str, etree._Element, etree._Element | None]]:
+        """글상자 ``(부분, w:txbxContent, 글상자를 담은 run 의 자식)``. 옛 Word 용 사본(Fallback)은 뺀다."""
+        found = []
+        for name, label in self._parts:
+            if label in _NOTE_KINDS:
+                continue
+            for content in self._roots[name].iter(_w("txbxContent")):
+                if _in_fallback(content):
+                    continue
+                host = next(
+                    (
+                        a
+                        for a in content.iterancestors()
+                        if a.getparent() is not None and a.getparent().tag == _w("r")
+                    ),
+                    None,
+                )
+                found.append((name, content, host))
+        return found
+
+    def _pictures(self) -> list[tuple[str, etree._Element]]:
+        """그림 ``(부분, w:drawing)``, 문서 순서 (본문 → 머리글 → 바닥글 → 각주).
+
+        도형·차트와, 추적으로 지운 글자 안의 그림(보기에서 ``{-[그림]-}``)은 뺀다.
+        """
+        return [
+            (name, drawing)
+            for name, _ in self._parts
+            for drawing in self._roots[name].iter(_w("drawing"))
+            if not _in_fallback(drawing)
+            and obj.is_picture(drawing)
+            and not any(a.tag in _TRACKED_HIDDEN for a in drawing.iterancestors())
+        ]
+
+    def _labels(self) -> tuple[dict[etree._Element, str], dict[str, str]]:
+        """보기 이름표: ``(벽 글자로 펼칠 요소 → "그림 g1", 그림 이름표 → 설명 줄)``."""
+        labels: dict[etree._Element, str] = {}
+        details: dict[str, str] = {}
+        for number, (_, drawing) in enumerate(self._pictures(), 1):
+            label = f"그림 g{number}"
+            labels[drawing] = label
+            details[label] = _picture_detail(label, drawing)
+        for kind, name in _NOTE_LABELS.items():
+            keys = {note.get(_w("id"), ""): key for key, note in self._notes(kind)}
+            if not keys:
+                continue
+            for part, _ in self._parts:
+                for ref in self._roots[part].iter(_w(f"{kind}Reference")):
+                    key = keys.get(ref.get(_w("id"), ""))
+                    if key:
+                        labels[ref] = f"{name} {key}"
+        for number, (_, _, host) in enumerate(self._textboxes(), 1):
+            if host is not None:
+                labels[host] = f"글상자 {number}"
+        return labels, details
 
     def view(
         self,
@@ -1433,6 +1600,7 @@ class DocxDocument:
         track: bool = False,
         author: str = DEFAULT_AUTHOR,
         date: str | None = None,
+        images: Mapping[str, ImageData] | None = None,
     ) -> tuple[list[Change], list[EditError]]:
         r"""수정을 순서대로 적용하고, 적용할 수 없는 수정은 그 수정만 되돌리고 건너뛴다.
 
@@ -1447,6 +1615,8 @@ class DocxDocument:
                 실패한다.
             author: 추적 기록·메모의 작성자. 이 이름으로 넣은 추적 글자는 다시 고칠 수 있다.
             date: 추적 기록·메모의 시각 (``2026-11-24T10:00:00Z``). 없으면 지금 시각.
+            images: 넣을 수 있는 프로젝트 그림 (``"img:<요소 id>"`` → 그림 파일). 호출한 쪽이 권한을 확인한
+                그림만 넣는다.
 
         Returns:
             ``(성공한 수정의 바뀐 곳 요약, 실패한 수정의 오류)``.
@@ -1458,6 +1628,7 @@ class DocxDocument:
             raise EditError("No edits were given.")
         self._track, self._author = track, author
         self._date = date or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._images = images or {}
         self._mark()
         changes: list[Change] = []
         failures: list[EditError] = []
@@ -1480,7 +1651,7 @@ class DocxDocument:
 
         Args:
             edits: 적용할 수정 (1개 이상).
-            **options: ``apply_some`` 의 ``track``·``author``·``date``.
+            **options: ``apply_some`` 의 ``track``·``author``·``date``·``images``.
 
         Returns:
             바뀐 곳 요약.
@@ -1495,14 +1666,19 @@ class DocxDocument:
             raise failures[0]
         return changes
 
-    def _snapshot(self) -> tuple[dict[str, bytes], set[str]]:
-        return {n: etree.tostring(root) for n, root in self._roots.items()}, set(self._dirty)
+    def _snapshot(self) -> tuple[Any, ...]:
+        roots = {n: etree.tostring(root) for n, root in self._roots.items()}
+        return roots, set(self._dirty), list(self._parts), dict(self._media), set(self._removed)
 
-    def _restore(self, snapshot: tuple[dict[str, bytes], set[str]]) -> None:
-        roots, dirty = snapshot
+    def _restore(self, snapshot: tuple[Any, ...]) -> None:
+        roots, dirty, parts, media, removed = snapshot
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
         self._roots = {n: etree.fromstring(x, parser) for n, x in roots.items()}
         self._dirty = set(dirty)
+        self._parts = list(parts)
+        self._media = dict(media)
+        self._removed = set(removed)
+        self._next_shape = None
         self._paragraphs = None
         self._refresh_style_names()
 
@@ -1519,19 +1695,35 @@ class DocxDocument:
         self._styles = names
 
     def _mark(self) -> None:
-        """문단마다 지금 번호를 임시 속성으로 단다. 문단을 나누거나 지워도 번호로 원래 문단을 찾는다."""
+        """문단·그림·각주 표시에 지금 번호를 임시 속성으로 단다. 앞 수정이 구조를 바꿔도 원래 것을 찾는다."""
         self._unmark()
         for paragraph in self.paragraphs:
             paragraph.element.set(_MARK, str(paragraph.number))
         self._marked_total = len(self.paragraphs)
+        for number, (_, drawing) in enumerate(self._pictures(), 1):
+            drawing.set(_OBJECT, f"g{number}")
+        for kind in _NOTE_LABELS:
+            keys = {note.get(_w("id"), ""): key for key, note in self._notes(kind)}
+            for part, _ in self._parts:
+                for ref in self._roots[part].iter(_w(f"{kind}Reference")):
+                    if key := keys.get(ref.get(_w("id"), "")):
+                        ref.set(_OBJECT, key)
 
     def _unmark(self) -> None:
         for root in self._roots.values():
             for element in root.iter(_w("p")):
                 element.attrib.pop(_MARK, None)
+            tags = (_w("drawing"), _w("footnoteReference"), _w("endnoteReference"))
+            for element in root.iter(*tags):
+                element.attrib.pop(_OBJECT, None)
 
     def _apply(self, index: int, edit: Edit) -> Change:
         self._refuse_tracking(index, edit)
+        watched = self._watch()
+        change = self._dispatch(index, edit)
+        return self._tidy(watched, change)
+
+    def _dispatch(self, index: int, edit: Edit) -> Change:
         if edit.op == "replace":
             return self._replace(index, edit)
         if edit.op == "merge":
@@ -1566,6 +1758,20 @@ class DocxDocument:
             return self._delete_comment(index, edit)
         if edit.op == "format":
             return self._format(index, edit)
+        if edit.op == "insert_image":
+            return self._insert_image(index, edit)
+        if edit.op == "edit_image":
+            return self._edit_image(index, edit)
+        if edit.op == "delete_object":
+            return self._delete_object(index, edit)
+        if edit.op == "footnote":
+            return self._footnote(index, edit)
+        if edit.op in ("set_header", "set_footer"):
+            return self._set_header(index, edit, edit.op.removeprefix("set_"))
+        if edit.op == "insert_toc":
+            return self._insert_toc(index, edit)
+        if edit.op == "set_properties":
+            return self._set_properties(index, edit)
         raise EditError(
             f"Edit {index}: unknown op {edit.op!r}. Use one of: {', '.join(sorted(EDIT_OPS))}.",
             index,
@@ -1593,8 +1799,9 @@ class DocxDocument:
         )
 
     def _replace(self, index: int, edit: Edit) -> Change:
-        old = edit.old_text.replace("\r\n", "\n")
-        new = edit.new_text.replace("\r\n", "\n")
+        # 보기의 이름표([그림 g1] 등)는 고칠 수 없는 자리(￼) 하나다.
+        old = _OBJECT_LABEL.sub(WALL, edit.old_text.replace("\r\n", "\n"))
+        new = _OBJECT_LABEL.sub(WALL, edit.new_text.replace("\r\n", "\n"))
         if "\n" not in old:
             new = re.sub(r"\n{2,}", "\n", new)  # 빈 줄은 문단 나누기 하나로 본다
         if not old:
@@ -2680,6 +2887,7 @@ class DocxDocument:
                 anchor = block
             else:
                 element.addprevious(block)
+        pictures, footnotes, missing = self._realize(reference.part, made.blocks)
         if self._track:
             # 표 앞뒤에 붙인 빈 문단은 기록하지 않는다 (거절해도 표가 본문 끝에 오지 않게).
             for block in made.blocks:
@@ -2699,10 +2907,20 @@ class DocxDocument:
         note = f"inserted {', '.join(parts) or 'content'} {position} p{number}"
         if self._track:
             note += " (as a tracked change)"
+        if pictures:
+            note += f" with {pictures} image{'s' if pictures > 1 else ''}"
+        if footnotes:
+            note += f"{' and' if pictures else ' with'} {footnotes} footnote"
+            note += "s" if footnotes > 1 else ""
+        if missing:
+            note += (
+                f"; project image(s) not found, written as their alt text in brackets: "
+                f"{', '.join(missing)}"
+            )
         if made.images:
             note += (
-                f"; {made.images} image(s) were written as their alt text in brackets, because "
-                "images cannot be added"
+                f"; {made.images} image(s) with a web address were written as their alt text in "
+                "brackets (only project images, img:<id>, can be added)"
             )
         text = _shorten(" ".join(_paragraph_text(b) for b in made.blocks if b.tag == _w("p")))
         return Change(index, number, len(blocks), "", text, kind=edit.op, note=note)
@@ -3385,7 +3603,7 @@ class DocxDocument:
                 index,
             )
         changes = _format_changes(index, wanted)
-        old = edit.old_text.replace("\r\n", "\n")
+        old = _OBJECT_LABEL.sub(WALL, edit.old_text.replace("\r\n", "\n"))
         if not old:
             if not edit.paragraph:
                 raise EditError(
@@ -4257,6 +4475,1112 @@ class DocxDocument:
             )
         return EditError(message, index)
 
+    # --- 문서 요소 고치기 (묶음 7) --------------------------------------------------------------
+
+    def _watch(self) -> tuple[set[tuple[str, str]], set[tuple[str, str]], list[Any]]:
+        """수정 전 상태: 각주 표시, 관계 참조, 글상자 내용. 수정 뒤 ``_tidy`` 가 비교해 정리한다."""
+        boxes = [
+            (content, etree.tostring(content, method="c14n"))
+            for _, content, _ in self._textboxes()
+            if _fallback_content(content) is not None
+        ]
+        return self._note_refs(), self._rel_refs(), boxes
+
+    def _tidy(self, watched: tuple[Any, ...], change: Change) -> Change:
+        """수정 뒤 정리: 표시가 없어진 각주, 쓰지 않게 된 그림 관계·파일, 옛 Word 용 글상자 사본."""
+        notes, refs, boxes = watched
+        extra = []
+        lost = notes - self._note_refs()
+        if lost:
+            self._remove_notes(lost)
+            extra.append(f"{len(lost)} footnote/endnote text{'s' if len(lost) > 1 else ''} removed")
+        for part, rel_id in refs - self._rel_refs():
+            self._drop_image_rel(part, rel_id)
+        unsynced = 0
+        for content, before in boxes:
+            if content.getparent() is None or etree.tostring(content, method="c14n") == before:
+                continue
+            if not self._sync_fallback(content):
+                unsynced += 1
+        if unsynced:
+            extra.append(
+                "the copy of the text box for old Word versions could not be updated; new Word "
+                "versions show the change"
+            )
+        if not extra:
+            return change
+        note = "; ".join([change.note, *extra]) if change.note else "; ".join(extra)
+        return replace(change, note=note)
+
+    def _note_refs(self) -> set[tuple[str, str]]:
+        """문서에 있는 각주·미주 표시 ``(종류, id)`` (추적으로 지운 표시도 센다)."""
+        found = set()
+        for part, _ in self._parts:
+            for kind in _NOTE_LABELS:
+                for ref in self._roots[part].iter(_w(f"{kind}Reference")):
+                    found.add((kind, ref.get(_w("id"), "")))
+        return found
+
+    def _rel_refs(self) -> set[tuple[str, str]]:
+        """부분 XML 이 가리키는 관계 ``(부분, 관계 id)`` (``r:embed``·``r:id`` 등 모든 관계 속성)."""
+        found = set()
+        for part, _ in self._parts:
+            for element in self._roots[part].iter():
+                if not isinstance(element.tag, str):
+                    continue
+                for key, value in element.attrib.items():
+                    if key.startswith(f"{{{_R}}}"):
+                        found.add((part, value))
+        return found
+
+    def _remove_notes(self, lost: set[tuple[str, str]]) -> None:
+        for kind in _NOTE_LABELS:
+            ids = {note_id for k, note_id in lost if k == kind}
+            name = self._related(f"{kind}s")
+            root = self._part_root(name) if name and ids else None
+            if root is None:
+                continue
+            for note in list(root.iterchildren(_w(kind))):
+                if note.get(_w("id")) in ids and note.get(_w("type"), "normal") == "normal":
+                    root.remove(note)
+            self._dirty.add(name)
+
+    def _sync_fallback(self, content: etree._Element) -> bool:
+        """글상자의 옛 Word 용 사본(``mc:Fallback``)을 새 Word 용 내용의 사본으로 갈아 끼운다."""
+        fallback = _fallback_content(content)
+        if fallback is None:
+            return False
+        for child in list(fallback):
+            fallback.remove(child)
+        for child in content:
+            copied = deepcopy(child)
+            if isinstance(copied.tag, str):
+                _strip_copy(copied)
+            fallback.append(copied)
+        return True
+
+    def _object(self, index: int, ref: str | None, kinds: str) -> tuple[str, str, etree._Element]:
+        """수정의 개체 이름(``"g2"``·``"f3"``·``"e1"``)이 가리키는 ``(부분, 이름, 요소)``. 이름은 호출을 시작할 때의 것."""
+        names = {"g": "image", "f": "footnote", "e": "endnote"}
+        wanted = " or ".join(f'"{k}1" ({names[k]})' for k in kinds)
+        match = _OBJECT_REF.fullmatch((ref or "").strip())
+        if not match or match.group(1).lower() not in kinds:
+            raise EditError(f"Edit {index}: image must name an object such as {wanted}.", index)
+        key = f"{match.group(1).lower()}{int(match.group(2))}"
+        tags = (_w("drawing"), _w("footnoteReference"), _w("endnoteReference"))
+        for part, _ in self._parts:
+            for element in self._roots[part].iter(*tags):
+                if element.get(_OBJECT) == key:
+                    return part, key, element
+        raise EditError(
+            f"Edit {index}: there is no {names[key[0]]} {key} in this document, or an earlier edit "
+            "in this call removed it. The view shows images as [그림 g1], footnotes as [각주 f1] "
+            "and endnotes as [미주 e1].",
+            index,
+        )
+
+    def _owner(self, element: etree._Element) -> Paragraph:
+        """요소가 든 문단."""
+        closest = _closest_paragraph(element)
+        for paragraph in self.paragraphs:
+            if paragraph.element is closest:
+                return paragraph
+        raise EditError("The object is not inside a paragraph that can be edited.")
+
+    def _rels_of(self, part: str) -> dict[str, tuple[str, str]]:
+        """부분의 관계 ``{id: (관계 형식 전체 주소, ZIP 항목 이름)}`` (외부 링크 뺌)."""
+        rels = self._part_root(_rels_name(part))
+        if rels is None:
+            return {}
+        return {
+            rel.get("Id", ""): (rel.get("Type", ""), _resolve(part, rel.get("Target", "")))
+            for rel in rels.iter(f"{{{_PKG_REL}}}Relationship")
+            if rel.get("TargetMode") != "External"
+        }
+
+    def _add_rel(self, part: str, rel_type: str, target: str) -> str:
+        """부분에 관계를 더하고 새 id 를 돌려준다 (관계 파일이 없으면 만든다)."""
+        name = _rels_name(part)
+        rels = self._part_root(name)
+        if rels is None:
+            rels = etree.Element(f"{{{_PKG_REL}}}Relationships", nsmap={None: _PKG_REL})
+            self._roots[name] = rels
+        used = {rel.get("Id") for rel in rels}
+        number = 1
+        while f"rId{number}" in used:
+            number += 1
+        rel = etree.SubElement(rels, f"{{{_PKG_REL}}}Relationship")
+        rel.set("Id", f"rId{number}")
+        rel.set("Type", rel_type)
+        rel.set("Target", target)
+        self._dirty.add(name)
+        return f"rId{number}"
+
+    def _exists(self, name: str) -> bool:
+        return (
+            (name in self._data and name not in self._removed)
+            or name in self._media
+            or (name in self._roots)
+        )
+
+    def _drop_image_rel(self, part: str, rel_id: str) -> None:
+        """쓰지 않게 된 그림 관계를 지우고, 어느 관계도 가리키지 않는 그림 파일은 ZIP 에서 뺀다."""
+        name = _rels_name(part)
+        rels = self._part_root(name)
+        if rels is None:
+            return
+        for rel in rels.iter(f"{{{_PKG_REL}}}Relationship"):
+            if rel.get("Id") != rel_id:
+                continue
+            if rel.get("Type") != _REL_IMAGE or rel.get("TargetMode") == "External":
+                return
+            target = _resolve(part, rel.get("Target", ""))
+            rels.remove(rel)
+            self._dirty.add(name)
+            if not self._file_used(target):
+                if target in self._media:
+                    del self._media[target]
+                else:
+                    self._removed.add(target)
+            return
+
+    def _file_used(self, target: str) -> bool:
+        """어느 관계 파일이든 ``target`` 을 가리키는지."""
+        names = {n for n in self._data if n.endswith(".rels")} | {
+            n for n in self._roots if n.endswith(".rels")
+        }
+        for name in names:
+            rels = self._part_root(name)
+            if rels is None:
+                continue
+            source = name.replace("_rels/", "").removesuffix(".rels")
+            for rel in rels.iter(f"{{{_PKG_REL}}}Relationship"):
+                if (
+                    rel.get("TargetMode") != "External"
+                    and _resolve(source, rel.get("Target", "")) == target
+                ):
+                    return True
+        return False
+
+    def _register_default(self, extension: str) -> None:
+        """``[Content_Types].xml`` 에 확장자의 기본 내용 형식을 등록한다 (이미 있으면 그대로)."""
+        types = self._part_root("[Content_Types].xml")
+        if types is None:
+            return
+        if any(
+            d.get("Extension", "").lower() == extension
+            for d in types.iterchildren(f"{{{_CONTENT_TYPES}}}Default")
+        ):
+            return
+        default = etree.Element(f"{{{_CONTENT_TYPES}}}Default")
+        default.set("Extension", extension)
+        default.set("ContentType", obj.IMAGE_TYPES[extension])
+        types.insert(0, default)
+        self._dirty.add("[Content_Types].xml")
+
+    def _new_shape_id(self) -> int:
+        """문서 안에서 겹치지 않는 새 그림 개체 id (``wp:docPr`` 의 ``id``)."""
+        if self._next_shape is None:
+            pattern = re.compile(rb":docPr\b[^>]*?\sid=\"(\d+)\"")
+            found = [0]
+            for name, data in self._data.items():
+                if name.endswith(".xml") and name not in self._roots:
+                    found += [int(x) for x in pattern.findall(data)]
+            for root in self._roots.values():
+                for element in root.iter(f"{{{obj.WP}}}docPr"):
+                    found.append(_int_val_attr_plain(element, "id"))
+            self._next_shape = max(found) + 1
+        value = self._next_shape
+        self._next_shape += 1
+        return value
+
+    def _image_source(self, index: int, ref: str | None) -> "_ImageSource":
+        """넣을 그림: 같은 문서의 그림(``"g2"``)이나 프로젝트 그림(``"img:<id>"``)."""
+        value = (ref or "").strip()
+        if not value:
+            raise EditError(
+                f'Edit {index}: say which image to put in: an image of this document ("g2", shown '
+                'as [그림 g2]) or a project image ("img:<id>" from search_project results).',
+                index,
+            )
+        if value.lower().startswith("img:"):
+            key = "img:" + value[4:].strip().strip("{}").lower()
+            image = self._images.get(value) or self._images.get(key)
+            if image is None:
+                raise EditError(
+                    f"Edit {index}: image {value!r} was not found among the images of this "
+                    "project's documents. Use an image id exactly as search_project shows it "
+                    "(image: img:…). Only images from documents in this conversation's project can "
+                    "be added.",
+                    index,
+                )
+            extension = image.extension.lower()
+            if extension not in obj.IMAGE_TYPES or image.width <= 0 or image.height <= 0:
+                raise EditError(f"Edit {index}: image {value!r} cannot be added.", index)
+            return _ImageSource(
+                image.width * obj.EMU_PER_PIXEL,
+                image.height * obj.EMU_PER_PIXEL,
+                extension,
+                data=image.data,
+            )
+        part, key, drawing = self._object(index, value, "g")
+        blip = obj.drawing_blip(drawing)
+        rel_id = blip.get(f"{{{_R}}}embed") if blip is not None else None
+        target = self._rels_of(part).get(rel_id or "")
+        extension = obj.image_extension(target[1]) if target else ""
+        if target is None or not self._exists(target[1]) or extension not in obj.IMAGE_TYPES:
+            raise EditError(
+                f"Edit {index}: image {key} links to a file outside the document or in a format "
+                "that cannot be copied.",
+                index,
+            )
+        size = obj.drawing_size(drawing) or (5 * obj.EMU_PER_CM, 5 * obj.EMU_PER_CM)
+        return _ImageSource(size[0], size[1], extension, file=target[1])
+
+    def _attach_image(self, part: str, source: "_ImageSource") -> str:
+        """그림 파일을 ``part`` 에 잇는 관계 id. 새 파일이면 ``media/`` 에 더한다."""
+        folder = part.rsplit("/", 1)[0] if "/" in part else ""
+        if source.file is not None:
+            for rel_id, (kind, target) in self._rels_of(part).items():
+                if kind == _REL_IMAGE and target == source.file:
+                    return rel_id
+            name = source.file
+        else:
+            assert source.data is not None
+            number = 1
+            prefix = f"{folder}/media/" if folder else "media/"
+            while self._exists(f"{prefix}image{number}.{source.extension}"):
+                number += 1
+            name = f"{prefix}image{number}.{source.extension}"
+            self._media[name] = source.data
+            self._removed.discard(name)
+            self._register_default(source.extension)
+        target = name[len(folder) + 1 :] if folder and name.startswith(folder + "/") else "/" + name
+        return self._add_rel(part, _REL_IMAGE, target)
+
+    def _room(self, element: etree._Element) -> int:
+        """``element`` 자리에 넣을 그림의 최대 너비 (EMU). 표 칸이면 칸 너비, 아니면 본문 너비."""
+        cell = next(element.iterancestors(_w("tc")), None)
+        width = cell.find(f"{_w('tcPr')}/{_w('tcW')}") if cell is not None else None
+        if width is not None and width.get(_w("type"), "dxa") == "dxa":
+            value = _int_val_attr_plain(width, _w("w"))
+            if value > 400:
+                return (value - 216) * obj.EMU_PER_TWIP
+        return self._text_width(element) * obj.EMU_PER_TWIP
+
+    @staticmethod
+    def _fit(
+        index: int, cx: int, cy: int, width: float | None, limit: int | None
+    ) -> tuple[int, int, bool]:
+        """그림 크기 ``(너비, 높이, 줄였는지)``. 너비를 주면 그 너비로, 높이는 비율을 따른다."""
+        if width is not None:
+            if not 0.1 <= width <= 100:
+                raise EditError(
+                    f"Edit {index}: width is in centimeters and must be between 0.1 and 100.",
+                    index,
+                )
+            new_cx = round(width * obj.EMU_PER_CM)
+        else:
+            new_cx = cx
+        new_cy = max(round(new_cx * cy / cx), 1)
+        if limit and new_cx > limit:
+            new_cy = max(round(new_cy * limit / new_cx), 1)
+            return limit, new_cy, True
+        return new_cx, new_cy, False
+
+    def _style_for(self, name: str) -> str:
+        """스타일 이름(Word 내부 이름, 소문자)의 id. 문서에 없으면 기본 정의를 더한다."""
+        # docx_create 가 이 모듈을 import 하므로 여기서 늦게 부른다 (순환 import).
+        from app.documents.editing.docx_create import ensure_style
+
+        styles_name, root = self._styles_or_new()
+        style_id, changed = ensure_style(root, name)
+        if changed:
+            self._dirty.add(styles_name)
+            self._refresh_style_names()
+        return style_id
+
+    def _wrap(self, run: etree._Element, kind: str) -> etree._Element:
+        """Run 하나를 추적 기록(``ins``·``del``)으로 감싼다."""
+        record = self._record(kind)
+        run.addprevious(record)
+        record.append(run)
+        if kind == "del":
+            for node in run.iter(_w("t"), _w("instrText")):
+                node.tag = _w("delText") if node.tag == _w("t") else _w("delInstrText")
+        return record
+
+    def _check_object_run(self, index: int, element: etree._Element, key: str) -> etree._Element:
+        """개체를 담은 run. 남의 추적 기록 안이거나 지운 기록 안이면 실패한다."""
+        run = element.getparent()
+        if run is None or run.tag != _w("r"):
+            raise EditError(f"Edit {index}: {key} is inside a shape and cannot be changed.", index)
+        if any(a.tag in _TRACKED_HIDDEN for a in run.iterancestors()):
+            raise EditError(
+                f"Edit {index}: {key} is in text deleted as a tracked change. Accept or reject that "
+                "change first.",
+                index,
+            )
+        author = _record_author(run)
+        if author is not None and author != self._author:
+            raise EditError(
+                f"Edit {index}: {key} is in a tracked change by {author}. Accept or reject that "
+                "change first, if the user agrees.",
+                index,
+            )
+        return run
+
+    def _image_props(self, reference: Paragraph, position: str) -> etree._Element:
+        """그림 문단의 문단 서식: 근처 본문 문단을 따르되 목록·들여쓰기를 떼고 가운데 정렬."""
+        props, _ = self._nearby_format(reference, position)
+        if props is None:
+            props = etree.Element(_w("pPr"))
+        numbered = props.find(_w("numPr")) is not None
+        for tag in ("numPr", "ind", "outlineLvl", "pPrChange"):
+            for element in props.findall(_w(tag)):
+                props.remove(element)
+        style = props.find(_w("pStyle"))
+        if style is not None and (numbered or self._heading_level_of_style(style)):
+            props.remove(style)
+        obj.paragraph_prop(props, "jc", val="center")
+        return props
+
+    def _heading_level_of_style(self, style: etree._Element) -> bool:
+        name = self._styles.get(style.get(_w("val"), ""), "")
+        return bool(_HEADING.match(name.strip()))
+
+    def _insert_image(self, index: int, edit: Edit) -> Change:
+        """기준 문단 앞이나 뒤에 그림 문단(과 캡션)을 넣는다."""
+        reference = self._paragraph(index, edit.paragraph)
+        number = self._number(reference)
+        position = self._position(index, edit)
+        alt = edit.new_text.strip()
+        caption = (edit.caption or "").strip()
+        for value in (alt, caption):
+            if _FORBIDDEN_CHARS.search(value.replace("\n", " ")) or WALL in value:
+                raise EditError(f"Edit {index}: new_text or caption has control characters.", index)
+        source = self._image_source(index, edit.image)
+        cx, cy, narrowed = self._fit(
+            index, source.cx, source.cy, edit.width, self._room(reference.element)
+        )
+        rel_id = self._attach_image(reference.part, source)
+        shape = self._new_shape_id()
+        drawing = obj.inline_drawing(rel_id, shape, cx, cy, f"그림 {shape}", alt.replace("\n", " "))
+        paragraph = reference.element.makeelement(_w("p"))
+        paragraph.append(self._image_props(reference, position))
+        etree.SubElement(paragraph, _w("r")).append(drawing)
+        blocks = [paragraph]
+        if caption:
+            line = etree.Element(_w("p"))
+            props = etree.SubElement(line, _w("pPr"))
+            etree.SubElement(props, _w("pStyle")).set(_w("val"), self._style_for("caption"))
+            line.append(_new_run(None, _text_tokens(caption.replace("\n", " "))))
+            blocks.append(line)
+        if self._track:
+            for block in blocks:
+                self._track_runs(block, "ins")
+                self._mark_paragraph(block, "ins")
+        anchor = reference.element
+        for block in blocks:
+            if position == "after":
+                anchor.addnext(block)
+                anchor = block
+            else:
+                reference.element.addprevious(block)
+        self._dirty.add(reference.part)
+        self._paragraphs = None
+        note = f"inserted an image ({obj.cm(cx)}×{obj.cm(cy)}cm) {position} p{number}"
+        if caption:
+            note += f" with the caption {caption!r}"
+        if narrowed:
+            note += "; it was made narrower to fit the page or cell width"
+        if not alt:
+            note += "; it has no alt text (set it with edit_image new_text if useful)"
+        return Change(index, number, 1, "", _shorten(alt or caption), kind=edit.op, note=note)
+
+    def _edit_image(self, index: int, edit: Edit) -> Change:
+        """그림을 다른 그림으로 바꾸거나 크기·대체 글자를 바꾼다."""
+        alt = edit.new_text.strip()
+        if not (edit.target and edit.target.strip()) and edit.width is None and not alt:
+            raise EditError(
+                f"Edit {index}: say what to change: target (another image to put in its place), "
+                "width (cm) or new_text (alt text).",
+                index,
+            )
+        if _FORBIDDEN_CHARS.search(alt.replace("\n", " ")):
+            raise EditError(f"Edit {index}: new_text contains control characters.", index)
+        part, key, drawing = self._object(index, edit.image, "g")
+        run = self._check_object_run(index, drawing, key)
+        number = self._number(self._owner(drawing))
+        inline = obj.is_inline(drawing)
+        done: list[str] = []
+        untracked: list[str] = []
+        if edit.target and edit.target.strip():
+            source = self._image_source(index, edit.target)
+            size = obj.drawing_size(drawing) or (source.cx, source.cy)
+            rel_id = self._attach_image(part, source)
+            if self._track and _record_author(run) != self._author:
+                copy = deepcopy(run)
+                for element in copy.iter(_w("drawing")):
+                    element.attrib.pop(_OBJECT, None)
+                deleted = self._wrap(run, "del")
+                deleted.addnext(self._wrap_new(copy))
+                drawing = copy.find(_w("drawing"))
+                props = obj.drawing_properties(drawing)
+                if props is not None:
+                    props.set("id", str(self._new_shape_id()))
+            blip = obj.drawing_blip(drawing)
+            if blip is None:
+                raise EditError(f"Edit {index}: image {key} cannot be replaced.", index)
+            blip.set(f"{{{_R}}}embed", rel_id)
+            obj.set_drawing_size(drawing, size[0], max(round(size[0] * source.cy / source.cx), 1))
+            done.append(f"replaced its picture with {edit.target.strip()}")
+        if edit.width is not None:
+            size = obj.drawing_size(drawing)
+            if size is None:
+                raise EditError(f"Edit {index}: the size of image {key} is unknown.", index)
+            closest = _closest_paragraph(drawing)
+            limit = self._room(closest if closest is not None else drawing) if inline else None
+            cx, cy, narrowed = self._fit(index, size[0], size[1], edit.width, limit)
+            obj.set_drawing_size(drawing, cx, cy)
+            done.append(
+                f"size {obj.cm(cx)}×{obj.cm(cy)}cm"
+                + (" (made narrower to fit the page width)" if narrowed else "")
+            )
+            untracked.append("size")
+        if alt:
+            props = obj.drawing_properties(drawing)
+            if props is None:
+                raise EditError(f"Edit {index}: image {key} has no alt text field.", index)
+            props.set("descr", alt.replace("\n", " "))
+            done.append(f"alt text {alt!r}")
+            untracked.append("alt text")
+        self._dirty.add(part)
+        self._paragraphs = None
+        note = f"changed image {key} in p{number}: {', '.join(done)}"
+        if self._track and untracked:
+            note += (
+                f" (the {' and '.join(untracked)} change is not tracked; Word does not track it "
+                "either)"
+            )
+        return Change(index, number, 1, "", _shorten(alt), kind=edit.op, note=note)
+
+    def _wrap_new(self, run: etree._Element) -> etree._Element:
+        """새 run 을 넣기 기록으로 감싼 요소."""
+        record = self._record("ins")
+        record.append(run)
+        return record
+
+    def _delete_object(self, index: int, edit: Edit) -> Change:
+        """그림·각주·미주를 지운다. 그림만 남은 문단은 문단째 지운다."""
+        part, key, element = self._object(index, edit.image, "gfe")
+        run = self._check_object_run(index, element, key)
+        owner = self._owner(element)
+        number = self._number(owner)
+        thing = {"g": "image", "f": "footnote", "e": "endnote"}[key[0]]
+        detail = ""
+        if key[0] != "g":
+            kind = "footnote" if key[0] == "f" else "endnote"
+            note = dict(self._notes(kind)).get(key)
+            if note is not None:
+                detail = ": " + repr(_head(_paragraph_text(note).strip(), 40))
+        if self._track and _record_author(run) != self._author:
+            self._wrap(run, "del")
+            self._dirty.add(part)
+            self._paragraphs = None
+            note_text = f"deleted {thing} {key}{detail} from p{number} as a tracked change"
+            return Change(index, number, 1, "", "", kind=edit.op, note=note_text)
+        run.remove(element)
+        if not any(c.tag != _w("rPr") for c in run if isinstance(c.tag, str)):
+            parent = run.getparent()
+            assert parent is not None
+            parent.remove(run)
+        _drop_empty_records(owner.element)
+        removed = key[0] == "g" and self._drop_if_empty(owner)
+        self._dirty.add(part)
+        self._paragraphs = None
+        note_text = f"deleted {thing} {key}{detail} from p{number}"
+        if removed:
+            note_text += " (the paragraph had nothing else, so it was removed too)"
+        return Change(index, number, 1, "", "", kind=edit.op, note=note_text)
+
+    def _drop_if_empty(self, paragraph: Paragraph) -> bool:
+        """글자·개체가 남지 않은 문단을 지운다 (구조상 남겨야 하면 둔다)."""
+        element = paragraph.element
+        parent = element.getparent()
+        glyphs = _flatten(element, _FieldState()).glyphs
+        if parent is None or glyphs or element.find(f"{_w('pPr')}/{_w('sectPr')}") is not None:
+            return False
+        if any(e.tag in _COMMENT_RANGE or e.tag == _w("commentReference") for e in element.iter()):
+            return False
+        if not _keeps_structure(parent, without=element):
+            return False
+        _drop_bookmark_partners(self._roots[paragraph.part], element)
+        parent.remove(element)
+        return True
+
+    def _notes_part(self, kind: str) -> tuple[str, etree._Element]:
+        """각주(미주) 부분. 없으면 구분선 항목과 함께 만들고 ``settings.xml`` 에 등록한다."""
+        name = self._related(f"{kind}s")
+        root = self._part_root(name) if name else None
+        if root is None:
+            root = etree.Element(_w(f"{kind}s"), nsmap={"w": W, "r": _R})
+            for note_id, kind_name in (("-1", "separator"), ("0", "continuationSeparator")):
+                separator = etree.SubElement(root, _w(kind))
+                separator.set(_w("type"), kind_name)
+                separator.set(_w("id"), note_id)
+                paragraph = etree.SubElement(separator, _w("p"))
+                spacing = etree.SubElement(etree.SubElement(paragraph, _w("pPr")), _w("spacing"))
+                for attr, value in (("after", "0"), ("line", "240"), ("lineRule", "auto")):
+                    spacing.set(_w(attr), value)
+                etree.SubElement(etree.SubElement(paragraph, _w("r")), _w(kind_name))
+            name = self._create_part(f"{kind}s", name, root, _NOTE_TYPES[kind])
+            settings = self._settings_root()
+            if settings.find(_w(f"{kind}Pr")) is None:
+                props = etree.Element(_w(f"{kind}Pr"))
+                for note_id in ("-1", "0"):
+                    etree.SubElement(props, _w(kind)).set(_w("id"), note_id)
+                obj.insert_ordered(settings, props, obj.SETTINGS_ORDER)
+        assert name is not None
+        if all(part != name for part, _ in self._parts):
+            label = _NOTE_LABELS[kind]
+            at = len(self._parts)
+            if kind == "footnote":
+                at = next(
+                    (i for i, (_, x) in enumerate(self._parts) if x == _NOTE_LABELS["endnote"]), at
+                )
+            self._parts.insert(at, (name, label))
+        self._dirty.add(name)
+        return name, root
+
+    def _settings_root(self) -> etree._Element:
+        """설정 부분 (없으면 만든다). 고칠 것이므로 저장 대상으로 표시한다."""
+        name = self._related("settings")
+        root = self._part_root(name) if name else None
+        if root is None:
+            root = etree.Element(_w("settings"), nsmap={"w": W})
+            name = self._create_part("settings", name, root, _SETTINGS_TYPE)
+        assert name is not None
+        self._dirty.add(name)
+        return root
+
+    def _footnote(self, index: int, edit: Edit) -> Change:
+        """``old_text`` 바로 뒤에 각주(``endnote`` 면 미주)를 단다."""
+        kind = "endnote" if edit.endnote else "footnote"
+        paragraph = self._paragraph(index, edit.paragraph)
+        number = self._number(paragraph)
+        if any(paragraph.part == name for name, x in self._parts if x in _NOTE_KINDS):
+            raise EditError(f"Edit {index}: a {kind} cannot be added inside a footnote.", index)
+        old = _OBJECT_LABEL.sub(WALL, edit.old_text.replace("\r\n", "\n"))
+        if not old.strip():
+            raise EditError(
+                f"Edit {index}: old_text is the text the {kind} mark goes after (for example "
+                '"120억 원"); it must appear once in the paragraph.',
+                index,
+            )
+        body = re.sub(r"\n{2,}", "\n", edit.new_text.replace("\r\n", "\n")).strip()
+        if not body:
+            raise EditError(f"Edit {index}: new_text is the text of the {kind}.", index)
+        if _FORBIDDEN_CHARS.search(body) or WALL in body:
+            raise EditError(f"Edit {index}: new_text contains control characters.", index)
+        starts = _find_all(paragraph.text, old)
+        if not starts:
+            raise self._not_found(index, old, [paragraph], edit.paragraph)
+        if len(starts) > 1:
+            raise EditError(
+                f"Edit {index}: old_text appears {len(starts)} times in p{number}. Include more "
+                "text so that it matches one place.",
+                index,
+            )
+        glyph = paragraph.glyphs[starts[0] + len(old) - 1]
+        if glyph.run is None or glyph.wall:
+            raise EditError(
+                f"Edit {index}: old_text must end with plain text, not an object or field.", index
+            )
+        owner = glyph.tracked if glyph.tracked and not glyph.tracked.startswith("\0") else None
+        if owner is not None and owner != self._author:
+            raise EditError(
+                f"Edit {index}: the place after old_text is inside a tracked change by {owner}. "
+                "Accept or reject it first, if the user agrees.",
+                index,
+            )
+        reference = self._add_note(kind, body)
+        _split_run(glyph.run, glyph.index + 1)
+        glyph.run.addnext(self._wrap_new(reference) if self._track and owner is None else reference)
+        self._dirty.add(paragraph.part)
+        self._paragraphs = None
+        text = (
+            f"added a{'n' if kind == 'endnote' else ''} {kind} after "
+            f"{_head(old.replace(WALL, ''), 30)!r} in p{number}: {_shorten(body)!r}"
+        )
+        return Change(index, number, 1, "", _shorten(body), kind=edit.op, note=text)
+
+    def _add_note(self, kind: str, body: str) -> etree._Element:
+        """각주(미주) 부분에 ``body`` 글자의 각주를 더하고, 본문에 넣을 표시 run 을 돌려준다."""
+        name, root = self._notes_part(kind)
+        ids = [_int_val_attr_plain(e, _w("id")) for e in root.iterchildren(_w(kind))]
+        note_id = str(max([0, *ids]) + 1)
+        mark_style = self._style_for(f"{kind} reference")
+        text_style = self._style_for(f"{kind} text")
+        reference = etree.Element(_w("r"))
+        etree.SubElement(etree.SubElement(reference, _w("rPr")), _w("rStyle")).set(
+            _w("val"), mark_style
+        )
+        etree.SubElement(reference, _w(f"{kind}Reference")).set(_w("id"), note_id)
+        note = etree.SubElement(root, _w(kind))
+        note.set(_w("id"), note_id)
+        for k, line in enumerate(body.split("\n")):
+            line_element = etree.SubElement(note, _w("p"))
+            props = etree.SubElement(line_element, _w("pPr"))
+            etree.SubElement(props, _w("pStyle")).set(_w("val"), text_style)
+            if k == 0:
+                mark = etree.SubElement(line_element, _w("r"))
+                style = etree.SubElement(etree.SubElement(mark, _w("rPr")), _w("rStyle"))
+                style.set(_w("val"), mark_style)
+                etree.SubElement(mark, _w(f"{kind}Ref"))
+                line = " " + line
+            line_element.append(_new_run(None, _text_tokens(line.replace("\t", " "))))
+            if self._track:
+                self._track_runs(line_element, "ins")
+        self._dirty.add(name)
+        return reference
+
+    def _realize(self, part: str, blocks: Sequence[etree._Element]) -> tuple[int, int, list[str]]:
+        """Markdown 이 남긴 자리 표시를 그림·각주로 바꾼다. ``(그림 수, 각주 수, 찾지 못한 그림)``.
+
+        찾지 못한 그림은 대체 글자(``[설명]``)로 남긴다.
+        """
+        pictures, notes, missing = 0, 0, []
+        for block in blocks:
+            for marker in list(block.iter(obj.IMAGE_MARKER, obj.NOTE_MARKER)):
+                run = marker.getparent()
+                assert run is not None
+                if marker.tag == obj.NOTE_MARKER:
+                    reference = self._add_note("footnote", marker.get("text", ""))
+                    run.addprevious(reference)
+                    run.getparent().remove(run)
+                    notes += 1
+                    continue
+                ref, alt = marker.get("ref", ""), marker.get("alt", "")
+                try:
+                    source = self._image_source(0, ref)
+                except EditError:
+                    missing.append(ref)
+                    run.remove(marker)
+                    if alt:
+                        _write_run(run, _text_tokens(f"[{alt}]"))
+                    elif not len(run):
+                        run.getparent().remove(run)
+                    continue
+                closest = _closest_paragraph(run)
+                room = self._room(closest if closest is not None else run)
+                cx, cy, _ = self._fit(0, source.cx, source.cy, None, room)
+                shape = self._new_shape_id()
+                rel_id = self._attach_image(part, source)
+                marker.addprevious(obj.inline_drawing(rel_id, shape, cx, cy, f"그림 {shape}", alt))
+                run.remove(marker)
+                pictures += 1
+        return pictures, notes, missing
+
+    def realize_markdown(self, images: Mapping[str, ImageData]) -> list[str]:
+        """새로 만든 문서(``build_docx``)의 Markdown 그림·각주 자리 표시를 그림·각주로 바꾼다.
+
+        Args:
+            images: 넣을 수 있는 프로젝트 그림 (``"img:<요소 id>"`` → 그림 파일).
+
+        Returns:
+            찾지 못해 대체 글자로 남긴 그림 이름.
+        """
+        self._images = images
+        main = self._parts[0][0]
+        _, _, missing = self._realize(main, [self._roots[main]])
+        self._dirty.add(main)
+        self._paragraphs = None
+        return missing
+
+    # --- 머리글·바닥글 ------------------------------------------------------------------------
+
+    def _sections(self) -> list[etree._Element]:
+        """본문의 구역 설정 (``w:sectPr``), 순서대로. 없으면 본문 끝에 만든다."""
+        root = self._roots[self._parts[0][0]]
+        found = [
+            section
+            for section in root.iter(_w("sectPr"))
+            if section.getparent() is not None
+            and section.getparent().tag in (_w("body"), _w("pPr"))
+        ]
+        if not found:
+            body = root.find(_w("body"))
+            if body is None:
+                raise EditError("This Word document has no body.")
+            found = [etree.SubElement(body, _w("sectPr"))]
+        return found
+
+    @staticmethod
+    def _reference(section: etree._Element, kind: str, page: str) -> etree._Element | None:
+        for ref in section.iterchildren(_w(f"{kind}Reference")):
+            if ref.get(_w("type"), "default") == page:
+                return ref
+        return None
+
+    def _new_header_part(self, kind: str) -> tuple[str, str]:
+        """빈 머리글(바닥글) 부분을 만들고 ``(이름, 관계 id)`` 를 돌려준다."""
+        main = self._parts[0][0]
+        folder = main.rsplit("/", 1)[0] + "/" if "/" in main else ""
+        number = 1
+        while self._exists(f"{folder}{kind}{number}.xml"):
+            number += 1
+        name = f"{folder}{kind}{number}.xml"
+        tag = "hdr" if kind == "header" else "ftr"
+        self._roots[name] = etree.Element(_w(tag), nsmap={"w": W, "r": _R})
+        self._register_type(name, _PART_TYPES[kind])
+        self._dirty.add(name)
+        rel_id = self._add_rel(main, _REL_BASE + kind, name[len(folder) :])
+        label = "머리글" if kind == "header" else "바닥글"
+        same = [i for i, (_, x) in enumerate(self._parts) if x and x.startswith(label)]
+        if same:
+            at = same[-1] + 1
+        elif kind == "header":
+            at = 1
+        else:
+            headers = [i for i, (_, x) in enumerate(self._parts) if x and x.startswith("머리글")]
+            at = headers[-1] + 1 if headers else 1
+        self._parts.insert(at, (name, f"{label} {len(same) + 1}"))
+        return name, rel_id
+
+    def _check_plain_header(self, index: int, name: str, kind: str) -> None:
+        root = self._part_root(name)
+        if root is None:
+            return
+        label = next((x for n, x in self._parts if n == name), kind)
+        objects = (_w("drawing"), _w("pict"), _w("object"), f"{{{obj.MC}}}AlternateContent")
+        if next(root.iter(*objects), None) is not None:
+            raise EditError(
+                f"Edit {index}: the {kind} ({label}) has an image, shape or text box, so it cannot "
+                f"be replaced as a whole. Edit its paragraphs instead (replace, insert_paragraph or "
+                f"delete_paragraph with the ({label}) paragraph numbers) so that the logo is kept.",
+                index,
+            )
+        tags = (*_TRACKED_ALL, _w("rPrChange"), _w("pPrChange"))
+        if any(e.get(_w("author")) != self._author for e in root.iter(*tags)):
+            raise EditError(
+                f"Edit {index}: the {kind} ({label}) has tracked changes. Accept or reject them "
+                "first, if the user agrees.",
+                index,
+            )
+
+    def _header_paragraph(self, line: str, style: str, align: str | None) -> etree._Element:
+        paragraph = etree.Element(_w("p"))
+        props = etree.SubElement(paragraph, _w("pPr"))
+        etree.SubElement(props, _w("pStyle")).set(_w("val"), style)
+        if align:
+            obj.paragraph_prop(props, "jc", val=align)
+        for kind, value in obj.split_page_fields(line):
+            if kind == "text":
+                paragraph.append(_new_run(None, _text_tokens(value)))
+            else:
+                for run in obj.field_runs(value, "1", None):
+                    paragraph.append(run)
+        return paragraph
+
+    def _write_header(self, name: str, kind: str, text: str, align: str | None) -> None:
+        """머리글(바닥글) 부분의 내용을 ``text`` 로 바꾼다 (추적 모드면 지움 + 넣음 기록)."""
+        root = self._part_root(name)
+        assert root is not None
+        style = self._style_for(kind)
+        old = [child for child in root if child.tag in _BLOCKS]
+        lines = text.split("\n") if text else [""]
+        new = [self._header_paragraph(line, style, align) for line in lines]
+        for block in old:
+            if self._track and not self._own_inserted(block):
+                self._track_block(block, "del")
+            else:
+                _drop_bookmark_partners(root, block)
+                root.remove(block)
+        for block in new:
+            if self._track:
+                self._track_block(block, "ins")
+            root.append(block)
+        self._dirty.add(name)
+
+    def _set_header(self, index: int, edit: Edit, kind: str) -> Change:
+        """머리글(``kind="header"``)·바닥글을 ``new_text`` 로 쓴다. 없으면 만든다."""
+        label = "header" if kind == "header" else "footer"
+        text = re.sub(r"\n{2,}", "\n", edit.new_text.replace("\r\n", "\n")).strip("\n")
+        if _FORBIDDEN_CHARS.search(text) or WALL in text:
+            raise EditError(f"Edit {index}: new_text contains control characters.", index)
+        align = (edit.align or "").strip().lower() or None
+        if align not in (None, "left", "center", "right"):
+            raise EditError(f'Edit {index}: align must be "left", "center" or "right".', index)
+        has_page = any(k == "field" for k, _ in obj.split_page_fields(text))
+        if align is None and kind == "footer" and has_page:
+            align = "center"
+        main = self._parts[0][0]
+        rels = self._rels_of(main)
+        sections = self._sections()
+        settings_name = self._related("settings")
+        settings = self._part_root(settings_name) if settings_name else None
+        pages = ["default"]
+        if settings is not None and settings.find(_w("evenAndOddHeaders")) is not None:
+            pages.append("even")
+        targets: list[str] = []
+        for section in sections:
+            for page in pages:
+                ref = self._reference(section, kind, page)
+                target = rels.get(ref.get(f"{{{_R}}}id", "")) if ref is not None else None
+                if target and target[1] not in targets:
+                    targets.append(target[1])
+        for name in targets:
+            self._check_plain_header(index, name, label)
+        first = sections[0]
+        first_ref = self._reference(first, kind, "first")
+        first_target = rels.get(first_ref.get(f"{{{_R}}}id", "")) if first_ref is not None else None
+        if edit.first_page is False and first_target and first_target[1] not in targets:
+            self._check_plain_header(index, first_target[1], label)
+        created = False
+        if self._reference(first, kind, "default") is None:
+            name, rel_id = self._new_header_part(kind)
+            ref = etree.Element(_w(f"{kind}Reference"))
+            ref.set(_w("type"), "default")
+            ref.set(f"{{{_R}}}id", rel_id)
+            obj.insert_ordered(first, ref, obj.SECTION_ORDER, replace=False)
+            targets.insert(0, name)
+            created = True
+        for name in targets:
+            self._write_header(name, kind, text, align)
+        notes = []
+        if edit.first_page is False:
+            obj.insert_ordered(first, etree.Element(_w("titlePg")), obj.SECTION_ORDER)
+            if first_target is None:
+                name, rel_id = self._new_header_part(kind)
+                ref = etree.Element(_w(f"{kind}Reference"))
+                ref.set(_w("type"), "first")
+                ref.set(f"{{{_R}}}id", rel_id)
+                obj.insert_ordered(first, ref, obj.SECTION_ORDER, replace=False)
+                self._write_header(name, kind, "", None)
+            elif first_target[1] not in targets:
+                self._write_header(first_target[1], kind, "", None)
+            notes.append("not shown on the first page")
+        elif edit.first_page is True:
+            title_page = first.find(_w("titlePg"))
+            if title_page is not None:
+                first.remove(title_page)
+                notes.append(
+                    "now also shown on the first page (this applies to the first-page header and "
+                    "footer of the first section)"
+                )
+        self._dirty.add(main)
+        self._paragraphs = None
+        verb = "added" if created and len(targets) == 1 else "set"
+        where = f"{len(targets)} sections" if len(targets) > 1 else "the document"
+        note = (
+            f"{verb} the {label} of {where}: {_shorten(text)!r}"
+            if text
+            else (f"cleared the {label} of {where}")
+        )
+        if has_page:
+            note += " (page numbers are fields that Word fills in)"
+        if notes:
+            note += f"; {'; '.join(notes)}"
+        return Change(index, 1, len(targets), "", _shorten(text), kind=edit.op, note=note)
+
+    # --- 목차 -----------------------------------------------------------------------------------
+
+    def _toc_paragraphs(self) -> list[etree._Element] | None:
+        """본문에 있는 목차 필드가 걸친 문단들 (시작 문단부터 끝 문단까지). 없으면 ``None``."""
+        main = self._parts[0][0]
+        paragraphs = [
+            x.element
+            for x in self.paragraphs
+            if x.part == main and not (x.location or "").startswith("글상자")
+        ]
+        depth = 0
+        toc_depth: int | None = None
+        start = 0
+        for k, paragraph in enumerate(paragraphs):
+            for element in paragraph.iter(_w("fldChar"), _w("instrText")):
+                if element.tag == _w("instrText"):
+                    text = (element.text or "").strip().upper()
+                    if toc_depth is None and depth and text.startswith("TOC"):
+                        toc_depth, start = depth, k
+                    continue
+                kind = element.get(_w("fldCharType"))
+                if kind == "begin":
+                    depth += 1
+                elif kind == "end":
+                    if toc_depth is not None and depth == toc_depth:
+                        return paragraphs[start : k + 1]
+                    depth = max(depth - 1, 0)
+        return None
+
+    def _insert_toc(self, index: int, edit: Edit) -> Change:
+        """목차 필드를 넣는다 (이미 있으면 지금 제목으로 다시 만든다). 쪽 번호는 Word 가 채운다."""
+        levels = edit.levels if edit.levels is not None else 3
+        if not 1 <= levels <= 9:
+            raise EditError(f"Edit {index}: levels must be between 1 and 9.", index)
+        main = self._parts[0][0]
+        existing = self._toc_paragraphs()
+        inside = {id(e) for e in existing or []}
+        headings = []
+        for paragraph in self.paragraphs:
+            if paragraph.part != main or (paragraph.location or "").startswith("글상자"):
+                continue
+            if id(paragraph.element) in inside or not paragraph.text.replace(WALL, "").strip():
+                continue
+            level = self._heading_level(paragraph.element)
+            if level is not None and level <= levels:
+                headings.append((level, paragraph.text.replace(WALL, "").strip()))
+        if not headings:
+            raise EditError(
+                f"Edit {index}: the document has no headings (제목 1 to 제목 {levels}) to list. "
+                "Make headings first (set_style), then insert the table of contents.",
+                index,
+            )
+        styles = {n: self._style_for(f"toc {n}") for n in {level for level, _ in headings}}
+        runs = obj.field_runs(obj.toc_instruction(levels), "", None)
+        blocks: list[etree._Element] = []
+        for k, (level, text) in enumerate(headings):
+            paragraph = etree.Element(_w("p"))
+            props = etree.SubElement(paragraph, _w("pPr"))
+            etree.SubElement(props, _w("pStyle")).set(_w("val"), styles[level])
+            if k == 0:
+                for run in runs[:3]:
+                    paragraph.append(run)
+            paragraph.append(_new_run(None, _text_tokens(text.replace(LINE_BREAK, " "))))
+            if k == len(headings) - 1:
+                paragraph.append(runs[4])
+            blocks.append(paragraph)
+        if existing:
+            parent = existing[0].getparent()
+            if parent is None or any(e.getparent() is not parent for e in existing):
+                raise EditError(
+                    f"Edit {index}: the table of contents of this document cannot be updated here. "
+                    "Ask the user to update it in Word (right-click it and choose Update Field).",
+                    index,
+                )
+            number = self._number(next(x for x in self.paragraphs if x.element is existing[0]))
+            for block in blocks:
+                existing[0].addprevious(block)
+            root = self._roots[main]
+            for old in existing:
+                if self._track and not self._own_inserted(old):
+                    self._track_block(old, "del")
+                else:
+                    _drop_bookmark_partners(root, old)
+                    parent.remove(old)
+            note = f"updated the table of contents at p{number} ({len(headings)} headings)"
+        else:
+            reference = self._paragraph(index, edit.paragraph)
+            number = self._number(reference)
+            position = self._position(index, edit)
+            container = reference.element.getparent()
+            if container is None or container.tag != _w("body"):
+                raise EditError(
+                    f"Edit {index}: a table of contents needs a paragraph directly in the document "
+                    f"body, but p{number} is inside a table cell, header, footer, footnote or "
+                    "content control.",
+                    index,
+                )
+            title = etree.Element(_w("p"))
+            props = etree.SubElement(title, _w("pPr"))
+            etree.SubElement(props, _w("pStyle")).set(_w("val"), self._style_for("toc heading"))
+            title.append(_new_run(None, _text_tokens("목차")))
+            blocks.insert(0, title)
+            anchor = reference.element
+            for block in blocks:
+                if position == "after":
+                    anchor.addnext(block)
+                    anchor = block
+                else:
+                    reference.element.addprevious(block)
+            note = (
+                f"inserted a table of contents {position} p{number} ({len(headings)} headings, "
+                f"levels 1-{levels})"
+            )
+        if self._track:
+            for block in blocks:
+                self._track_runs(block, "ins")
+                self._mark_paragraph(block, "ins")
+        settings = self._settings_root()
+        update = etree.Element(_w("updateFields"))
+        update.set(_w("val"), "true")
+        obj.insert_ordered(settings, update, obj.SETTINGS_ORDER)
+        self._dirty.add(main)
+        self._paragraphs = None
+        note += (
+            "; page numbers are left empty: Word asks to update fields when the document is "
+            "opened and then fills them in"
+        )
+        return Change(index, number, len(headings), "", "", kind=edit.op, note=note)
+
+    # --- 문서 정보 ------------------------------------------------------------------------------
+
+    def _core_part(self, create: bool) -> tuple[str | None, etree._Element | None]:
+        """문서 정보 부분(``docProps/core.xml``). ``create`` 면 없을 때 만든다."""
+        rels = self._part_root("_rels/.rels")
+        if rels is not None:
+            for rel in rels.iter(f"{{{_PKG_REL}}}Relationship"):
+                if rel.get("Type") == obj.REL_CORE and rel.get("TargetMode") != "External":
+                    name = _resolve("", rel.get("Target", ""))
+                    root = self._part_root(name)
+                    if root is not None:
+                        return name, root
+        if not create:
+            return None, None
+        name = "docProps/core.xml"
+        root = obj.new_core_properties()
+        self._roots[name] = root
+        self._removed.discard(name)
+        self._register_type(name, obj.CORE_TYPE)
+        if rels is None:
+            rels = etree.Element(f"{{{_PKG_REL}}}Relationships", nsmap={None: _PKG_REL})
+            self._roots["_rels/.rels"] = rels
+        used = {rel.get("Id") for rel in rels}
+        number = 1
+        while f"rId{number}" in used:
+            number += 1
+        rel = etree.SubElement(rels, f"{{{_PKG_REL}}}Relationship")
+        rel.set("Id", f"rId{number}")
+        rel.set("Type", obj.REL_CORE)
+        rel.set("Target", name)
+        self._dirty.add("_rels/.rels")
+        return name, root
+
+    def properties(self) -> dict[str, str]:
+        """문서 정보 ``{"title": …, "author": …, "subject": …, "keywords": …}`` (값이 있는 것만).
+
+        Returns:
+            문서 정보.
+        """
+        _, root = self._core_part(create=False)
+        return obj.read_core_properties(root)
+
+    def _set_properties(self, index: int, edit: Edit) -> Change:
+        """문서 정보(제목·작성자·주제·키워드)를 바꾼다. 변경 추적으로 남지 않는다."""
+        items = edit.properties.items() if edit.properties is not None else []
+        if not items:
+            raise EditError(
+                f"Edit {index}: properties is required: give title, author, subject or keywords.",
+                index,
+            )
+        for key, value in items:
+            if len(value) > 500 or _FORBIDDEN_CHARS.search(value):
+                raise EditError(
+                    f"Edit {index}: the {key} is too long or has control characters.", index
+                )
+        name, root = self._core_part(create=True)
+        assert name is not None and root is not None
+        done = []
+        for key, value in items:
+            obj.set_core_property(root, obj.PROPERTY_TAGS[key], value)
+            done.append(f"{key} {value!r}" if value else f"{key} removed")
+        obj.set_modified(root, self._author, self._date)
+        self._dirty.add(name)
+        note = f"set document properties: {', '.join(done)}"
+        if self._track:
+            note += " (document properties are not tracked; Word does not track them either)"
+        return Change(index, 1, len(items), "", "", kind=edit.op, note=note)
+
     # --- 저장 ------------------------------------------------------------------------------------
 
     def to_bytes(self) -> bytes:
@@ -4270,6 +5594,8 @@ class DocxDocument:
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zf:
             for info, data in self._entries:
+                if info.filename in self._removed:
+                    continue
                 if info.filename in self._dirty:
                     data = _serialize(self._roots[info.filename], data)
                 zf.writestr(info, data, compress_type=info.compress_type)
@@ -4279,6 +5605,8 @@ class DocxDocument:
                         root, b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
                     )
                     zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            for name, data in self._media.items():  # 이번에 넣은 그림 파일
+                zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
         return buffer.getvalue()
 
 
@@ -4644,6 +5972,63 @@ def _strip_copy(block: etree._Element) -> None:
                 parent.remove(element)
     for name in (_MARK, _PARA_ID, f"{{{W14}}}textId"):
         block.attrib.pop(name, None)
+
+
+@dataclass(frozen=True)
+class _ImageSource:
+    """넣을 그림 파일.
+
+    Attributes:
+        cx: 원래 너비 (EMU).
+        cy: 원래 높이 (EMU).
+        extension: 파일 확장자.
+        data: 새로 더할 파일 내용 (프로젝트 그림). 같은 문서의 그림이면 ``None``.
+        file: 같은 문서 안의 그림 파일 이름 (다시 쓴다).
+    """
+
+    cx: int
+    cy: int
+    extension: str
+    data: bytes | None = None
+    file: str | None = None
+
+
+def _int_val_attr_plain(element: etree._Element, name: str) -> int:
+    """속성 값의 정수. 없거나 숫자가 아니면 0."""
+    try:
+        return int(element.get(name, "0"))
+    except ValueError:
+        return 0
+
+
+def _fallback_content(content: etree._Element) -> etree._Element | None:
+    """글상자 내용(``mc:Choice`` 쪽)의 옛 Word 용 사본 ``w:txbxContent``. 없으면 ``None``."""
+    choice = next((a for a in content.iterancestors(f"{{{obj.MC}}}Choice")), None)
+    alternate = choice.getparent() if choice is not None else None
+    fallback = alternate.find(_FALLBACK) if alternate is not None else None
+    if fallback is None:
+        return None
+    return next(fallback.iter(_w("txbxContent")), None)
+
+
+def _in_fallback(element: etree._Element) -> bool:
+    """옛 Word 용 사본(``mc:Fallback``) 안의 요소인지. 같은 내용이 새 Word 용(``mc:Choice``)에도 있다."""
+    return any(a.tag == _FALLBACK for a in element.iterancestors())
+
+
+def _picture_detail(label: str, drawing: etree._Element) -> str:
+    """그림 설명 줄 (``그림 g1 · 12.0×8.0cm · 대체 글자 '구성도'``)."""
+    parts = [label]
+    size = obj.drawing_size(drawing)
+    if size:
+        parts.append(f"{obj.cm(size[0])}×{obj.cm(size[1])}cm")
+    if not obj.is_inline(drawing):
+        parts.append("떠 있는 그림")
+    props = obj.drawing_properties(drawing)
+    description = (props.get("descr") or "").strip() if props is not None else ""
+    if description:
+        parts.append(f"대체 글자 {_head(description, 60)!r}")
+    return " · ".join(parts)
 
 
 def _closest_paragraph(element: etree._Element) -> etree._Element | None:
@@ -5119,8 +6504,11 @@ def _format_paragraph(paragraph: Paragraph, formatting: bool = False) -> str:
     prefix = f"[p{paragraph.number}]"
     if labels:
         prefix += " " + " ".join(f"({x})" for x in labels)
-    text = paragraph.marked if paragraph.tracked else paragraph.text
+    text = paragraph.marked or paragraph.text
+    if (paragraph.location or "").startswith(("각주 ", "미주 ")):
+        text = text.lstrip()  # 각주 번호 뒤 띄어쓰기
     lines = [f"{prefix} {text}".rstrip(" ")]
+    lines += [f"    ({detail})" for detail in paragraph.objects]
     if formatting and (line := _format_line(paragraph)):
         lines.append(line)
     for comment in paragraph.comments:

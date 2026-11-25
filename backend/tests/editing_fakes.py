@@ -34,10 +34,11 @@ class FakeSession:
     ``async with SessionLocal() as session`` 처럼 쓸 수 있게 자기 자신을 돌려준다.
     """
 
-    def __init__(self, found=None, later=(), children=()):
+    def __init__(self, found=None, later=(), children=(), rows=()):
         self.found = found
         self.later = list(later)
         self.children = list(children)
+        self.rows = list(rows)  # execute() 결과 (프로젝트 그림 조회)
         self.queries = []
         self.added = []
         self.commits = 0
@@ -55,6 +56,10 @@ class FakeSession:
         if len(self.queries) > 1 and self.later:
             return self.later.pop(0)
         return self.found
+
+    async def execute(self, query):
+        self.queries.append(query)
+        return SimpleNamespace(all=lambda: list(self.rows))
 
     def add(self, obj):
         self.added.append(obj)

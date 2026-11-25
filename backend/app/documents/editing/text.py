@@ -94,6 +94,14 @@ EDIT_OPS = frozenset(
         "resolve_comment",
         "delete_comment",
         "format",
+        "insert_image",
+        "edit_image",
+        "footnote",
+        "delete_object",
+        "set_header",
+        "set_footer",
+        "insert_toc",
+        "set_properties",
     }
 )
 """수정 종류. 텍스트 형식은 ``replace`` 만, 나머지는 DOCX 에서만 쓴다."""
@@ -125,6 +133,31 @@ class TextFormat:
 
 
 @dataclass(frozen=True)
+class DocumentProperties:
+    """``set_properties`` 에서 바꿀 문서 정보. ``None`` 인 항목은 그대로 두고, 빈 글자면 지운다.
+
+    Attributes:
+        title: 제목.
+        author: 작성자.
+        subject: 주제.
+        keywords: 키워드 (쉼표로 구분).
+    """
+
+    title: str | None = None
+    author: str | None = None
+    subject: str | None = None
+    keywords: str | None = None
+
+    def items(self) -> list[tuple[str, str]]:
+        """바꿀 ``(이름, 값)`` 들 (``None`` 은 뺀다)."""
+        return [
+            (name, value.strip())
+            for name in ("title", "author", "subject", "keywords")
+            if (value := getattr(self, name)) is not None
+        ]
+
+
+@dataclass(frozen=True)
 class Edit:
     r"""수정 하나.
 
@@ -149,6 +182,17 @@ class Edit:
         author: ``accept_changes``·``reject_changes`` 에서 이 사람이 남긴 기록만 다룬다.
         comment: 메모 id (예: ``"c3"``). ``comment`` 에서는 그 메모에 답글을 달고,
             ``resolve_comment``·``delete_comment`` 에서는 다룰 메모다.
+        image: ``insert_image`` 에서 넣을 그림 (같은 문서의 ``"g2"`` 나 프로젝트 그림 ``"img:<id>"``),
+            ``edit_image`` 에서 고칠 그림 (``"g2"``), ``delete_object`` 에서 지울 개체 (``"g2"``·``"f3"``·``"e1"``).
+            ``edit_image`` 에서 바꿔 넣을 그림은 ``target`` 이다.
+        width: ``insert_image``·``edit_image`` 에서 그림 너비 (cm). 높이는 비율을 따른다.
+        caption: ``insert_image`` 에서 그림 아래에 넣을 캡션 글자.
+        endnote: ``footnote`` 에서 각주 대신 미주로 달지.
+        align: ``set_header``·``set_footer`` 의 정렬 (``left``·``center``·``right``).
+        first_page: ``set_header``·``set_footer`` 에서 ``False`` 면 첫 쪽에는 쓰지 않는다 (표지).
+            ``True`` 면 첫 쪽에도 같게 쓴다. ``None`` 이면 손대지 않는다.
+        levels: ``insert_toc`` 에서 목차에 넣을 제목 수준 (1~9, 기본 3).
+        properties: ``set_properties`` 에서 바꿀 문서 정보.
     """
 
     old_text: str = ""
@@ -164,6 +208,14 @@ class Edit:
     whole_section: bool = False
     author: str | None = None
     comment: str | None = None
+    image: str | None = None
+    width: float | None = None
+    caption: str | None = None
+    endnote: bool = False
+    align: str | None = None
+    first_page: bool | None = None
+    levels: int | None = None
+    properties: DocumentProperties | None = None
 
 
 @dataclass(frozen=True)

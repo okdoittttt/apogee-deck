@@ -138,7 +138,10 @@ def test_fixture_view_numbers_paragraphs_tables_header_and_footer():
     assert "[p5] (표1 1행 1열) 지역" in lines
     assert "[p9] (표1 2행 2열) 52억" in lines
     assert "[p18] 목표 매출은 140억 원이다.\t담당: 영업기획팀" in lines
-    assert f"[p20] 로고: {WALL} (2024년 판)" in lines
+    # 그림은 이름표와 크기 줄로 보인다 (묶음 7). 글자로는 여전히 고칠 수 없는 자리(￼)다.
+    assert "[p20] 로고: [그림 g1] (2024년 판)" in lines
+    assert "    (그림 g1 · 2.0×1.0cm)" in lines
+    assert doc.paragraphs[19].text == f"로고: {WALL} (2024년 판)"
     assert lines[-2] == "[p22] (머리글 1) 주식회사 예시 · 대외비"
     # 쪽 번호 필드는 결과 글자 그대로 보인다 (고칠 수는 없다).
     assert lines[-1] == "[p23] (바닥글 1) 영업기획팀 · 1 쪽"

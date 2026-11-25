@@ -17,7 +17,9 @@ r"""Markdown 으로 새 DOCX 를 만든다.
 | 글머리표·번호 목록 (중첩) | ``numbering.xml`` 정의 + ``w:numPr``. 번호 목록은 목록마다 1(또는 시작 번호)부터 |
 | 표 | ``Table Grid`` 스타일, 머리글 행 반복·굵게, 열 정렬 |
 | 인용, 코드 블록, 가로줄 | ``Quote``·``Code`` 스타일, 문단 아래 테두리 |
-| 이미지, HTML | 대체 텍스트·글자 그대로 (``notes`` 로 알린다) |
+| 프로젝트 그림 ``![설명](img:<id>)`` | 그림 (자리 표시를 ``DocxDocument`` 가 그림으로 바꾼다, 묶음 7) |
+| 각주 ``[^1]`` + ``[^1]: 글`` | 각주 (위와 같이) |
+| 그 밖의 이미지, HTML | 대체 텍스트·글자 그대로 (``notes`` 로 알린다) |
 
 설계: ``works/02.docx-advencement.md`` 12절. 오류 메시지는 에이전트에게 그대로 가므로 영어로 쓴다.
 """
@@ -33,15 +35,18 @@ from xml.sax.saxutils import escape
 from lxml import etree
 from markdown_it import MarkdownIt
 from markdown_it.tree import SyntaxTreeNode
+from mdit_py_plugins.footnote import footnote_plugin
 
 from app.documents.editing.docx import (
     LINE_BREAK,
+    DocxDocument,
     W,
     parse_part,
     rels_name,
     resolve_target,
     serialize_part,
 )
+from app.documents.editing.docx_objects import IMAGE_MARKER, NOTE_MARKER, ImageData
 from app.documents.editing.text import EditError
 
 _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -138,6 +143,80 @@ _STYLES: list[tuple[str, str, str, str]] = [
         + '</w:tblBorders><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" '
         'w:type="dxa"/></w:tblCellMar></w:tblPr>',
     ),
+    # 묶음 7: 각주·미주, 캡션, 머리글·바닥글, 목차. 이름은 Word 의 내장 스타일 이름이다.
+    *[
+        (
+            f"{kind} text",
+            "paragraph",
+            f"{kind.title()}Text",
+            (
+                '<w:basedOn w:val="Normal"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:pPr>'
+                '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr>'
+                '<w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>'
+            ),
+        )
+        for kind in ("footnote", "endnote")
+    ],
+    *[
+        (
+            f"{kind} reference",
+            "character",
+            f"{kind.title()}Reference",
+            (
+                '<w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:rPr><w:vertAlign '
+                'w:val="superscript"/></w:rPr>'
+            ),
+        )
+        for kind in ("footnote", "endnote")
+    ],
+    (
+        "caption",
+        "paragraph",
+        "Caption",
+        (
+            '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="35"/>'
+            '<w:unhideWhenUsed/><w:qFormat/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:i/>'
+            '<w:iCs/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>'
+        ),
+    ),
+    *[
+        (
+            kind,
+            "paragraph",
+            kind.title(),
+            (
+                '<w:basedOn w:val="Normal"/><w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:pPr>'
+                '<w:tabs><w:tab w:val="center" w:pos="4513"/><w:tab w:val="right" w:pos="9026"/>'
+                '</w:tabs><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+            ),
+        )
+        for kind in ("header", "footer")
+    ],
+    (
+        "toc heading",
+        "paragraph",
+        "TOCHeading",
+        (
+            '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="39"/>'
+            '<w:unhideWhenUsed/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="240" '
+            'w:after="120"/><w:outlineLvl w:val="9"/></w:pPr><w:rPr><w:b/><w:bCs/>'
+            '<w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>'
+        ),
+    ),
+    *[
+        (
+            f"toc {n}",
+            "paragraph",
+            f"TOC{n}",
+            (
+                '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="39"/>'
+                '<w:unhideWhenUsed/><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" '
+                f'w:pos="9016"/></w:tabs><w:spacing w:after="100"/><w:ind w:left="{(n - 1) * 220}"/>'
+                "</w:pPr>"
+            ),
+        )
+        for n in range(1, 10)
+    ],
 ]
 
 _BASE_STYLES = (
@@ -221,6 +300,8 @@ class _Styles:
             n += 1
             style_id = f"{base_id}{n}"
         title = name if name not in ("code", "inline code") else name.title()
+        if name == "toc heading":
+            title = "TOC Heading"
         xml = (
             f'<w:style xmlns:w="{W}" w:type="{kind}" w:styleId="{style_id}">'
             f'<w:name w:val="{title}"/>{body}</w:style>'
@@ -230,6 +311,23 @@ class _Styles:
         self._used_ids.add(style_id)
         self.changed = True
         return style_id
+
+
+def ensure_style(root: etree._Element, name: str) -> tuple[str, bool]:
+    """스타일 부분에 Word 내장 스타일(``"footnote text"``·``"caption"``·``"toc 1"`` 등)을 맞춘다.
+
+    문서에 같은 이름이 있으면 그 id 를 쓰고, 없으면 기본 정의를 더한다 (묶음 7).
+
+    Args:
+        root: 문서의 스타일 부분.
+        name: 스타일 이름 (소문자, ``_STYLES`` 의 이름).
+
+    Returns:
+        ``(스타일 id, 정의를 더했는지)``.
+    """
+    table = _Styles(root)
+    style_id = table.id(name)
+    return style_id, table.changed
 
 
 class _Numbering:
@@ -355,6 +453,9 @@ class _Builder:
         self.blocks: list[etree._Element] = []
         self.tables = 0
         self.images = 0
+        self.pictures = 0
+        self.footnotes = 0
+        self.notes: dict[int, str] = {}
         self.title = ""
 
     # --- 블록 -----------------------------------------------------------------------------------
@@ -362,6 +463,15 @@ class _Builder:
     def build(self, node: SyntaxTreeNode, context: _Context) -> None:
         for child in node.children:
             self._block(child, context)
+
+    def collect_notes(self, tree: SyntaxTreeNode) -> None:
+        """각주 정의(``[^1]: 글``)의 글자를 모은다. 본문의 각주 표시(``[^1]``)가 이 글자로 각주를 만든다."""
+        for block in tree.children:
+            if block.type != "footnote_block":
+                continue
+            for note in block.children:
+                lines = [_plain(c).strip() for c in note.children if c.type == "paragraph"]
+                self.notes[int(note.meta.get("id", -1))] = "\n".join(x for x in lines if x)
 
     def _block(self, node: SyntaxTreeNode, context: _Context) -> None:
         kind = node.type
@@ -398,6 +508,8 @@ class _Builder:
                 bottom.set(_w(key), value)
         elif kind == "table":
             self._table(node)
+        elif kind == "footnote_block":  # 각주 정의는 각주 표시 자리에서 쓴다 (collect_notes)
+            return
         elif kind == "html_block":
             for line in node.content.rstrip("\n").split("\n"):
                 self._add_runs(self._paragraph(None), line, {})
@@ -530,10 +642,24 @@ class _Builder:
                 else:
                     self._walk_inline(parent, child, marks)
             elif kind == "image":
-                self.images += 1
                 alt = _plain(child) or str(child.attrs.get("alt", ""))
-                if alt:
-                    self._add_runs(parent, f"[{alt}]", marks)
+                source = str(child.attrs.get("src", "")).strip()
+                if source.lower().startswith("img:"):
+                    # 프로젝트 그림: 자리 표시만 두고 문서에 넣을 때 그림으로 바꾼다 (DocxDocument).
+                    marker = etree.SubElement(self._run(parent, {}), IMAGE_MARKER)
+                    marker.set("ref", source)
+                    marker.set("alt", _INVALID_XML.sub("", alt))
+                    self.pictures += 1
+                else:
+                    self.images += 1
+                    if alt:
+                        self._add_runs(parent, f"[{alt}]", marks)
+            elif kind == "footnote_ref":
+                text = self.notes.get(int(child.meta.get("id", -1)), "")
+                if text:
+                    marker = etree.SubElement(self._run(parent, {}), NOTE_MARKER)
+                    marker.set("text", _INVALID_XML.sub("", text))
+                    self.footnotes += 1
             elif kind == "html_inline":
                 self._add_runs(parent, child.content, marks)
             elif child.children:
@@ -621,7 +747,11 @@ def _alignment(cell: SyntaxTreeNode | None) -> str | None:
 
 
 def _parse_markdown(markdown: str) -> SyntaxTreeNode:
-    parser = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
+    parser = (
+        MarkdownIt("commonmark", {"html": True})
+        .enable(["table", "strikethrough"])
+        .use(footnote_plugin)
+    )
     return SyntaxTreeNode(parser.parse(markdown))
 
 
@@ -704,7 +834,9 @@ class MarkdownBlocks:
         list_items: 목록 항목 수.
         tables: 표 수.
         rows: 표 행 수 (모든 표).
-        images: 글자로 대신 넣은 그림 수.
+        images: 글자로 대신 넣은 그림 수 (웹 주소 그림).
+        pictures: 프로젝트 그림 자리 표시 수 (``IMAGE_MARKER``).
+        footnotes: 각주 자리 표시 수 (``NOTE_MARKER``).
         changed: 고친 부분 종류 (``styles``·``numbering``·``rels``).
         plain: 스타일 없는 본문 문단 (넣는 쪽이 주변 문단 서식을 입힌다).
     """
@@ -716,6 +848,8 @@ class MarkdownBlocks:
     tables: int = 0
     rows: int = 0
     images: int = 0
+    pictures: int = 0
+    footnotes: int = 0
     changed: set[str] = field(default_factory=set)
     plain: list[etree._Element] = field(default_factory=list)
 
@@ -783,10 +917,17 @@ def markdown_blocks(
         number_table = _Numbering(etree.Element(_w("numbering")))
     links = _Links(rels)
     builder = _Builder(style_table, number_table, links, text_width)
+    builder.collect_notes(tree)
     builder.build(tree, _Context())
     if not builder.blocks:
         raise EditError("new_text has no content to insert.")
-    result = MarkdownBlocks(builder.blocks, tables=builder.tables, images=builder.images)
+    result = MarkdownBlocks(
+        builder.blocks,
+        tables=builder.tables,
+        images=builder.images,
+        pictures=builder.pictures,
+        footnotes=builder.footnotes,
+    )
     headings = {
         style_table.id(f"heading {n}") for n in range(1, 7) if f"heading {n}" in style_table._ids
     }
@@ -818,6 +959,7 @@ def build_docx(
     author: str,
     template: bytes | None = None,
     now: datetime | None = None,
+    images: dict[str, ImageData] | None = None,
 ) -> Created:
     """Markdown 으로 DOCX 를 만든다.
 
@@ -826,6 +968,7 @@ def build_docx(
         author: 문서 속성의 만든 이 (기본 양식일 때).
         template: 양식으로 쓸 DOCX 파일 내용. 머리글·바닥글·스타일·쪽 설정을 그대로 두고 본문만 바꾼다.
         now: 문서 속성의 시각 (테스트용). 없으면 지금.
+        images: 넣을 수 있는 프로젝트 그림 (``"img:<요소 id>"`` → 그림 파일).
 
     Returns:
         만든 DOCX 와 요약.
@@ -856,6 +999,7 @@ def build_docx(
     numbering = _Numbering(package.part("numbering"))
     links = _Links(package.rels())
     builder = _Builder(styles, numbering, links)
+    builder.collect_notes(tree)
     builder.build(tree, _Context())
     if not builder.blocks:
         raise EditError("The content has no text to put in the document.")
@@ -883,10 +1027,20 @@ def build_docx(
         package.dirty.add(rels_name(package.main))
     data = package.to_bytes(infos)
     notes = []
+    if builder.pictures or builder.footnotes:
+        # 그림·각주는 문서 고치기와 같은 코드로 넣는다 (관계·내용 형식·각주 부분·스타일).
+        document = DocxDocument.from_bytes(data)
+        missing = document.realize_markdown(images or {})
+        data = document.to_bytes()
+        if missing:
+            notes.append(
+                f"{len(missing)} project image(s) were not found and were written as their alt "
+                f"text in brackets: {', '.join(missing)}."
+            )
     if builder.images:
         notes.append(
-            f"{builder.images} image(s) were written as their alt text in brackets, because "
-            "images cannot be added."
+            f"{builder.images} image(s) with a web address were written as their alt text in "
+            "brackets; only project images (img:<id> from search_project) can be added."
         )
     paragraphs = sum(1 for b in blocks if b.tag == _w("p"))
     return Created(data, paragraphs, builder.tables, title, notes)

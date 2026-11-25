@@ -88,6 +88,42 @@ def assert_valid(data: bytes, author: str = "AI 에이전트") -> None:
             assert parent is None or parent in known, "답글의 부모 메모가 있다"
     for element in document.iter():
         assert not str(element.tag).endswith("okdoit-paragraph")
+        assert "okdoit-object" not in element.attrib and "okdoit-paragraph" not in element.attrib
+    _assert_objects(parts, document)
+
+
+def _assert_objects(parts: dict[str, bytes], document: etree._Element) -> None:
+    """그림·각주 구조 (묶음 7): 관계가 있는 그림 파일, 겹치지 않는 개체 id, 짝이 맞는 각주."""
+    rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    shape_ids = []
+    for name, data in parts.items():
+        if not name.startswith("word/") or not name.endswith(".xml") or "/_rels/" in name:
+            continue
+        root = etree.fromstring(data)
+        rels_name = name.replace("word/", "word/_rels/") + ".rels"
+        rel_ids = set()
+        if rels_name in parts:
+            rel_ids = {x.get("Id") for x in etree.fromstring(parts[rels_name])}
+        for element in root.iter():
+            for key, value in element.attrib.items():
+                if key.startswith(f"{{{rel_ns}}}"):
+                    assert value in rel_ids, f"{name} 의 관계 {value} 가 있다"
+        shape_ids += [e.get("id") for e in root.iter(f"{{{wp}}}docPr")]
+    assert len(shape_ids) == len(set(shape_ids)), "그림 개체 id 는 겹치지 않는다"
+    for kind in ("footnote", "endnote"):
+        refs = {e.get(f"{{{W}}}id") for e in document.iter(f"{{{W}}}{kind}Reference")}
+        name = f"word/{kind}s.xml"
+        if name not in parts:
+            assert not refs
+            continue
+        notes = etree.fromstring(parts[name])
+        normal = {
+            e.get(f"{{{W}}}id")
+            for e in notes.iter(f"{{{W}}}{kind}")
+            if e.get(f"{{{W}}}type") in (None, "normal")
+        }
+        assert refs == normal, "각주 표시와 각주 항목은 짝이 맞는다"
 
 
 # --- 수락·거절 --------------------------------------------------------------------------------

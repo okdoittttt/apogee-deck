@@ -21,8 +21,10 @@ from app.documents import reading
 from app.documents import service as documents
 from app.documents.editing import service as editing
 from app.documents.editing.docx import LINE_BREAK, WALL, ParagraphView
+from app.documents.editing.docx_objects import PROPERTY_LABELS
 from app.documents.editing.text import (
     Change,
+    DocumentProperties,
     Edit,
     EditError,
     LineView,
@@ -185,7 +187,13 @@ DOCX_VIEW_LEGEND = (
     "someone else's tracked changes cannot be edited until they are accepted or rejected, and "
     "old_text never includes the marks. A line (메모 c3 · name: 'text' → 'target') under a "
     "paragraph is a comment on that paragraph, not document text; (↳ 답글 c4 · name: 'text') "
-    "lines under it are replies, and · 해결됨 means the comment is resolved."
+    "lines under it are replies, and · 해결됨 means the comment is resolved. [그림 g1] is an "
+    "image (a line under the paragraph gives its size and alt text), [각주 f1] / [미주 e1] a "
+    "footnote or endnote mark whose text is the paragraph labeled (각주 f1) / (미주 e1), and "
+    "[글상자 1] a text box whose text is the paragraph labeled (글상자 1 · p2 안); these marks "
+    "cannot be typed or removed with replace (use the image, footnote and delete_object ops). "
+    "(목차) paragraphs are a table of contents (update it with insert_toc) and (문서 정보: …) "
+    "under the document name is its properties."
 )
 """DOCX 보기 결과 끝에 붙이는 범례."""
 
@@ -281,6 +289,11 @@ def make_view_document_for_edit(settings: Settings) -> BaseTool:
             unit, legend = "paragraph", f"\n\n{DOCX_VIEW_LEGEND}"
             if formatting:
                 legend += f" {FORMATTING_LEGEND}"
+            if properties := loaded.document.properties():
+                shown = " · ".join(
+                    f"{PROPERTY_LABELS[k]} {v[:60]!r}" for k, v in properties.items()
+                )
+                header += f"\n(문서 정보: {shown})"
         else:
             view = numbered_lines(loaded.text, start, limit, max_chars, query=query)
             unit, legend = "line", ""
@@ -324,6 +337,15 @@ class FormatArg(BaseModel):
     )
 
 
+class PropertiesArg(BaseModel):
+    """``set_properties`` 에서 바꿀 문서 정보 (모델이 채우는 인자라 설명은 영어로 쓴다)."""
+
+    title: str | None = Field(default=None, description="Document title.")
+    author: str | None = Field(default=None, description="Author.")
+    subject: str | None = Field(default=None, description="Subject.")
+    keywords: str | None = Field(default=None, description="Keywords, separated by commas.")
+
+
 class DocumentEdit(BaseModel):
     """``edit_document`` 의 수정 하나 (모델이 채우는 인자라 설명은 영어로 쓴다)."""
 
@@ -346,6 +368,14 @@ class DocumentEdit(BaseModel):
         "format",
         "accept_changes",
         "reject_changes",
+        "insert_image",
+        "edit_image",
+        "delete_object",
+        "footnote",
+        "set_header",
+        "set_footer",
+        "insert_toc",
+        "set_properties",
     ] = Field(
         default="replace",
         description=(
@@ -369,13 +399,23 @@ class DocumentEdit(BaseModel):
             "formatting of old_text, or of the whole paragraph when old_text is empty, to "
             "format), accept_changes / reject_changes "
             "(accept or reject the tracked changes in paragraph, or in the whole document when "
-            "paragraph is empty, optionally only those by author)."
+            "paragraph is empty, optionally only those by author), insert_image (add image as "
+            "a new paragraph before or after paragraph, optionally with width, alt text in "
+            "new_text and caption), edit_image (change image: put target in its place, set "
+            "width, or set alt text in new_text), delete_object (delete the image, footnote or "
+            "endnote named by image), footnote (add new_text as a footnote, or an endnote with "
+            "endnote, right after old_text in paragraph), set_header / set_footer (write "
+            "new_text as the page header or footer of every page, creating it if needed; {쪽} "
+            "is the page number and {전체 쪽} the page count), insert_toc (add a table of "
+            "contents before or after paragraph, or update the existing one), set_properties "
+            "(change the document properties: title, author, subject, keywords)."
         ),
     )
     old_text: str = Field(
         default="",
         description=(
-            "replace, comment and format. Exact text to replace (or to comment on or format), "
+            "replace, comment, format and footnote. Exact text to replace (or to comment on, "
+            "format, or put a footnote right after), "
             "copied from the "
             "document without the [L12] / [p12] prefixes or tracked change marks {+ +} / {- -}. Must appear exactly once unless replace_all is true; include nearby "
             "words to make it unique. In text files it may span several lines; in Word documents "
@@ -390,7 +430,12 @@ class DocumentEdit(BaseModel):
             "documents a line break in new_text splits the paragraph there, and "
             f"{LINE_BREAK} adds a line break inside the paragraph. insert_paragraph: the "
             "text of the new paragraph (one paragraph per line). insert_markdown: the content "
-            "in Markdown. comment and resolve_comment: the comment or reply text."
+            "in Markdown (it may include project images as ![alt text](img:<id>) and footnotes "
+            'as text[^1] with a line "[^1]: footnote text"). comment and resolve_comment: the '
+            "comment or reply text. insert_image and edit_image: the alt text of the image. "
+            "footnote: the footnote text. set_header and set_footer: the header or footer text "
+            "(one paragraph per line, \\t for a tab, {쪽} page number, {전체 쪽} page count; "
+            "empty clears it)."
         ),
     )
     replace_all: bool = Field(
@@ -426,8 +471,9 @@ class DocumentEdit(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            'move_paragraph only: the paragraph label to move next to, such as "p3". With '
-            "whole_section, after a heading target means after that heading's whole section."
+            'move_paragraph: the paragraph label to move next to, such as "p3". With '
+            "whole_section, after a heading target means after that heading's whole section. "
+            'edit_image: the image to put in place of image ("g3" or "img:…").'
         ),
     )
     style: str | None = Field(
@@ -479,6 +525,58 @@ class DocumentEdit(BaseModel):
             "format only: the formatting to set. Only the fields you give change; for example "
             '{"bold": true} makes old_text bold and {"color": "auto", "highlight": "none"} '
             "removes its color and highlight."
+        ),
+    )
+    image: str | None = Field(
+        default=None,
+        description=(
+            "insert_image: the image to add, either an image of this document from the view "
+            '(such as "g2" for [그림 g2], to copy it) or a project image id from search_project '
+            '(such as "img:3f2a…"). edit_image: the image to change ("g2"). delete_object: '
+            'the object to delete ("g2" image, "f1" footnote [각주 f1], "e1" endnote [미주 e1]). '
+            "For edit_image, the image to put in its place goes in target."
+        ),
+    )
+    width: float | None = Field(
+        default=None,
+        description=(
+            "insert_image and edit_image: image width in centimeters (the height keeps the "
+            "picture's proportions). Leave empty to use the picture's size, at most the page "
+            "width."
+        ),
+    )
+    caption: str | None = Field(
+        default=None,
+        description='insert_image only: caption text under the image, such as "그림 1. 구성도".',
+    )
+    endnote: bool = Field(
+        default=False,
+        description="footnote only: true adds an endnote (at the end of the document) instead.",
+    )
+    align: Literal["left", "center", "right"] | None = Field(
+        default=None,
+        description=(
+            "set_header and set_footer only: alignment. Default: left for headers, center for "
+            "footers with page numbers."
+        ),
+    )
+    first_page: bool | None = Field(
+        default=None,
+        description=(
+            "set_header and set_footer only: false to leave the first page (a cover page) "
+            "without it, true to show it on the first page too. Leave empty to keep the current "
+            "setting."
+        ),
+    )
+    levels: int | None = Field(
+        default=None,
+        description="insert_toc only: how many heading levels to list (1 to 9, default 3).",
+    )
+    properties: PropertiesArg | None = Field(
+        default=None,
+        description=(
+            "set_properties only: the document properties to set. Only the fields you give "
+            "change; an empty string removes one."
         ),
     )
 
@@ -598,10 +696,14 @@ def make_edit_document(settings: Settings) -> BaseTool:
         Text files are changed by replacing text. Word documents keep their formatting (bold,
         colors, tables, images, headers): replace changes only the replaced characters, and
         other kinds of edits can split, merge, insert, delete or move paragraphs or whole
-        sections, insert Markdown content (headings, lists, tables), add or delete table rows
-        and columns, delete tables, change a paragraph's style (heading, normal text, list),
-        add, reply to, resolve or delete comments, and accept or reject tracked changes (all of
-        them or one author's).
+        sections, insert Markdown content (headings, lists, tables, project images, footnotes),
+        add or delete table rows and columns, delete tables, change a paragraph's style
+        (heading, normal text, list), add, reply to, resolve or delete comments, accept or
+        reject tracked changes (all of them or one author's), insert, resize, replace or delete
+        images, add or delete footnotes and endnotes, write page headers and footers with page
+        numbers, insert or update a table of contents, and set the document properties. Images
+        can come only from the same document or from the project documents (img:<id> from
+        search_project).
 
         In Word documents, set track_changes to true when the user wants to review your changes
         (for example "track changes", "so I can check them in Word", "mark what you changed"):
@@ -637,6 +739,7 @@ def make_edit_document(settings: Settings) -> BaseTool:
                 document's Word setting.
         """
         parsed = [DocumentEdit.model_validate(e) if isinstance(e, dict) else e for e in edits]
+        project = (config.get("configurable") or {}).get("project")
         try:
             async with SessionLocal() as session:
                 revision = await editing.create_revision(
@@ -661,6 +764,16 @@ def make_edit_document(settings: Settings) -> BaseTool:
                             whole_section=e.whole_section,
                             author=e.author or None,
                             comment=e.comment or None,
+                            image=e.image or None,
+                            width=e.width,
+                            caption=e.caption or None,
+                            endnote=e.endnote,
+                            align=e.align,
+                            first_page=e.first_page,
+                            levels=e.levels,
+                            properties=DocumentProperties(**e.properties.model_dump())
+                            if e.properties is not None
+                            else None,
                         )
                         for e in parsed
                     ],
@@ -668,6 +781,7 @@ def make_edit_document(settings: Settings) -> BaseTool:
                     parse_wait=settings.document_edit_parse_wait_seconds,
                     track_changes=track_changes,
                     author=settings.document_edit_author,
+                    project_id=project.id if project is not None else None,
                 )
         except EditError as exc:
             raise EditError(f"{exc} No changes were saved.", exc.index) from exc
@@ -717,8 +831,12 @@ def make_create_document(settings: Settings) -> BaseTool:
 
         For .docx, write the content in Markdown: # to ###### headings, paragraphs, **bold**,
         *italic*, ~~strikethrough~~, `code`, [links](https://...), - and 1. lists (indent
-        to nest), tables with a header row, > quotes and ``` code blocks. It becomes a
-        formatted Word document. Images cannot be added. To write it on a Word document the
+        to nest), tables with a header row, > quotes, ``` code blocks and footnotes (text[^1]
+        with a line "[^1]: footnote text"). It becomes a formatted Word document. Images from
+        the project documents can be added as ![alt text](img:<id>) with an image id from
+        search_project; other images cannot be added. For a table of contents, page numbers or
+        a header, create the document first and then use edit_document (insert_toc,
+        set_footer, set_header). To write it on a Word document the
         user attached as a template (keeping its headers, footers, styles and page setup),
         set template_document_id; the template's own body is replaced. To fill blanks such
         as {{name}} in an attached form instead, use edit_document on that form.
@@ -737,6 +855,7 @@ def make_create_document(settings: Settings) -> BaseTool:
             template_document_id: .docx only: the document_id of an attached Word document
                 to use as the template.
         """
+        project = (config.get("configurable") or {}).get("project")
         try:
             async with SessionLocal() as session:
                 created = await editing.create_new_document(
@@ -749,6 +868,7 @@ def make_create_document(settings: Settings) -> BaseTool:
                     parse_wait=settings.document_edit_parse_wait_seconds,
                     author=settings.document_edit_author,
                     template_document_id=template_document_id or None,
+                    project_id=project.id if project is not None else None,
                 )
         except EditError as exc:
             raise EditError(f"{exc} No file was created.", exc.index) from exc

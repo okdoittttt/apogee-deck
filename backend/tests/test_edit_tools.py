@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.core.errors import ToolError
 from app.documents.editing import service as editing
 from app.documents.editing.docx import DocxDocument
+from app.documents.editing.text import DocumentProperties, Edit
 from app.orchestration.events import StepRecorder, ToolFinished, ToolStarted, tool_documents
 from app.orchestration.tooling import handle_tool_error
 from app.tools import build_tools, registry
@@ -192,6 +193,14 @@ def test_edit_schema_describes_edits():
         "whole_section",
         "author",
         "comment",
+        "image",
+        "width",
+        "caption",
+        "endnote",
+        "align",
+        "first_page",
+        "levels",
+        "properties",
     }
     assert {
         "merge",
@@ -204,6 +213,14 @@ def test_edit_schema_describes_edits():
         "delete_table",
         "resolve_comment",
         "delete_comment",
+        "insert_image",
+        "edit_image",
+        "delete_object",
+        "footnote",
+        "set_header",
+        "set_footer",
+        "insert_toc",
+        "set_properties",
     } <= set(edit["properties"]["op"]["enum"])
     assert set(schema["$defs"]["FormatArg"]["properties"]) == {
         "bold",
@@ -299,8 +316,20 @@ async def test_view_docx_by_paragraph(monkeypatch):
     assert out.endswith(document_tools.DOCX_VIEW_LEGEND)
 
     rest = await tool.ainvoke({"document_id": str(source.id), "start": 20}, config=CONFIG)
-    assert "[p20] 로고: ￼ (2024년 판)" in rest
+    assert "[p20] 로고: [그림 g1] (2024년 판)\n    (그림 g1 · 2.0×1.0cm)" in rest
     assert "Paragraphs 20-23 of 23." in rest
+
+
+async def test_view_docx_shows_document_properties(monkeypatch):
+    source, _, storage = install_docx(monkeypatch, parse_status=None)
+    doc = DocxDocument.from_bytes(DOCX)
+    doc.apply_edits(
+        [Edit(op="set_properties", properties=DocumentProperties(title="영업 보고", author="김"))]
+    )
+    storage.objects[source.storage_key] = doc.to_bytes()
+    tool = document_tools.make_view_document_for_edit(Settings())
+    out = await tool.ainvoke({"document_id": str(source.id)}, config=CONFIG)
+    assert "revision 1)\n(문서 정보: 제목 '영업 보고' · 작성자 '김')\n" in out
 
 
 async def test_edit_docx_reports_paragraphs(monkeypatch):

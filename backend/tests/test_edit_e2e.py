@@ -283,7 +283,7 @@ async def test_docx_bundle5_structure_request(monkeypatch):
     (doc,) = session.added
     revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
     view = revised.view(1, 100).text
-    order = [line.split("] ", 1)[1] for line in view.splitlines()]
+    order = [line.split("] ", 1)[1] for line in view.splitlines() if line.startswith("[p")]
     assert order.index("(제목 2) 다음 분기 계획") < order.index("(제목 2) 지역별 매출")
     # 옮긴 섹션에 넣은 일정 표가 앞에 와서 표1, 매출 표는 표2 가 된다
     assert "(표1 2행 1열) 준비" in view
@@ -333,3 +333,35 @@ async def test_docx_bundle6_tracked_structure_request(monkeypatch):
     (kept,) = [c for x in final.paragraphs for c in x.comments]
     assert kept.resolved and kept.replies[0].text == "출처를 확인했습니다."
     assert not any(x.tracked for x in final.paragraphs)
+
+
+async def test_docx_bundle7_document_elements_request(monkeypatch):
+    # "로고를 문서 끝에도 한 번 더 넣고, 매출 수치에 출처 각주를 달고, 바닥글에 쪽 번호,
+    #  제목 아래에 목차를 넣고, 문서 제목 속성도 바꿔 줘."
+    source, session, storage = install_docx(monkeypatch)
+    args = {
+        "document_id": str(source.id),
+        "edits": [
+            {"op": "insert_image", "paragraph": "p21", "image": "g1", "width": 3,
+             "new_text": "회사 로고", "caption": "회사 로고"},
+            {"op": "footnote", "paragraph": "p2", "old_text": "120억 원",
+             "new_text": "출처: 2024년 사업보고서"},
+            {"op": "set_footer", "new_text": "{쪽} / {전체 쪽}"},
+            {"op": "insert_toc", "paragraph": "p1", "levels": 2},
+            {"op": "set_properties", "properties": {"title": "2024 하반기 영업 보고"}},
+        ],
+    }  # fmt: skip
+    events, _ = await run(monkeypatch, request("edit_document", args))
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.status == "done", finished.output
+    assert "Not applied" not in finished.output
+    assert "inserted an image (3.0×1.5cm) after p21 with the caption '회사 로고'" in finished.output
+    assert "Word asks to update fields" in finished.output
+    (doc,) = session.added
+    revised = DocxDocument.from_bytes(storage.objects[doc.storage_key])
+    view = revised.view(1, 100).text
+    assert "[각주 f1]" in view and "(각주 f1) 출처: 2024년 사업보고서" in view
+    assert "(그림 g2 · 3.0×1.5cm · 대체 글자 '회사 로고')" in view
+    assert "(바닥글 1) 1 / 1" in view and "(목차) 지역별 매출" in view
+    assert revised.properties()["title"] == "2024 하반기 영업 보고"
